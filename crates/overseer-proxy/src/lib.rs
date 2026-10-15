@@ -2,13 +2,14 @@
 //! servers that send no CORS headers, such as screeps.com.
 //!
 //! `overseer_core::ServerUrl` derives every address from one base URL (`api/…`,
-//! `room-history/…`, `socket/websocket`), so a client pointed at the proxy's URL works unchanged.
+//! `room-history…`, `socket/websocket`), so a client pointed at the proxy's URL works unchanged.
 //! The proxy forwards exactly these paths to its one upstream base and nothing else:
 //!
 //! | Path | Forwarding |
 //! |---|---|
 //! | `api/*` | HTTP; method, query and body unchanged |
 //! | `room-history/*` | HTTP; `Content-Encoding` passes through (gzip history files) |
+//! | `room-history` | HTTP; query unchanged (single-world servers: `?room=…&time=…`) |
 //! | `socket/websocket` | WebSocket upgrade; frames relayed in both directions |
 //!
 //! A path prefix of the upstream base is kept: with `https://screeps.com/season/`,

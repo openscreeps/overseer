@@ -21,7 +21,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use url::Url;
 
-/// Forwards `api/*`, `room-history/*` and `socket/websocket` to one Screeps server, so that
+/// Forwards `api/*`, `room-history[/*]` and `socket/websocket` to one Screeps server, so that
 /// browser builds of overseer can reach servers without CORS support (such as screeps.com).
 /// The operator of a proxy sees every token passing through it: run your own.
 #[derive(Debug, Parser)]

@@ -1,4 +1,4 @@
-//! Forwarding `api/*` and `room-history/*` requests.
+//! Forwarding `api/*`, `room-history/*` and `room-history` requests.
 
 use std::io;
 

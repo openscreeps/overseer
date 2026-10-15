@@ -298,6 +298,26 @@ async fn a_path_prefix_of_the_upstream_is_kept() {
 }
 
 #[tokio::test]
+async fn single_world_history_by_query_is_forwarded() {
+    let upstream = Upstream::start("/").await;
+    let proxy = proxy(&upstream.base, None, &[]).await;
+    let history = client()
+        .get(proxy.url().join("room-history?room=W1N1&time=100").unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(history.status(), StatusCode::OK);
+    let lookalike = client()
+        .get(proxy.url().join("room-historyx?room=W1N1").unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lookalike.status(), StatusCode::NOT_FOUND);
+    assert_eq!(upstream.targets(), ["/room-history?room=W1N1&time=100"]);
+    proxy.shutdown().await;
+}
+
+#[tokio::test]
 async fn statuses_and_error_bodies_pass_through() {
     let upstream = Upstream::start("/").await;
     let proxy = proxy(&upstream.base, None, &[]).await;

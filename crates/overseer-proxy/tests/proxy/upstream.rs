@@ -194,7 +194,7 @@ async fn respond(shared: &Arc<Shared>, request: Request<Incoming>) -> Response<F
             .insert(http::header::LOCATION, location.parse().unwrap());
         return response;
     }
-    if route.starts_with("room-history/") {
+    if route == "room-history" || route.starts_with("room-history/") {
         let mut response = Response::new(Full::new(Bytes::from_static(HISTORY)));
         let headers = response.headers_mut();
         headers.insert("content-type", "application/json".parse().unwrap());

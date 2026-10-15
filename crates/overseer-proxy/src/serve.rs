@@ -169,7 +169,7 @@ pub(crate) fn millis(started: Instant) -> u64 {
 /// What a path is.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
-    /// `api/*` or `room-history/*`.
+    /// `api/*`, `room-history/*` or `room-history` (single-world history, by query).
     Forward,
     /// `socket/websocket`.
     Socket,
@@ -187,6 +187,8 @@ impl Route {
             Self::Socket
         } else if path == DISCOVERY_PATH {
             Self::Discovery
+        } else if path == "/room-history" {
+            Self::Forward
         } else if path.starts_with("/api/") || path.starts_with("/room-history/") {
             if path.contains('\\') || path.split('/').any(is_dot_segment) {
                 Self::Rejected
@@ -294,6 +296,8 @@ mod tests {
             Route::of("/room-history/shard0/W1N1/100.json"),
             Route::Forward
         );
+        assert_eq!(Route::of("/room-history"), Route::Forward);
+        assert_eq!(Route::of("/room-historyx"), Route::Static);
         assert_eq!(Route::of("/socket/websocket"), Route::Socket);
         assert_eq!(Route::of("/overseer-proxy.json"), Route::Discovery);
         assert_eq!(Route::of("/api"), Route::Static);
