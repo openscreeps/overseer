@@ -6,7 +6,7 @@ mod rate_limit;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use http::HeaderValue;
 use overseer_core::api::{
@@ -17,6 +17,7 @@ use reqwest_websocket::{Upgrade, WebSocket};
 
 pub use rate_limit::{EndpointRateLimit, RateLimitPolicy};
 
+use crate::rt::{SystemTime, sleep};
 use crate::socket::{ReconnectPolicy, Socket};
 use crate::{Error, USER_AGENT, World};
 use rate_limit::RateLimits;
@@ -34,6 +35,8 @@ pub struct Client {
 struct Inner {
     http: reqwest::Client,
     server: ServerUrl,
+    /// Sent natively; browsers set their own.
+    #[cfg(not(target_arch = "wasm32"))]
     user_agent: HeaderValue,
     /// Server, current token and server password. Locked only to copy or update it, never
     /// across an `.await`.
@@ -208,16 +211,10 @@ impl Client {
 
     /// Opens a WebSocket to the server's socket endpoint.
     pub(crate) async fn open(&self) -> Result<WebSocket, Error> {
-        Ok(self
-            .inner
-            .http
-            .get(self.inner.server.socket().clone())
-            .header(http::header::USER_AGENT, self.inner.user_agent.clone())
-            .upgrade()
-            .send()
-            .await?
-            .into_websocket()
-            .await?)
+        let request = self.inner.http.get(self.inner.server.socket().clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let request = request.header(http::header::USER_AGENT, self.inner.user_agent.clone());
+        Ok(request.upgrade().send().await?.into_websocket().await?)
     }
 
     pub(crate) fn reconnect_policy(&self) -> &ReconnectPolicy {
@@ -282,7 +279,7 @@ impl Client {
             (&result, &self.inner.rate_limit)
             && let Some(wait) = policy.retry_delay(limit.as_ref(), SystemTime::now())
         {
-            tokio::time::sleep(wait).await;
+            sleep(wait).await;
             return self.attempt(endpoint).await;
         }
         (used, result)
@@ -316,7 +313,12 @@ impl Client {
         session: &mut api::Session,
         endpoint: &E,
     ) -> Result<Reply<E::Response>, Error> {
+        #[cfg_attr(
+            target_arch = "wasm32",
+            expect(unused_mut, reason = "browsers set `User-Agent` themselves")
+        )]
         let mut request = reqwest::Request::try_from(session.request(endpoint)?)?;
+        #[cfg(not(target_arch = "wasm32"))]
         request
             .headers_mut()
             .insert(http::header::USER_AGENT, self.inner.user_agent.clone());
@@ -391,7 +393,8 @@ impl ClientBuilder {
 
     /// Uses a caller-configured `reqwest` client. It must allow HTTP/1.1 for socket upgrades and
     /// should not follow redirects (tokens must never follow a redirect). The default client is
-    /// HTTP/1.1-only, follows no redirects and has a 10 s connect timeout.
+    /// HTTP/1.1-only, follows no redirects and has a 10 s connect timeout; in browsers it is a
+    /// plain `fetch` client, and redirects, timeouts and the HTTP version are the browser's.
     pub fn http_client(mut self, http: reqwest::Client) -> Self {
         self.http = Some(http);
         self
@@ -406,6 +409,9 @@ impl ClientBuilder {
 
     /// Interval of socket keep-alive pings (default 30 s); `None` disables them. A connection
     /// that receives no frame for two intervals is considered dead and reconnected.
+    ///
+    /// Ignored in browsers: their `WebSocket` answers the server's pings but cannot send any,
+    /// and reports a dead connection as closed.
     pub const fn keep_alive(mut self, interval: Option<Duration>) -> Self {
         self.keep_alive = interval;
         self
@@ -419,7 +425,8 @@ impl ClientBuilder {
     }
 
     /// The `User-Agent` of every request and socket upgrade (default [`USER_AGENT`]); it
-    /// replaces one configured on a custom `reqwest` client.
+    /// replaces one configured on a custom `reqwest` client. Validated, but not sent, in
+    /// browsers: they forbid scripts to set `User-Agent`.
     pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = Some(user_agent.into());
         self
@@ -440,19 +447,19 @@ impl ClientBuilder {
     /// [`Error::Http`] when the default `reqwest` client's TLS backend cannot be initialised.
     ///
     /// TLS uses rustls with the `ring` provider, installed as the process default unless the
-    /// application installed another provider first.
+    /// application installed another provider first. In browsers the browser does TLS.
     pub fn build(self) -> Result<Client, Error> {
         // Err only means a provider is already installed, which then stays in use.
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = rustls::crypto::ring::default_provider().install_default();
         let user_agent = HeaderValue::try_from(self.user_agent.as_deref().unwrap_or(USER_AGENT))
             .map_err(|error| RequestError::Http(error.into()))?;
+        // Browsers send their own `User-Agent`.
+        #[cfg(target_arch = "wasm32")]
+        let _ = user_agent;
         let http = match self.http {
             Some(http) => http,
-            None => reqwest::Client::builder()
-                .http1_only()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
-                .build()?,
+            None => default_http()?,
         };
         let tokens = tokio::sync::watch::Sender::new(self.token.clone());
         let mut session = api::Session::new(self.server.clone(), self.token);
@@ -461,6 +468,7 @@ impl ClientBuilder {
             inner: Arc::new(Inner {
                 http,
                 server: self.server,
+                #[cfg(not(target_arch = "wasm32"))]
                 user_agent,
                 session: Mutex::new(session),
                 tokens,
@@ -476,4 +484,22 @@ impl ClientBuilder {
             }),
         })
     }
+}
+
+/// The default HTTP client: HTTP/1.1 only (socket upgrades), no redirects (tokens must never
+/// follow one) and a 10 s connect timeout.
+#[cfg(not(target_arch = "wasm32"))]
+fn default_http() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .http1_only()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+}
+
+/// The default HTTP client in browsers: `fetch`, whose redirects, timeouts and HTTP version
+/// are the browser's.
+#[cfg(target_arch = "wasm32")]
+fn default_http() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder().build()
 }

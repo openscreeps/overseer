@@ -16,7 +16,7 @@ use crate::Error;
 /// module names that are empty or start with `$`, `.`, `/` or `\` (dotfiles such as
 /// `.eslintrc.js`). Extensions are matched case-sensitively.
 ///
-/// Runs on tokio's blocking thread pool.
+/// Runs on tokio's blocking thread pool. Native-only: browsers have no file system.
 ///
 /// # Errors
 ///
@@ -39,7 +39,7 @@ pub async fn read_dir(dir: impl AsRef<Path>) -> Result<Modules, Error> {
 /// case-insensitive file systems (the Windows and macOS defaults) would store them in one
 /// file.
 ///
-/// Runs on tokio's blocking thread pool.
+/// Runs on tokio's blocking thread pool. Native-only: browsers have no file system.
 ///
 /// # Errors
 ///

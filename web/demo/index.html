@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>overseer web demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; }
+    form { display: grid; grid-template-columns: max-content 22rem; gap: 0.4rem 0.8rem; }
+    #log { font-family: ui-monospace, monospace; white-space: pre-wrap; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>overseer web demo</h1>
+  <!-- Built by `cargo xtask web-demo` into target/web-demo/; serve that directory over HTTP. -->
+  <form id="connect">
+    <label for="server">Server URL</label>
+    <input id="server" value="http://localhost:21025/" required>
+    <label for="email">E-mail</label>
+    <input id="email" autocomplete="username">
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <label for="token">Token (instead of e-mail and password)</label>
+    <input id="token" type="password">
+    <label for="room">Room</label>
+    <input id="room" value="W1N1">
+    <label for="expression">Console expression</label>
+    <input id="expression" value="Game.time">
+    <span></span>
+    <button>Connect</button>
+  </form>
+  <div id="log"></div>
+  <script type="module">
+    import init, { run } from './overseer_web_demo.js';
+
+    await init();
+    const form = document.getElementById('connect');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      form.querySelector('button').disabled = true;
+      const value = (id) => document.getElementById(id).value.trim();
+      try {
+        await run(value('server'), value('email'), document.getElementById('password').value,
+          value('token'), value('room'), value('expression'));
+      } catch (error) {
+        const line = document.createElement('div');
+        line.textContent = `error: ${error}`;
+        document.getElementById('log').append(line);
+        console.error(error);
+        form.querySelector('button').disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

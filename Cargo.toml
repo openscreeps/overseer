@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = ["crates/*", "web/demo", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 overseer-core = { path = "crates/overseer-core" }
 overseer-net = { path = "crates/overseer-net" }
+overseer = { path = "crates/overseer" }
 async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
 base64 = "0.23"
 flate2 = "1.1"
@@ -27,6 +28,11 @@ serde_json = "1"
 thiserror = "2"
 tokio = "1"
 url = "2.5"
+# Browser (wasm32) runtime: timers on `setTimeout`, tasks on the browser's event loop.
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4"
+wasmtimer = { version = "0.4", default-features = false, features = ["tokio"] }
+web-sys = "0.3"
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -2 }

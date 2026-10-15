@@ -7,9 +7,12 @@
 //!   (needs `node`).
 //! - `codegen [--check]` generates the typed HTTP and socket APIs of `overseer-core` from
 //!   `reference/`; `--check` fails instead of writing when the generated files are stale.
+//! - `web-demo` builds the browser demo (`web/demo`) into the static bundle
+//!   `target/web-demo/` (needs the `wasm-bindgen` CLI matching the locked crate version).
 
 mod codegen;
 mod vendor;
+mod web_demo;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,8 +20,7 @@ use std::process::ExitCode;
 /// Errors are reported as text; every command is a one-shot developer tool.
 type Error = Box<dyn std::error::Error>;
 
-const USAGE: &str =
-    "usage: cargo xtask codegen [--check] | cargo xtask vendor [<openapi checkout>]";
+const USAGE: &str = "usage: cargo xtask codegen [--check] | cargo xtask vendor [<openapi checkout>] | cargo xtask web-demo";
 
 fn main() -> ExitCode {
     let root = workspace_root();
@@ -29,6 +31,7 @@ fn main() -> ExitCode {
         ["codegen", "--check"] => codegen::run(&root, true),
         ["vendor"] => vendor::run(&root, &root.join("../openapi")),
         ["vendor", checkout] => vendor::run(&root, Path::new(checkout)),
+        ["web-demo"] => web_demo::run(&root),
         _ => Err(USAGE.into()),
     };
     match result {

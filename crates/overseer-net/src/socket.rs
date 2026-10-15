@@ -1,6 +1,7 @@
 //! The socket driver: connection, keep-alive, reconnects, re-authentication and the event
 //! stream.
 
+mod keep_alive;
 mod subscribe;
 mod view;
 
@@ -17,12 +18,13 @@ use futures_util::{Sink, Stream, StreamExt};
 use overseer_core::Token;
 use overseer_core::api::Terrain;
 use overseer_core::socket::{Channel, Event, SocketError, SocketSession};
-use reqwest_websocket::{Bytes, CloseCode, Message, WebSocket};
-use tokio::time::{Instant, Sleep, sleep_until};
+use reqwest_websocket::{CloseCode, Message, WebSocket};
 
 pub use view::RoomView;
 
+use crate::rt::{BoxFuture, Instant, MaybeSend, Sleep, sleep_until};
 use crate::{Client, Error, World};
+use keep_alive::KeepAlive;
 
 /// How a dropped socket connection is re-established.
 ///
@@ -100,7 +102,8 @@ pub enum DisconnectReason {
     Ended,
     /// Reading or writing failed.
     Transport(Error),
-    /// Nothing was received for two keep-alive intervals.
+    /// Nothing was received for two keep-alive intervals. Never reported in browsers, which
+    /// send no keep-alive pings.
     KeepAliveTimeout,
     /// A connection attempt failed.
     ConnectFailed(Error),
@@ -130,10 +133,10 @@ pub struct Socket {
 }
 
 /// A boxed future, kept across polls.
-struct Task<T>(Pin<Box<dyn Future<Output = T> + Send>>);
+struct Task<T>(BoxFuture<'static, T>);
 
 impl<T> Task<T> {
-    fn new(future: impl Future<Output = T> + Send + 'static) -> Self {
+    fn new(future: impl Future<Output = T> + MaybeSend + 'static) -> Self {
         Self(Box::pin(future))
     }
 
@@ -176,25 +179,18 @@ enum Link {
 #[derive(Debug)]
 struct Connection {
     websocket: WebSocket,
-    /// When the last frame arrived (or the connection opened).
-    last_frame: Instant,
-    /// A ping went out since `last_frame`.
-    pinged: bool,
-    /// A keep-alive ping waits for the connection to take it.
-    ping_due: bool,
+    keep_alive: KeepAlive,
     /// Frames were handed to the connection but not flushed yet.
     unflushed: bool,
 }
 
 impl Connection {
-    fn new(websocket: WebSocket) -> Box<Self> {
-        Box::new(Self {
+    fn new(websocket: WebSocket) -> Self {
+        Self {
             websocket,
-            last_frame: Instant::now(),
-            pinged: false,
-            ping_due: false,
+            keep_alive: KeepAlive::new(),
             unflushed: false,
-        })
+        }
     }
 }
 
@@ -213,7 +209,7 @@ impl Socket {
             client,
             world,
             link: Link::Open {
-                connection: Connection::new(websocket),
+                connection: Box::new(Connection::new(websocket)),
                 announced: false,
             },
             timer: Box::pin(sleep_until(Instant::now())),
@@ -372,7 +368,7 @@ impl Socket {
                             self.sent_token = self.client.token();
                             self.session.reconnect(self.sent_token.clone());
                             self.link = Link::Open {
-                                connection: Connection::new(websocket),
+                                connection: Box::new(Connection::new(websocket)),
                                 announced: true,
                             };
                             return Poll::Ready(Ok(Some(SocketEvent::Connected)));
@@ -466,8 +462,7 @@ fn poll_drive(
                 return Poll::Ready(Step::Down(DisconnectReason::Transport(error.into())));
             }
             Poll::Ready(Some(Ok(message))) => {
-                connection.last_frame = Instant::now();
-                connection.pinged = false;
+                connection.keep_alive.received();
                 match message {
                     Message::Text(frame) => match session.handle_frame(&frame) {
                         Ok(Some(event)) => {
@@ -486,30 +481,19 @@ fn poll_drive(
                             reason,
                         }));
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
                     Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                    // Browsers answer pings themselves and deliver neither pings nor pongs.
+                    #[cfg(target_arch = "wasm32")]
+                    _ => {}
                 }
                 continue;
             }
             Poll::Pending => {}
         }
-        let Some(interval) = keep_alive else {
-            return Poll::Pending;
-        };
-        let deadline = connection.last_frame
-            + if connection.pinged {
-                interval * 2
-            } else {
-                interval
-            };
-        if timer.deadline() != deadline {
-            timer.as_mut().reset(deadline);
-        }
-        ready!(timer.as_mut().poll(cx));
-        if connection.pinged {
+        if !ready!(connection.keep_alive.poll(keep_alive, timer, cx)) {
             return Poll::Ready(Step::Down(DisconnectReason::KeepAliveTimeout));
         }
-        connection.pinged = true;
-        connection.ping_due = true;
     }
 }
 
@@ -521,10 +505,13 @@ fn poll_send(
     cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
     let mut websocket = Pin::new(&mut connection.websocket);
-    if connection.ping_due {
+    #[cfg(not(target_arch = "wasm32"))]
+    if connection.keep_alive.ping_due {
         ready!(Sink::<Message>::poll_ready(websocket.as_mut(), cx))?;
-        websocket.as_mut().start_send(Message::Ping(Bytes::new()))?;
-        connection.ping_due = false;
+        websocket
+            .as_mut()
+            .start_send(Message::Ping(reqwest_websocket::Bytes::new()))?;
+        connection.keep_alive.ping_due = false;
         connection.unflushed = true;
     }
     loop {

@@ -9,9 +9,9 @@ use overseer_net::core::Token;
 use overseer_net::core::api::types::AuthMeResponse;
 use overseer_net::core::api::{Auth as EndpointAuth, Endpoint};
 use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::rt::JoinHandle;
 use overseer_net::{Client, World};
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::task::JoinHandle;
 
 use crate::live::{self, Command, Feed, Registry, Watch};
 use crate::{
@@ -106,7 +106,13 @@ impl Overseer {
     /// (`GET /api/version`, and `GET /api/auth/me` with a token or after signing in with
     /// credentials), opens the socket and spawns the background task that drives it.
     ///
-    /// Must be called inside a tokio runtime.
+    /// Natively, must be called inside a tokio runtime with the time driver enabled (for
+    /// reconnect backoff, keep-alive and rate-limit waits); the background task is a tokio
+    /// task. In browsers (`wasm32-unknown-unknown`) no runtime is needed: call it from a
+    /// future the browser runs (`wasm_bindgen_futures::spawn_local`, an exported `async fn`
+    /// or [`overseer_net::rt::spawn`]); the background task runs on the browser's event loop
+    /// and timers on `setTimeout`. See [`overseer_net`]'s "Native and web" for what the
+    /// browser handles itself (CORS, keep-alive, redirects, `User-Agent`).
     ///
     /// # Errors
     ///

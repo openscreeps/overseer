@@ -9,9 +9,9 @@
 //!
 //! # Connect
 //!
-//! [`Overseer::connect`] must be called inside a tokio runtime: it builds the client from a
-//! [`ServerProfile`], discovers the world (signing in with credentials), opens the socket and
-//! spawns the task that drives it. The handle is cheap to clone.
+//! [`Overseer::connect`] builds the client from a [`ServerProfile`], discovers the world
+//! (signing in with credentials), opens the socket and spawns the task that drives it. The
+//! handle is cheap to clone.
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), overseer::Error> {
@@ -25,7 +25,8 @@
 //! };
 //! let overseer = Overseer::connect(profile).await?;
 //! let mut tokens = overseer.tokens();
-//! tokio::spawn(async move {
+//! // `rt::spawn` is `tokio::spawn` natively and the browser's event loop on the web.
+//! overseer::net::rt::spawn(async move {
 //!     // Persist every rotated session token.
 //!     while tokens.changed().await.is_ok() {
 //!         let _token = tokens.borrow_and_update().clone();
@@ -35,6 +36,23 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Native and web
+//!
+//! The crate builds natively and for browsers (`wasm32-unknown-unknown`), so one app can run on
+//! desktop, mobile and the web:
+//!
+//! - Natively, [`Overseer::connect`] must be called inside a tokio runtime with the time driver;
+//!   the background task is a tokio task, and handles and operation futures are `Send`.
+//! - In browsers there is no tokio runtime: call it from a future the browser runs (an exported
+//!   `async fn` of `wasm-bindgen`, `wasm_bindgen_futures::spawn_local` or
+//!   [`net::rt::spawn`]). The background task runs on the browser's event loop and timers on
+//!   `setTimeout`. Operation futures are not `Send` there (browser I/O is thread-bound).
+//! - Browser differences: no code directory sync ([`Code::pull_dir`] and friends are
+//!   native-only), the server must allow the page's origin (CORS) and expose `X-Token`, socket
+//!   keep-alive pings are the browser's, and redirects, timeouts and `User-Agent` are the
+//!   browser's (see [`net`]'s "Native and web"). [`ConsoleEntry::received`] is a
+//!   [`net::rt::SystemTime`], [`std::time::SystemTime`] natively.
 //!
 //! # Live data
 //!

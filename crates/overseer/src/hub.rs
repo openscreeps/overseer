@@ -1,23 +1,24 @@
 //! The background task: owns the socket, applies subscription commands and delivers events.
 
 use overseer_net::core::socket::{Channel, Event, Payload};
+use overseer_net::rt::{self, JoinHandle};
 use overseer_net::{Socket, SocketEvent};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 
 use crate::live::{Command, Registry};
 use crate::rooms::{RoomSink, RoomSnapshot};
 use crate::{ConnectionStatus, Notice};
 
-/// Spawns the task driving `socket` until shutdown or until the socket gives up reconnecting.
+/// Spawns the task driving `socket` until shutdown or until the socket gives up reconnecting:
+/// a tokio task natively, a task on the browser's event loop in WebAssembly.
 pub(crate) fn spawn(
     socket: Socket,
     registry: Arc<Registry>,
     commands: mpsc::UnboundedReceiver<Command>,
     status: watch::Sender<ConnectionStatus>,
 ) -> JoinHandle<()> {
-    tokio::spawn(
+    rt::spawn(
         Hub {
             socket,
             registry,

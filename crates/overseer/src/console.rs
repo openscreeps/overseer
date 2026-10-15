@@ -1,9 +1,9 @@
 //! The live console: output of the signed-in user's runtime and console commands.
 
 use std::collections::VecDeque;
-use std::time::SystemTime;
 
 use overseer_net::core::socket::{Channel, Payload, UserConsole};
+use overseer_net::rt::SystemTime;
 use tokio::sync::broadcast;
 
 use crate::live::{FEED_CAPACITY, Feed, Sink};
@@ -38,7 +38,8 @@ pub struct ConsoleEntry {
     /// The text as sent: console output is HTML (see [`Self::plain_text`]); commands are the
     /// expression.
     pub text: String,
-    /// When the line was received (or the command sent).
+    /// When the line was received (or the command sent): [`std::time::SystemTime`] natively,
+    /// the browser clock's equivalent in WebAssembly ([`overseer_net::rt::SystemTime`]).
     pub received: SystemTime,
 }
 
@@ -285,11 +286,10 @@ fn decode_reference(name: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
-
     use overseer_net::core::socket::{
         Payload, UserConsole, UserConsoleError, UserConsoleOutput, UserConsoleOutputMessages,
     };
+    use overseer_net::rt::SystemTime;
     use tokio::sync::broadcast;
 
     use super::{ConsoleEntry, ConsoleKind, ConsoleSink, HISTORY_CAPACITY};

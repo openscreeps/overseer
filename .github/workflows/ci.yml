@@ -21,4 +21,5 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo check -p overseer-core --target wasm32-unknown-unknown
+      - run: cargo clippy -p overseer-net -p overseer -p overseer-web-demo --target wasm32-unknown-unknown -- -D warnings
       - run: cargo doc --workspace --no-deps

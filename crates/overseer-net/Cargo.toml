@@ -15,11 +15,19 @@ reqwest = { workspace = true, features = ["gzip"] }
 reqwest-websocket.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The crypto provider for reqwest's rustls (see `ClientBuilder::build`).
 rustls.workspace = true
+# `rt` for `rt::spawn`, `time` for the timers of `rt`.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Browsers: no tokio runtime; tasks run on the browser's event loop and timers on
+# `setTimeout` (see `rt`).
+tokio = { workspace = true, features = ["macros", "sync"] }
+wasm-bindgen-futures.workspace = true
+wasmtimer.workspace = true
 
 [dev-dependencies]
 async-tungstenite.workspace = true

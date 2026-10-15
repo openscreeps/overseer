@@ -1,0 +1,23 @@
+[package]
+name = "overseer-web-demo"
+description = "Browser demo of overseer on wasm32: connect, connection status, a live room and the console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Inert on native targets, so workspace commands build it; the demo itself is browser-only.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+overseer.workspace = true
+# `broadcast::error::RecvError` of the notices.
+tokio = { workspace = true, features = ["sync"] }
+wasm-bindgen.workspace = true
+# Runs the exported `async fn` as a JavaScript `Promise`.
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["Document", "Element", "Node", "Window", "console"] }
+
+[lints]
+workspace = true

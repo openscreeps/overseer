@@ -13,7 +13,14 @@ futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rt` for the blocking file work of code directory sync.
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Browsers: tasks and timers come from `overseer_net::rt`.
+tokio = { workspace = true, features = ["macros", "sync"] }
 
 [dev-dependencies]
 async-tungstenite.workspace = true

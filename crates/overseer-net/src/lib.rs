@@ -166,10 +166,32 @@
 //! for display.
 //!
 //! No total request timeout is applied (the socket upgrade shares the client); wrap calls in
-//! [`tokio::time::timeout`] where needed.
+//! [`rt::timeout`] where needed.
+//!
+//! # Native and web
+//!
+//! The crate builds natively and for browsers (`wasm32-unknown-unknown`); [`rt`] provides the
+//! clocks, timers and tasks of either. Natively it runs inside a tokio runtime (with the time
+//! driver) and its futures and handles are `Send`. In browsers it runs on the browser's event
+//! loop, its futures are not `Send`, and the browser owns part of the transport:
+//!
+//! - HTTP uses `fetch`: redirects (followed), timeouts, proxies and TLS are the browser's, so
+//!   the native client's options (HTTP/1.1 only, no redirects, 10 s connect timeout) do not
+//!   apply, and `User-Agent` is not sent ([`ClientBuilder::user_agent`] is ignored; browsers
+//!   forbid it). The server must allow the page's origin (CORS) and expose `X-Token`, or
+//!   rotated session tokens are lost; response headers it does not expose (such as
+//!   `X-RateLimit-*`) are invisible, so [`Client::rate_limits`] stays empty and HTTP 429 is
+//!   retried as the server-wide limit. Private servers built from `openscreeps/server` allow
+//!   every origin and expose `X-Token`. The screeps.com HTTP API sends no CORS headers, so
+//!   browsers block it (its socket accepts any origin): a web build reaches screeps.com through
+//!   a same-origin proxy.
+//! - The socket uses the browser's `WebSocket`, which answers protocol pings itself but cannot
+//!   send them: [`ClientBuilder::keep_alive`] is ignored and a dead connection is noticed when
+//!   the browser reports it closed. Reconnects, resubscriptions and token sharing work the same.
 
 mod client;
 mod history;
+pub mod rt;
 mod socket;
 mod world;
 

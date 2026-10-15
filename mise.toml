@@ -15,8 +15,15 @@ description = "Workspace test suite"
 run = "cargo test --workspace"
 
 [tasks.portable]
-description = "overseer-core stays sans-I/O: it must build for wasm32"
-run = "cargo check -p overseer-core --target wasm32-unknown-unknown"
+description = "overseer-core stays sans-I/O, and the client stack and web demo build for browsers (wasm32)"
+run = [
+  "cargo check -p overseer-core --target wasm32-unknown-unknown",
+  "cargo clippy -p overseer-net -p overseer -p overseer-web-demo --target wasm32-unknown-unknown -- -D warnings",
+]
+
+[tasks.web-demo]
+description = "Build the browser demo bundle into target/web-demo/ (serve it over HTTP)"
+run = "cargo xtask web-demo"
 
 [tasks.ci]
 description = "Everything CI runs, in order"

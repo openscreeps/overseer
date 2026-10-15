@@ -17,7 +17,7 @@ pub enum Error {
     /// reconnecting.
     #[error("the session is closed")]
     Closed,
-    /// Reading or writing a local file failed (code directories).
+    /// Reading or writing a local file failed (code directories; native-only).
     #[error("{}: {source}", path.display())]
     Io {
         /// The file or directory.

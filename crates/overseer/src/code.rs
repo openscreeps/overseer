@@ -4,11 +4,15 @@
 //! simulator ([`CodeTarget`]). Code directories use the official desktop client's layout (one
 //! `<module>.js` or `<module>.wasm` file per module): [`read_dir`] and [`write_dir`] convert
 //! between a directory and [`Modules`], [`Code::pull_dir`] and [`Code::push_dir`] sync a
-//! directory with a branch.
+//! directory with a branch. Directory sync is native-only: browsers (`wasm32-unknown-unknown`)
+//! have no file system, so a web app reads and writes [`Modules`] itself (file pickers,
+//! downloads, browser storage).
 
+#[cfg(not(target_arch = "wasm32"))]
 mod dir;
 mod modules;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use overseer_net::core::api::endpoints;
@@ -19,6 +23,7 @@ use overseer_net::core::api::types::{
 use overseer_net::core::socket::types::{UserActiveBranchActiveName, UserCodeHash};
 use overseer_net::core::socket::{Channel, Payload};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use dir::{read_dir, write_dir};
 pub use modules::{InvalidWasm, ModuleKind, Modules};
 
@@ -290,6 +295,9 @@ impl Code {
     ///
     /// The errors of [`Self::modules`] and [`write_dir`]; the directory is untouched when the
     /// branch cannot be fetched or holds a module [`write_dir`] rejects.
+    ///
+    /// Native-only: browsers have no file system.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn pull_dir(&self, branch: &str, dir: impl AsRef<Path>) -> Result<Modules, Error> {
         let modules = self.modules(branch).await?;
         write_dir(dir, &modules).await?;
@@ -302,6 +310,9 @@ impl Code {
     /// # Errors
     ///
     /// The errors of [`read_dir`] and [`Self::set_modules`].
+    ///
+    /// Native-only: browsers have no file system.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn push_dir(&self, branch: &str, dir: impl AsRef<Path>) -> Result<Modules, Error> {
         self.ready()?;
         let modules = read_dir(dir).await?;

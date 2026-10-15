@@ -1,10 +1,12 @@
 //! Rate limits: the retry policy for HTTP 429 and the latest limit of each endpoint.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use http::Method;
 use overseer_core::api::{Endpoint, RateLimit};
+
+use crate::rt::{SystemTime, UNIX_EPOCH};
 
 /// How requests rejected with HTTP 429 ([`ApiError::RateLimited`]) are retried.
 ///
@@ -91,11 +93,12 @@ impl RateLimits {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::Duration;
 
     use overseer_core::api::RateLimit;
 
     use super::RateLimitPolicy;
+    use crate::rt::UNIX_EPOCH;
 
     const fn limit(reset: u64) -> RateLimit {
         RateLimit {
