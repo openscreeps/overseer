@@ -1,18 +1,19 @@
-//! The world features against an in-process server: room actions, history playback and map
-//! views.
+//! The world features against an in-process server: room actions, history playback, map
+//! views and the world map.
 
 mod history;
 mod map;
 mod rooms;
 #[path = "../session/server.rs"]
 mod server;
+mod world_map;
 
 use std::time::Duration;
 
 use overseer::core::Token;
 use overseer::{Auth, Overseer, ServerProfile};
 
-use server::{Request, Server, Ws};
+use server::{Request, Response, Server, Ws};
 
 /// `GET /api/version` of a single-world server with history chunks of 20 ticks.
 const VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":20,"renderer":{"resources":{},"metadata":{}}}}"#;
@@ -41,14 +42,14 @@ fn query<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
 
 /// Connects user `u1` with token `t1` to a server serving `routes` (which also answers
 /// `/api/version` and `/api/auth/me`) and completes the socket handshake.
-async fn connect(
-    routes: impl Fn(&Request) -> (u16, String) + Send + Sync + 'static,
+async fn connect<R: Into<Response>>(
+    routes: impl Fn(&Request) -> R + Send + Sync + 'static,
 ) -> (Server, Overseer, Ws) {
     let mut server = Server::start(
         move |request: &Request| match request.path.as_str() {
-            "/api/version" => (200, VERSION.to_owned()),
-            "/api/auth/me" if request.token.is_some() => (200, ME.to_owned()),
-            _ => routes(request),
+            "/api/version" => (200, VERSION.to_owned()).into(),
+            "/api/auth/me" if request.token.is_some() => (200, ME.to_owned()).into(),
+            _ => routes(request).into(),
         },
         |_| true,
     )

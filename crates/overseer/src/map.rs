@@ -1,18 +1,29 @@
-//! The world map: room map views, map statistics, terrain, world size and map visuals.
+//! The world map: the continuous [`WorldMap`], room map views, map statistics, terrain, world
+//! size and map visuals.
 
 mod coord;
+mod rect;
+mod stat;
 mod view;
+mod world;
 
 pub use coord::RoomCoord;
+pub use overseer_net::core::api::Terrain;
+pub use overseer_net::core::socket::types::RoomMap;
+pub use rect::RoomRect;
+pub use stat::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
 pub use view::{MapView, ViewChange};
+pub use world::{
+    DetailState, Interest, MINIMAP_CAP, STATS_BATCH_SECTORS, STATS_TTL, WorldEvent, WorldMap,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use overseer_net::core::api::endpoints;
 use overseer_net::core::api::types::{
     GameMapStatsResponse, GameRoomStatName, GameWorldSizeResponse,
 };
-use overseer_net::core::api::{Terrain, endpoints};
 use overseer_net::core::socket::types::MapVisualItem;
 use overseer_net::core::socket::{Channel, Payload};
 
@@ -39,7 +50,8 @@ impl MapStat {
     }
 }
 
-/// The world map: room map views, map statistics, terrain, world size and map visuals.
+/// The world map: the continuous [`WorldMap`], room map views, map statistics, terrain, world
+/// size and map visuals.
 ///
 /// Created by [`Overseer::map`]; cheap to clone. `shard` names a shard (`None`: the default
 /// shard); it is ignored by single-world servers. Room status is part of [`Self::stats`]

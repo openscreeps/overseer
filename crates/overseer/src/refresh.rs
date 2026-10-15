@@ -89,7 +89,7 @@ impl Refresh {
 }
 
 /// Resolves once the session is closed.
-async fn closed(status: &mut watch::Receiver<ConnectionStatus>) {
+pub(crate) async fn closed(status: &mut watch::Receiver<ConnectionStatus>) {
     // An error means the background task is gone, which also closes the session.
     let _ = status
         .wait_for(|status| *status == ConnectionStatus::Closed)

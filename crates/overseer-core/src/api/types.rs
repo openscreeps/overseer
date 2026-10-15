@@ -1863,6 +1863,63 @@ pub struct GameMapStatEntry {
     pub value: f64,
 }
 
+/// A decoration activated in the room (screeps.com decoration inventory). `decoration` names its definition in the response's top-level `decorations`; the official world map reads `_id`, `activatedAt`, `decoration` and `active`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GameMapStatsDecoration {
+    /// The `_id` property.
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The `activatedAt` property.
+    #[serde(rename = "activatedAt", skip_serializing_if = "Option::is_none")]
+    pub activated_at: Option<String>,
+    /// Values of the active decoration; `null` when inactive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<UserDecorationActivation>,
+    /// The `createdAt` property.
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    /// The `deactivatedAt` property.
+    #[serde(rename = "deactivatedAt", skip_serializing_if = "Option::is_none")]
+    pub deactivated_at: Option<String>,
+    /// Id of the decoration definition, a key of the response's `decorations`.
+    pub decoration: String,
+    /// The `user` property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<UserId>,
+}
+
+/// Definition of a decoration referenced by the rooms of a map-stats response. The official world map reads `type`, `graphics`, `tiling`, `foregroundUrl` and `floorForegroundUrl`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GameMapStatsDecorationDefinition {
+    /// The `_id` property.
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The `description` property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The `floorForegroundUrl` property.
+    #[serde(rename = "floorForegroundUrl", skip_serializing_if = "Option::is_none")]
+    pub floor_foreground_url: Option<String>,
+    /// The `foregroundUrl` property.
+    #[serde(rename = "foregroundUrl", skip_serializing_if = "Option::is_none")]
+    pub foreground_url: Option<String>,
+    /// The `graphics` property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<Vec<BTreeMap<String, serde_json::Value>>>,
+    /// Configurable properties keyed by name: `type`, `label`, `default`, `readonly` and, for ranges, `min`, `max` and `step`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub props: Option<BTreeMap<String, BTreeMap<String, serde_json::Value>>>,
+    /// The `rarityMultiplier` property.
+    #[serde(rename = "rarityMultiplier", skip_serializing_if = "Option::is_none")]
+    pub rarity_multiplier: Option<f64>,
+    /// The `tiling` property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tiling: Option<f64>,
+    /// The `type` property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+}
+
 /// The `GameMapStatsRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GameMapStatsRequest {
@@ -1879,6 +1936,9 @@ pub struct GameMapStatsRequest {
 /// The `GameMapStatsResponse` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GameMapStatsResponse {
+    /// Definitions of the decorations the rooms reference, keyed by decoration id (screeps.com).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decorations: Option<BTreeMap<String, GameMapStatsDecorationDefinition>>,
     /// Current game tick.
     #[serde(rename = "gameTime")]
     pub game_time: i64,
@@ -1891,12 +1951,18 @@ pub struct GameMapStatsResponse {
     pub users: GamePublicUsers,
 }
 
-/// Per-room map stats. Room-status fields are copied from the room document; `own`, `sign`, `safeMode` and `minerals0` come from room objects; the requested `statName` key (e.g. `energyHarvested8`) holds the ranking entry for that stat, typed by the community client as a single `{user, value}` object.
+/// Per-room map stats. Room-status fields are copied from the room document; `own`, `sign`, `safeMode` and `minerals0` come from room objects; screeps.com adds `isPowerEnabled` and `decorations`; the requested `statName` key (e.g. `energyHarvested8`) holds the ranking entry for that stat, typed by the community client as a single `{user, value}` object.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GameMapStatsRoom {
+    /// Decorations activated in the room (screeps.com); the official world map draws them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decorations: Option<Vec<GameMapStatsDecoration>>,
     /// System sign, typed by the community client only.
     #[serde(rename = "hardSign", skip_serializing_if = "Option::is_none")]
     pub hard_sign: Option<GameControllerSign>,
+    /// `true` when the room's controller has power enabled (screeps.com); absent otherwise.
+    #[serde(rename = "isPowerEnabled", skip_serializing_if = "Option::is_none")]
+    pub is_power_enabled: Option<bool>,
     /// The `minerals0` property.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub minerals0: Option<GameMapStatsRoomMinerals0>,

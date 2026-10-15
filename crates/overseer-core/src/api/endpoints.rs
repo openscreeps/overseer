@@ -621,7 +621,7 @@ impl Endpoint for GameHistoryShare {
 
 /// `POST /api/game/map-stats`: Get map statistics for rooms.
 ///
-/// Returns, for each requested room that exists, its status fields, controller ownership (`own`), sign, active safe mode, mineral (`minerals0`) and, for `<stat><interval>` stat names, the ranking of that statistic over the interval, plus the largest ranked value per stat (`statsMax`) and public profiles of every referenced user. Read-only. The official world map requests `owner0` below the closest zoom level and the selected layer stat (e.g. `energyHarvested8`) at the closest one, merges `stats` and `users` into its map state and sizes stat circles by `statsMax`.
+/// Returns, for each requested room that exists, its status fields, controller ownership (`own`), sign, active safe mode, mineral (`minerals0`) and, for `<stat><interval>` stat names, the ranking of that statistic over the interval, plus the largest ranked value per stat (`statsMax`) and public profiles of every referenced user. screeps.com also returns, per room, `isPowerEnabled` for power-enabled controllers and the activated `decorations`, whose definitions come in the top-level `decorations`. Read-only. The official world map requests `owner0` below the closest zoom level and the selected layer stat (e.g. `energyHarvested8`) at the closest one, merges `stats` and `users` into its map state, sizes stat circles by `statsMax` and draws the room decorations.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GameMapStats {
     /// The JSON request body.

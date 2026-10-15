@@ -119,7 +119,7 @@
 //! | [`Overseer::memory`] | Memory by path, segments, live path watches |
 //! | [`Overseer::rooms`] | live typed room snapshots, room information and actions: flags, construction sites, intents, spawn placement |
 //! | [`Overseer::history`] | room history playback |
-//! | [`Overseer::map`] | world map viewport, map statistics, batch terrain, room status, map visuals |
+//! | [`Overseer::map`] | the continuous world map ([`Map::world`]: overviews, terrain, live minimaps and live rooms of what the view needs, within the server's limits), map views, map statistics, batch terrain, room status, map visuals |
 //! | [`Overseer::messages`] | conversations, sending, read state, live new messages |
 //! | [`Overseer::market`] | orders, own orders, price statistics, money history |
 //! | [`Overseer::users`] | user lookup, rooms of a user, leaderboards, badges |
@@ -152,7 +152,7 @@ pub use console::{Console, ConsoleEntry, ConsoleKind};
 pub use error::Error;
 pub use history::{History, HistoryPlayer, Seek};
 pub use live::{Closed, Feed, Watch};
-pub use map::{Map, MapStat, MapView};
+pub use map::{Map, MapStat, MapView, WorldMap};
 pub use market::Market;
 pub use memory::Memory;
 pub use messages::Messages;
@@ -174,5 +174,5 @@ pub mod prelude {
         ServerProfile, Users, Watch,
     };
     pub use crate::{CodeTarget, Modules};
-    pub use crate::{FlagColor, HistoryPlayer, MapStat, MapView, Seek, StatInterval};
+    pub use crate::{FlagColor, HistoryPlayer, MapStat, MapView, Seek, StatInterval, WorldMap};
 }

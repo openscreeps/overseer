@@ -2401,7 +2401,7 @@
       "post": {
         "operationId": "gameMapStats",
         "summary": "Get map statistics for rooms",
-        "description": "Returns, for each requested room that exists, its status fields, controller ownership (`own`), sign, active safe mode, mineral (`minerals0`) and, for `<stat><interval>` stat names, the ranking of that statistic over the interval, plus the largest ranked value per stat (`statsMax`) and public profiles of every referenced user. Read-only. The official world map requests `owner0` below the closest zoom level and the selected layer stat (e.g. `energyHarvested8`) at the closest one, merges `stats` and `users` into its map state and sizes stat circles by `statsMax`.",
+        "description": "Returns, for each requested room that exists, its status fields, controller ownership (`own`), sign, active safe mode, mineral (`minerals0`) and, for `<stat><interval>` stat names, the ranking of that statistic over the interval, plus the largest ranked value per stat (`statsMax`) and public profiles of every referenced user. screeps.com also returns, per room, `isPowerEnabled` for power-enabled controllers and the activated `decorations`, whose definitions come in the top-level `decorations`. Read-only. The official world map requests `owner0` below the closest zoom level and the selected layer stat (e.g. `energyHarvested8`) at the closest one, merges `stats` and `users` into its map state, sizes stat circles by `statsMax` and draws the room decorations.",
         "tags": [
           "Game"
         ],
@@ -2471,8 +2471,17 @@
         "x-availability": {
           "screeps-com": "supported"
         },
+        "x-observations": [
+          {
+            "url": "https://screeps.com/api/game/map-stats",
+            "date": "2026-10-15",
+            "notes": "Authenticated `owner0` read of 100 shard3 rooms: some rooms carry `isPowerEnabled: true` and `decorations` (objects with string `_id`, `user`, `decoration`, an `active` values object and ISO date strings `createdAt`, `activatedAt`, `deactivatedAt`); the reply has a top-level `decorations` object keyed by decoration id whose definitions carry `_id`, `graphics`, `description`, `rarityMultiplier` and `props`. No account identifiers recorded."
+          }
+        ],
         "x-sources": [
           "https://screeps.com/a/app2/main.js?bust=1787842760865#L223538C46",
+          "https://screeps.com/a/app2/main.js?bust=1787842760865#L221237C33",
+          "https://screeps.com/a/app2/main.js?bust=1787842760865#L221241C46",
           "https://screeps.com/a/build.min.js?bust=1787842760865#L1C245743",
           "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/game.js#L186-L257",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsHttpClient.ts#L546-L556",
@@ -17585,6 +17594,92 @@
         ],
         "additionalProperties": true
       },
+      "GameMapStatsDecoration": {
+        "type": "object",
+        "description": "A decoration activated in the room (screeps.com decoration inventory). `decoration` names its definition in the response's top-level `decorations`; the official world map reads `_id`, `activatedAt`, `decoration` and `active`.",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserId"
+          },
+          "decoration": {
+            "type": "string",
+            "description": "Id of the decoration definition, a key of the response's `decorations`."
+          },
+          "active": {
+            "description": "Values of the active decoration; `null` when inactive.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserDecorationActivation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "activatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deactivatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "decoration"
+        ],
+        "additionalProperties": true
+      },
+      "GameMapStatsDecorationDefinition": {
+        "type": "object",
+        "description": "Definition of a decoration referenced by the rooms of a map-stats response. The official world map reads `type`, `graphics`, `tiling`, `foregroundUrl` and `floorForegroundUrl`.",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "graphics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "tiling": {
+            "type": "number"
+          },
+          "foregroundUrl": {
+            "type": "string"
+          },
+          "floorForegroundUrl": {
+            "type": "string"
+          },
+          "rarityMultiplier": {
+            "type": "number"
+          },
+          "props": {
+            "type": "object",
+            "description": "Configurable properties keyed by name: `type`, `label`, `default`, `readonly` and, for ranges, `min`, `max` and `step`.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      },
       "GameMapStatsRequest": {
         "type": "object",
         "required": [
@@ -17646,6 +17741,13 @@
                 },
                 "description": "Largest ranked value keyed by `statName`; the official world map scales stat circles by it. Absent for `owner0` and `claim0` requests."
               },
+              "decorations": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/GameMapStatsDecorationDefinition"
+                },
+                "description": "Definitions of the decorations the rooms reference, keyed by decoration id (screeps.com)."
+              },
               "users": {
                 "$ref": "#/components/schemas/GamePublicUsers"
               }
@@ -17660,9 +17762,20 @@
         ]
       },
       "GameMapStatsRoom": {
-        "description": "Per-room map stats. Room-status fields are copied from the room document; `own`, `sign`, `safeMode` and `minerals0` come from room objects; the requested `statName` key (e.g. `energyHarvested8`) holds the ranking entry for that stat, typed by the community client as a single `{user, value}` object.",
+        "description": "Per-room map stats. Room-status fields are copied from the room document; `own`, `sign`, `safeMode` and `minerals0` come from room objects; screeps.com adds `isPowerEnabled` and `decorations`; the requested `statName` key (e.g. `energyHarvested8`) holds the ranking entry for that stat, typed by the community client as a single `{user, value}` object.",
         "type": "object",
         "properties": {
+          "isPowerEnabled": {
+            "type": "boolean",
+            "description": "`true` when the room's controller has power enabled (screeps.com); absent otherwise."
+          },
+          "decorations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GameMapStatsDecoration"
+            },
+            "description": "Decorations activated in the room (screeps.com); the official world map draws them."
+          },
           "status": {
             "type": "string"
           },
