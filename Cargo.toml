@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+overseer-core = { path = "crates/overseer-core" }
+async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
+base64 = "0.23"
+flate2 = "1.1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+http = "1.5"
+percent-encoding = "2.3"
+reqwest = "0.13"
+reqwest-websocket = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = "1"
+url = "2.5"
+
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -2 }
+unused = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+missing_docs = "deny"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+# Modules live in `foo.rs` with their children in `foo/`, never in
+# `foo/mod.rs` (the Rust Reference's recommended layout); integration test
+# crates with several files use `tests/<name>/main.rs`.
+mod_module_files = "deny"
+
+[workspace.lints.rustdoc]
+all = { level = "warn", priority = -1 }

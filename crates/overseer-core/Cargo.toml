@@ -1,0 +1,20 @@
+[package]
+name = "overseer-core"
+description = "Sans-I/O Screeps client core: HTTP API requests and replies, socket session state and room state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+flate2.workspace = true
+http.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

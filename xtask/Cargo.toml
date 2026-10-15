@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+description = "Repository automation: API reference vendoring and code generation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

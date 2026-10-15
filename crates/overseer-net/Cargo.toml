@@ -1,0 +1,26 @@
+[package]
+name = "overseer-net"
+description = "Async Screeps client on overseer-core: HTTP, socket, rate limits and client flows over reqwest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+overseer-core.workspace = true
+futures-util.workspace = true
+http.workspace = true
+# Official room-history files are served with `Content-Encoding: gzip`.
+reqwest = { workspace = true, features = ["gzip"] }
+reqwest-websocket.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+
+[dev-dependencies]
+async-tungstenite.workspace = true
+flate2.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

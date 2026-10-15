@@ -1,0 +1,23 @@
+[tasks.fmt]
+description = "Verify the workspace is rustfmt-clean"
+run = "cargo fmt --all -- --check"
+
+[tasks.codegen]
+description = "Generated HTTP and socket API code matches reference/ (refresh with `cargo xtask codegen`)"
+run = "cargo xtask codegen --check"
+
+[tasks.check]
+description = "Clippy gate: pedantic, warnings are errors"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Workspace test suite"
+run = "cargo test --workspace"
+
+[tasks.portable]
+description = "overseer-core stays sans-I/O: it must build for wasm32"
+run = "cargo check -p overseer-core --target wasm32-unknown-unknown"
+
+[tasks.ci]
+description = "Everything CI runs, in order"
+depends = ["fmt", "codegen", "check", "test", "portable"]
