@@ -21,8 +21,9 @@ const composed =
 process.stdout.write(JSON.stringify(composed, null, 2) + '\\n');
 ";
 
-/// Copies `openapi.json` and `asyncapi.json` and writes the composed `standalone.openapi.json`
-/// and `standalone.asyncapi.json` into `reference/`.
+/// Copies `openapi.json` and `asyncapi.json`, writes the composed `standalone.openapi.json` and
+/// `standalone.asyncapi.json` into `reference/`, and records the checkout's commit in
+/// `reference/SOURCE`.
 pub fn run(root: &Path, checkout: &Path) -> Result<(), Error> {
     let reference = root.join("reference");
     let mut documents = Vec::new();
@@ -41,12 +42,52 @@ pub fn run(root: &Path, checkout: &Path) -> Result<(), Error> {
         serde_json::from_str::<serde_json::Value>(text)
             .map_err(|error| format!("{name}: {error}"))?;
     }
+    let source = source(checkout)?;
     fs::create_dir_all(&reference)?;
     for (name, text) in documents {
         fs::write(reference.join(name), text)?;
     }
-    println!("Vendored {} into reference/", checkout.display());
+    fs::write(reference.join("SOURCE"), format!("{source}\n"))?;
+    println!("Vendored {} ({source}) into reference/", checkout.display());
+    if source.ends_with(DIRTY) {
+        println!(
+            "warning: the checkout has uncommitted changes; vendor again once they are pushed"
+        );
+    }
     Ok(())
+}
+
+/// Marks a recorded commit whose checkout had uncommitted changes.
+const DIRTY: &str = " with uncommitted changes";
+
+/// `openscreeps/openapi <commit>`, followed by [`DIRTY`] when the checkout differs from it.
+fn source(checkout: &Path) -> Result<String, Error> {
+    let commit = git(checkout, &["rev-parse", "HEAD"])?;
+    let dirty = !git(checkout, &["status", "--porcelain"])?.is_empty();
+    Ok(format!(
+        "openscreeps/openapi {}{}",
+        commit.trim(),
+        if dirty { DIRTY } else { "" }
+    ))
+}
+
+/// Runs git in the checkout and returns its standard output.
+fn git(checkout: &Path, arguments: &[&str]) -> Result<String, Error> {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| format!("cannot run git: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed in {}:\n{}",
+            arguments.join(" "),
+            checkout.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 /// The composed standalone document of `kind` (`http` or `socket`).

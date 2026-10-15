@@ -4,7 +4,7 @@
 from [openscreeps/openapi](https://github.com/openscreeps/openapi); `standalone.openapi.json` and
 `standalone.asyncapi.json` are those documents composed with the reference's standalone profile
 (`profiles/standalone.json`) by its own `composeProfile` and `composeSocketProfile`
-(`lib/contracts.mjs`).
+(`lib/contracts.mjs`). `SOURCE` records the reference commit they were vendored from.
 
 Refresh all four from a checkout (default `../openapi`; needs `node`), then regenerate the typed
 API:
