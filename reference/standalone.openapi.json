@@ -4167,6 +4167,73 @@
         }
       }
     },
+    "/api/register/submit": {
+      "post": {
+        "operationId": "registerSubmit",
+        "summary": "Register a new account",
+        "description": "Creates an account with username, e-mail and password from the official web client's registration form, together with its reCAPTCHA response, tutorial completion flag and the code edited before registration (`modules`, `branches`). On success the client shows the e-mail confirmation page.\n\nStandalone: Follows the community screepsmod-auth registration: success is exactly `{ok: 1}` and issues no token (sign in with `POST /api/auth/signin`); logical errors use the HTTP 200 `{error}` envelope. Usernames must match `^[a-zA-Z0-9_-]{3,}$`, must not be the reserved system user name and are unique case-insensitively (`invalid username`, `username already exists`). E-mail addresses must match the server e-mail rule and are stored lower-cased, unique case-insensitively (`invalid email`, `email already exists`). Passwords must be 8-1024 characters (`password must be 8-1024 characters long`) and are stored as scrypt hashes. `modules` (default `{main: ''}`) is normalized like `POST /api/user/code` (`code length exceeds 5 MB limit`, `invalid params`) and stored as the `default` branch, active in world and simulation. While a server password is set every call is refused with `Registration is automatically disabled. A server password has been set.` (requests without the password first get `incorrect server password`); when the operator disables registration it answers `Registration is disabled.`.",
+        "tags": [
+          "Register"
+        ],
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterSubmitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success (`{ok: 1}`) or a logical error in the HTTP 200 `{error}` envelope. Known `error` values: `Registration is automatically disabled. A server password has been set.`, `Registration is disabled.`, `invalid username`, `username already exists`, `invalid email`, `email already exists`, `password must be 8-1024 characters long`, `code length exceeds 5 MB limit`, `invalid params`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Ok"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-sources": [
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C260982",
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsHttpClient.ts#L513-L531",
+          "https://github.com/screepsmods/screepsmod-auth/blob/9195e87424475139d749df6d8063df677c4f9917/lib/register.js#L27-L79",
+          "https://github.com/screepsmods/screepsmod-auth/blob/9195e87424475139d749df6d8063df677c4f9917/lib/backend.js#L72-L77",
+          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/users.ts#L15-L16",
+          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/users.ts#L36-L80",
+          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/auth.ts#L49-L58",
+          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/transport.ts#L75-L80",
+          "https://github.com/openscreeps/game/blob/fd9cde57de20a1e37a0108c46ca78314c8b9bc36/src/players.ts#L51-L100"
+        ],
+        "x-profile": {
+          "status": "adapted",
+          "reason": "No reCAPTCHA and no e-mail confirmation, like community private servers with screepsmod-auth: the account (100 CPU, `default` branch from `modules`) is usable immediately; `recaptcha`, `tutorialDone` and `branches` are accepted and ignored. Registration is refused while a server password is set or when the operator disables it (override: RegisterSubmitRequest).",
+          "overriddenComponents": [
+            "#/components/parameters/ServerPassword",
+            "#/components/schemas/RegisterSubmitRequest"
+          ]
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ServerPassword"
+          }
+        ]
+      }
+    },
     "/api/steam/news": {
       "get": {
         "operationId": "platformSteamNews",
@@ -18249,6 +18316,60 @@
         "required": [
           "username"
         ]
+      },
+      "RegisterSubmitRequest": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{3,}$",
+            "description": "New unique (case-insensitive) username."
+          },
+          "email": {
+            "type": "string",
+            "description": "E-mail address; must match the server e-mail rule, stored lower-cased and unique case-insensitively."
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 1024,
+            "description": "Account password, used with `POST /api/auth/signin`."
+          },
+          "modules": {
+            "$ref": "#/components/schemas/UserCodeModules",
+            "description": "Initial code of the `default` branch; defaults to `{main: ''}`."
+          },
+          "recaptcha": {
+            "type": "string",
+            "description": "Accepted and ignored (no reCAPTCHA on a standalone server)."
+          },
+          "tutorialDone": {
+            "type": "boolean",
+            "description": "Accepted and ignored."
+          },
+          "branches": {
+            "type": "array",
+            "description": "Accepted and ignored; only `modules` is stored.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "branch": {
+                  "type": "string"
+                },
+                "modules": {
+                  "$ref": "#/components/schemas/UserCodeModules"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "username",
+          "email",
+          "password"
+        ],
+        "x-profile-reason": "The standalone server validates and stores the account immediately (no reCAPTCHA, no e-mail confirmation) and ignores the hosted-only fields."
       },
       "ResourceType": {
         "type": "string",

@@ -5229,7 +5229,7 @@ pub struct RegisterSubmitRequest {
     /// The `modules` property.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modules: Option<UserCodeModules>,
-    /// The `password` property.
+    /// Account password, used with `POST /api/auth/signin`.
     pub password: String,
     /// `reCAPTCHA` response.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5237,7 +5237,7 @@ pub struct RegisterSubmitRequest {
     /// Whether the tutorial was completed before registration.
     #[serde(rename = "tutorialDone", skip_serializing_if = "Option::is_none")]
     pub tutorial_done: Option<bool>,
-    /// The `username` property.
+    /// New unique (case-insensitive) username.
     pub username: String,
 }
 
