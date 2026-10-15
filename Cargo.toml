@@ -17,8 +17,11 @@ flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 http = "1.5"
 percent-encoding = "2.3"
-reqwest = "0.13"
+# rustls with the ring provider (installed by overseer-net), not reqwest's default aws-lc-rs:
+# aws-lc needs cmake and a C toolchain per target, which complicates mobile cross-compiles.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "charset", "system-proxy"] }
 reqwest-websocket = "0.6"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

@@ -438,7 +438,12 @@ impl ClientBuilder {
     ///
     /// Returns [`Error::Request`] for a user agent that is not a valid header value and
     /// [`Error::Http`] when the default `reqwest` client's TLS backend cannot be initialised.
+    ///
+    /// TLS uses rustls with the `ring` provider, installed as the process default unless the
+    /// application installed another provider first.
     pub fn build(self) -> Result<Client, Error> {
+        // Err only means a provider is already installed, which then stays in use.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let user_agent = HeaderValue::try_from(self.user_agent.as_deref().unwrap_or(USER_AGENT))
             .map_err(|error| RequestError::Http(error.into()))?;
         let http = match self.http {

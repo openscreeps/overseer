@@ -17,6 +17,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The crypto provider for reqwest's rustls (see `ClientBuilder::build`).
+rustls.workspace = true
+
 [dev-dependencies]
 async-tungstenite.workspace = true
 flate2.workspace = true
