@@ -1,18 +1,170 @@
-//! The world map: room map views, map statistics, terrain, room status and map visuals.
+//! The world map: room map views, map statistics, terrain, world size and map visuals.
 
-use crate::Overseer;
+mod coord;
+mod view;
 
-/// The world map: room map views, map statistics, terrain, room status and map visuals.
+pub use coord::RoomCoord;
+pub use view::{MapView, ViewChange};
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use overseer_net::core::api::types::{
+    GameMapStatsResponse, GameRoomStatName, GameWorldSizeResponse,
+};
+use overseer_net::core::api::{Terrain, endpoints};
+use overseer_net::core::socket::types::MapVisualItem;
+use overseer_net::core::socket::{Channel, Payload};
+
+use crate::{Error, Overseer, StatInterval, Watch};
+
+/// What [`Map::stats`] ranks besides ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MapStat {
+    /// Ownership only (`owner0`): status, owner, sign, safe mode and mineral per room.
+    Owner,
+    /// Ownership and the ranking of `stat` over `interval` (for example
+    /// `energyHarvested8`).
+    Ranked(GameRoomStatName, StatInterval),
+}
+
+impl MapStat {
+    /// The request's `statName`.
+    #[must_use]
+    pub fn name(self) -> String {
+        match self {
+            Self::Owner => "owner0".to_owned(),
+            Self::Ranked(stat, interval) => format!("{}{}", stat.as_str(), interval.minutes()),
+        }
+    }
+}
+
+/// The world map: room map views, map statistics, terrain, world size and map visuals.
 ///
-/// Created by [`Overseer::map`]; cheap to clone.
+/// Created by [`Overseer::map`]; cheap to clone. `shard` names a shard (`None`: the default
+/// shard); it is ignored by single-world servers. Room status is part of [`Self::stats`]
+/// (and of [`Rooms::status`](crate::Rooms::status) for one room).
 #[derive(Clone, Debug)]
 pub struct Map {
-    #[expect(dead_code, reason = "read by the map features")]
     overseer: Overseer,
 }
 
 impl Map {
     pub(crate) fn new(overseer: Overseer) -> Self {
         Self { overseer }
+    }
+
+    /// An empty view of the map of `shard`; [`MapView::set_rooms`] chooses its rooms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`] without a signed-in user (the server only lets signed-in
+    /// connections subscribe to room map views) and [`Error::Closed`] after
+    /// [`Overseer::shutdown`](crate::Overseer::shutdown).
+    pub fn view(&self, shard: Option<&str>) -> Result<MapView, Error> {
+        self.overseer.ensure_open()?;
+        self.overseer.require_user()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(MapView::new(self.overseer.clone(), shard))
+    }
+
+    /// Map statistics of `rooms` (`POST /api/game/map-stats`): status, novice and respawn
+    /// areas, owner, sign, safe mode and mineral per room, the ranking selected by `stat`, and
+    /// the referenced users. Rooms the server does not know are absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`] without a signed-in user, [`Error::Closed`] after
+    /// [`Overseer::shutdown`](crate::Overseer::shutdown) and [`Error::Net`] when the request
+    /// fails.
+    pub async fn stats<R: Into<String>>(
+        &self,
+        rooms: impl IntoIterator<Item = R>,
+        stat: MapStat,
+        shard: Option<&str>,
+    ) -> Result<GameMapStatsResponse, Error> {
+        self.overseer.ensure_open()?;
+        self.overseer.require_user()?;
+        let shard = self.overseer.resolve_shard(shard);
+        let client = self.overseer.client();
+        Ok(client
+            .map_stats(shard.as_deref(), rooms, &stat.name())
+            .await?)
+    }
+
+    /// The decoded terrain of `rooms`, by room name. Rooms already fetched in this session
+    /// (by any feature) come from the client's cache; the others are fetched with one
+    /// `POST /api/game/rooms`. Rooms the server does not know are absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
+    /// [`Error::Net`] when the request fails or a terrain does not decode.
+    pub async fn terrain<R: Into<String>>(
+        &self,
+        rooms: impl IntoIterator<Item = R>,
+        shard: Option<&str>,
+    ) -> Result<BTreeMap<String, Arc<Terrain>>, Error> {
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
+        let rooms = rooms
+            .into_iter()
+            .map(Into::into)
+            .collect::<BTreeSet<String>>();
+        Ok(self
+            .overseer
+            .client()
+            .terrains(shard.as_deref(), rooms)
+            .await?)
+    }
+
+    /// The world's size in rooms (`GET /api/game/world-size`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
+    /// [`Error::Net`] when the request fails.
+    pub async fn world_size(&self, shard: Option<&str>) -> Result<GameWorldSizeResponse, Error> {
+        let request = endpoints::GameWorldSize {
+            shard: self.overseer.resolve_shard(shard),
+        };
+        self.overseer.send(&request).await
+    }
+
+    /// The signed-in user's map visuals of the previous tick (`Game.map.visual`), parsed into
+    /// items; lines that do not match the reference are skipped by the socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`] without a signed-in user and [`Error::Closed`] after
+    /// [`Overseer::shutdown`](crate::Overseer::shutdown).
+    pub fn visuals(&self, shard: Option<&str>) -> Result<Watch<Vec<MapVisualItem>>, Error> {
+        self.overseer.ensure_open()?;
+        let user = self.overseer.require_user()?.to_owned();
+        let channel = Channel::MapVisual {
+            user,
+            shard: self.overseer.resolve_shard(shard),
+        };
+        Ok(self.overseer.watch(channel, |payload| match payload {
+            Payload::MapVisual(items) => Some(items),
+            _ => None,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use overseer_net::core::api::types::GameRoomStatName;
+
+    use super::MapStat;
+    use crate::StatInterval;
+
+    #[test]
+    fn map_stats_are_named_as_the_server_expects() {
+        assert_eq!(MapStat::Owner.name(), "owner0");
+        let harvested = MapStat::Ranked(GameRoomStatName::EnergyHarvested, StatInterval::OneDay);
+        assert_eq!(harvested.name(), "energyHarvested1440");
+        let lost = MapStat::Ranked(GameRoomStatName::CreepsLost, StatInterval::EightMinutes);
+        assert_eq!(lost.name(), "creepsLost8");
     }
 }

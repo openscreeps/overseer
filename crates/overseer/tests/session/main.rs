@@ -1,10 +1,14 @@
 //! Sessions against an in-process server: subscription reference counting, room snapshots, the
-//! console, connection status and token updates.
+//! console, connection status and token updates, the account, messages, market and users.
 
+mod account;
 mod console;
 mod live;
+mod market;
+mod messages;
 mod server;
 mod status;
+mod users;
 
 use std::time::Duration;
 

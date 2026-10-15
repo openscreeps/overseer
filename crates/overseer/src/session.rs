@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use overseer_net::core::Token;
+use overseer_net::core::api::types::AuthMeResponse;
+use overseer_net::core::api::{Auth as EndpointAuth, Endpoint};
 use overseer_net::core::socket::{Channel, Payload};
 use overseer_net::{Client, World};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -87,6 +89,9 @@ struct Inner {
     hub: Mutex<Option<JoinHandle<()>>>,
     /// Console command recall, newest last.
     commands: Mutex<VecDeque<String>>,
+    /// The signed-in user's profile once fetched ([`Account::me`]); the async lock makes
+    /// concurrent first reads share one request.
+    me: tokio::sync::Mutex<Option<Arc<AuthMeResponse>>>,
 }
 
 impl Drop for Inner {
@@ -137,6 +142,7 @@ impl Overseer {
                 status,
                 hub: Mutex::new(Some(hub)),
                 commands: Mutex::new(VecDeque::new()),
+                me: tokio::sync::Mutex::new(None),
             }),
         })
     }
@@ -253,7 +259,6 @@ impl Overseer {
 
     /// A [`Watch`] of `channel`, converting each payload with `extract` (payloads it returns
     /// `None` for are skipped). A handle created after [`Self::shutdown`] is already closed.
-    #[expect(dead_code, reason = "the hub API of the feature modules")]
     pub(crate) fn watch<T: Send + Sync + 'static>(
         &self,
         channel: Channel,
@@ -264,7 +269,6 @@ impl Overseer {
 
     /// A [`Feed`] of `channel`, converting each payload with `extract` (payloads it returns
     /// `None` for are skipped). A handle created after [`Self::shutdown`] is already closed.
-    #[expect(dead_code, reason = "the hub API of the feature modules")]
     pub(crate) fn feed<T: Clone + Send + 'static>(
         &self,
         channel: Channel,
@@ -303,9 +307,28 @@ impl Overseer {
         self.user_id().ok_or(Error::Anonymous)
     }
 
+    /// Sends `endpoint` and returns the reply body: [`Error::Closed`] after [`Self::shutdown`],
+    /// [`Error::Anonymous`] up front for an endpoint that needs a signed-in user, else the
+    /// client's result.
+    pub(crate) async fn send<E: Endpoint + Sync>(
+        &self,
+        endpoint: &E,
+    ) -> Result<E::Response, Error> {
+        self.ensure_open()?;
+        if E::AUTH == EndpointAuth::Required {
+            self.require_user()?;
+        }
+        Ok(self.inner.client.send(endpoint).await?.body)
+    }
+
     /// Console command recall, newest last.
     pub(crate) fn console_commands(&self) -> MutexGuard<'_, VecDeque<String>> {
         lock(&self.inner.commands)
+    }
+
+    /// The cache of the signed-in user's profile.
+    pub(crate) fn me_cache(&self) -> &tokio::sync::Mutex<Option<Arc<AuthMeResponse>>> {
+        &self.inner.me
     }
 }
 

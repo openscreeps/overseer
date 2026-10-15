@@ -4,6 +4,7 @@
 //! (official servers need one; single-world servers never send one) and returns decoded data
 //! where the raw reply needs work.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use overseer_core::api::{MemoryValue, Terrain, endpoints, types};
@@ -45,6 +46,55 @@ impl Client {
         let terrain = Arc::new(document.decode()?);
         lock(&self.inner.terrain).insert(key, Arc::clone(&terrain));
         Ok(terrain)
+    }
+
+    /// The decoded terrain of each of `rooms`, by room name, sharing the cache of
+    /// [`Self::terrain`]: rooms not cached yet are fetched with one `POST /api/game/rooms`.
+    /// Rooms the server does not know are absent from the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::send`] and [`Error::Terrain`] for a malformed terrain.
+    pub async fn terrains<R: Into<String>>(
+        &self,
+        shard: Option<&str>,
+        rooms: impl IntoIterator<Item = R>,
+    ) -> Result<BTreeMap<String, Arc<Terrain>>, Error> {
+        let shard = self.resolve_shard(shard).await?;
+        let mut terrains = BTreeMap::new();
+        let mut missing = Vec::new();
+        {
+            let cache = lock(&self.inner.terrain);
+            for room in rooms {
+                let room = room.into();
+                match cache.get(&(shard.clone(), room.clone())) {
+                    Some(terrain) => {
+                        terrains.insert(room, Arc::clone(terrain));
+                    }
+                    None => missing.push(room),
+                }
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        if missing.is_empty() {
+            return Ok(terrains);
+        }
+        let request = endpoints::GameRooms {
+            shard: shard.clone(),
+            body: types::GameRoomsRequest { rooms: missing },
+        };
+        let documents = self.send(&request).await?.body.rooms;
+        let decoded = documents
+            .iter()
+            .map(|document| Ok((document.room.clone(), Arc::new(document.decode()?))))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut cache = lock(&self.inner.terrain);
+        for (room, terrain) in decoded {
+            cache.insert((shard.clone(), room.clone()), Arc::clone(&terrain));
+            terrains.insert(room, terrain);
+        }
+        Ok(terrains)
     }
 
     /// A snapshot of every object in `room` (typed by the reference) and the public profiles of

@@ -827,8 +827,11 @@ name = "overseer"
 version = "0.1.0"
 dependencies = [
  "async-tungstenite",
+ "base64",
  "futures-util",
  "overseer-net",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

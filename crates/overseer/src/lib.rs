@@ -72,6 +72,23 @@
 //! maintenance, rejected tokens, channel errors such as the room subscription limit, undecodable
 //! frames and items a slow [`Feed`] missed. [`Overseer::status`] follows the connection through
 //! reconnects.
+//!
+//! # Features
+//!
+//! | Handle | Covers |
+//! |---|---|
+//! | [`Overseer::account`] | the signed-in account: profile, statistics, world status, respawn, CPU and resources, badge, notification settings, power creeps, API tokens |
+//! | [`Overseer::console`] | live console output with history, console expressions, command recall |
+//! | [`Overseer::code`] | branches, JavaScript and WebAssembly modules, activation, live code changes, local directory sync |
+//! | [`Overseer::memory`] | Memory by path, segments, live path watches |
+//! | [`Overseer::rooms`] | live typed room snapshots, room information and actions: flags, construction sites, intents, spawn placement |
+//! | [`Overseer::history`] | room history playback |
+//! | [`Overseer::map`] | world map viewport, map statistics, batch terrain, room status, map visuals |
+//! | [`Overseer::messages`] | conversations, sending, read state, live new messages |
+//! | [`Overseer::market`] | orders, own orders, price statistics, money history |
+//! | [`Overseer::users`] | user lookup, rooms of a user, leaderboards, badges |
+//!
+//! Every typed endpoint remains available through [`Overseer::client`].
 
 pub mod account;
 pub mod code;
@@ -92,18 +109,18 @@ pub mod users;
 pub use overseer_net as net;
 pub use overseer_net::core;
 
-pub use account::Account;
-pub use code::Code;
+pub use account::{Account, PowerCreeps, StartRoom};
+pub use code::{Code, CodeTarget, Modules};
 pub use console::{Console, ConsoleEntry, ConsoleKind};
 pub use error::Error;
-pub use history::History;
+pub use history::{History, HistoryPlayer, Seek};
 pub use live::{Closed, Feed, Watch};
-pub use map::Map;
+pub use map::{Map, MapStat, MapView};
 pub use market::Market;
 pub use memory::Memory;
 pub use messages::Messages;
 pub use profile::{Auth, ServerProfile};
-pub use rooms::{RoomSnapshot, Rooms};
+pub use rooms::{FlagColor, RoomSnapshot, Rooms, StatInterval};
 pub use session::{ConnectionStatus, Notice, Overseer};
 pub use users::Users;
 
@@ -119,4 +136,6 @@ pub mod prelude {
         Feed, History, Map, Market, Memory, Messages, Notice, Overseer, RoomSnapshot, Rooms,
         ServerProfile, Users, Watch,
     };
+    pub use crate::{CodeTarget, Modules};
+    pub use crate::{FlagColor, HistoryPlayer, MapStat, MapView, Seek, StatInterval};
 }

@@ -1,4 +1,11 @@
-//! Live rooms: typed snapshots of watched rooms.
+//! Live rooms: typed snapshots of watched rooms, room information over HTTP and the actions of
+//! the room screen (flags, construction sites, intents, the first spawn).
+
+mod actions;
+mod info;
+
+pub use actions::{FlagColor, GlobalIntent, ObjectIntent, RoomIntent};
+pub use info::StatInterval;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
