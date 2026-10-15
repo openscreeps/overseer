@@ -1,0 +1,38 @@
+[package]
+name = "overseer-proxy"
+description = "Same-origin proxy that lets browser builds of overseer reach a Screeps server without CORS support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Server side of the relayed socket (the upstream side is reqwest-websocket).
+async-tungstenite.workspace = true
+# The `overseer-proxy` binary: flags with environment fallbacks.
+clap = { workspace = true, features = ["derive", "env"] }
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }
+reqwest.workspace = true
+reqwest-websocket.workspace = true
+# The crypto provider for reqwest's rustls, as in overseer-net.
+rustls.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["fs"] }
+tracing.workspace = true
+# The binary's log output.
+tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

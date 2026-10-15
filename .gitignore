@@ -1,2 +1,5 @@
 /target
 .env
+# Trunk's bundle and Tauri's generated schemas
+/app/dist
+/app/src-tauri/gen

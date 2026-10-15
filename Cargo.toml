@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "web/demo", "xtask"]
+members = ["crates/*", "web/demo", "xtask", "app", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,10 +12,14 @@ publish = false
 overseer-core = { path = "crates/overseer-core" }
 overseer-net = { path = "crates/overseer-net" }
 overseer = { path = "crates/overseer" }
+overseer-view = { path = "crates/overseer-view" }
+overseer-proxy = { path = "crates/overseer-proxy" }
 async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
 base64 = "0.23"
+bytemuck = { version = "1.25", features = ["derive"] }
 flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+glam = { version = "0.34", default-features = false, features = ["std"] }
 http = "1.5"
 percent-encoding = "2.3"
 # rustls with the ring provider (installed by overseer-net), not reqwest's default aws-lc-rs:
@@ -33,6 +37,26 @@ wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4"
 wasmtimer = { version = "0.4", default-features = false, features = ["tokio"] }
 web-sys = "0.3"
+# The Overseer app (app/): Leptos UI in the browser or webview, Tauri desktop shell.
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+keyring = "3.6"
+leptos = { version = "0.8", features = ["csr"] }
+tauri = { version = "2.12", features = [] }
+tauri-build = { version = "2.5", features = [] }
+tauri-plugin-opener = "2.7"
+# Room renderer: WebGPU and WebGL2 in browsers, no native backend (see overseer-view).
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
+# overseer-proxy: HTTP server, static files, logs and the binary's command line.
+clap = "4.6"
+http-body-util = "0.1"
+hyper = "1.12"
+hyper-util = "0.1.21"
+tokio-util = "0.7"
+tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false }
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -2 }

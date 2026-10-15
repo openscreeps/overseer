@@ -1,0 +1,36 @@
+[package]
+name = "overseer-app-tauri"
+description = "Desktop shell of the Overseer app: Tauri 2 webview, in-process overseer-proxy and OS keychain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "overseer"
+path = "src/main.rs"
+# Named like the `overseer` library, whose docs would otherwise be overwritten.
+doc = false
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+overseer-proxy.workspace = true
+serde.workspace = true
+tauri.workspace = true
+tauri-plugin-opener.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+url.workspace = true
+
+# Secrets in the OS store: Windows Credential Manager, macOS Keychain, the Secret Service on
+# Linux.
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
+
+[lints]
+workspace = true

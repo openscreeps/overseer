@@ -1,0 +1,28 @@
+[package]
+name = "overseer-view"
+description = "Room viewer of the Overseer app: renders live room snapshots with wgpu into a browser canvas (WebGPU, else WebGL2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+overseer.workspace = true
+thiserror.workspace = true
+# Native builds compile the renderer without a GPU backend: the scene, camera, picking and
+# interpolation are platform-independent, only the canvas constructor needs a browser.
+wgpu.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { workspace = true, features = ["HtmlCanvasElement", "Performance", "Window"] }
+wgpu = { workspace = true, features = ["webgl", "webgpu"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+# The tests render through wgpu's no-op backend: real validation, no GPU.
+wgpu = { workspace = true, features = ["noop"] }
+
+[lints]
+workspace = true

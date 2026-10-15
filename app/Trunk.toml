@@ -1,0 +1,13 @@
+# `trunk build` bundles the app into dist/ (`--release` for an optimized build);
+# `trunk serve` is the development server the Tauri shell loads (`cargo tauri dev`).
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+ignore = ["src-tauri"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 1420
+open = false

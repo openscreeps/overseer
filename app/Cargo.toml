@@ -1,0 +1,46 @@
+[package]
+name = "overseer-app"
+description = "The Overseer Screeps client: Leptos user interface for browsers and the Tauri shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# A browser application built with Trunk (`trunk build`, see Trunk.toml). Natively it compiles
+# for the workspace checks and unit tests only.
+[dependencies]
+base64.workspace = true
+# `abortable`: tasks that end with their component.
+futures-util.workspace = true
+leptos.workspace = true
+overseer.workspace = true
+overseer-view.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `broadcast::error::RecvError` of the notices.
+tokio = { workspace = true, features = ["sync"] }
+url.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = [
+  "CssStyleDeclaration",
+  "DomRect",
+  "Element",
+  "HtmlCanvasElement",
+  "HtmlElement",
+  "Location",
+  "MediaQueryList",
+  "PointerEvent",
+  "ResizeObserver",
+  "Response",
+  "Storage",
+  "WheelEvent",
+  "Window",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook.workspace = true
+
+[lints]
+workspace = true

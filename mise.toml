@@ -15,15 +15,35 @@ description = "Workspace test suite"
 run = "cargo test --workspace"
 
 [tasks.portable]
-description = "overseer-core stays sans-I/O, and the client stack and web demo build for browsers (wasm32)"
+description = "overseer-core stays sans-I/O, and the client stack, room viewer and web demo build for browsers (wasm32)"
 run = [
   "cargo check -p overseer-core --target wasm32-unknown-unknown",
-  "cargo clippy -p overseer-net -p overseer -p overseer-web-demo --target wasm32-unknown-unknown -- -D warnings",
+  "cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-app --target wasm32-unknown-unknown -- -D warnings",
 ]
 
 [tasks.web-demo]
 description = "Build the browser demo bundle into target/web-demo/ (serve it over HTTP)"
 run = "cargo xtask web-demo"
+
+[tasks.web-demo-proxy]
+description = "Serve the browser demo same-origin through overseer-proxy, fronting screeps.com (http://127.0.0.1:8080/)"
+depends = ["web-demo"]
+run = "cargo run -p overseer-proxy -- --upstream https://screeps.com/ --static target/web-demo"
+
+[tasks.app-web]
+description = "Build the Overseer app for the web into app/dist/ (trunk; serve it, e.g. with overseer-proxy --static app/dist)"
+dir = "app"
+run = "trunk build --release"
+
+[tasks.app-dev]
+description = "Run the Overseer desktop app with the trunk dev server (cargo tauri dev)"
+dir = "app/src-tauri"
+run = "cargo tauri dev"
+
+[tasks.app-build]
+description = "Build the Overseer desktop app and its installers (cargo tauri build)"
+dir = "app/src-tauri"
+run = "cargo tauri build"
 
 [tasks.ci]
 description = "Everything CI runs, in order"
