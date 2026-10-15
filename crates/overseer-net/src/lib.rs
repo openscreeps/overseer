@@ -151,12 +151,13 @@
 //! channel; room states start over with the next update.
 //!
 //! Private servers rotate session tokens on authenticated replies (`X-Token`) and on the
-//! socket's `auth ok`; both replace the client's shared token ([`Client::token`]; persist it if
-//! you store tokens), so HTTP requests and new socket connections always use the latest one. A
-//! client built with [`ClientBuilder::credentials`] signs in when it needs a token and has none,
-//! and signs in once more when the server rejects the token (HTTP 401 or the socket's
-//! `auth failed`) before retrying. Without credentials these failures are returned as
-//! [`ApiError::Unauthorized`] and [`Event::AuthFailed`](overseer_core::socket::Event::AuthFailed).
+//! socket's `auth ok`; both replace the client's shared token ([`Client::token`]; persist every
+//! value of [`Client::token_updates`] if you store tokens), so HTTP requests and new socket
+//! connections always use the latest one. A client built with [`ClientBuilder::credentials`]
+//! signs in when it needs a token and has none, and signs in once more when the server rejects
+//! the token (HTTP 401 or the socket's `auth failed`) before retrying. Without credentials these
+//! failures are returned as [`ApiError::Unauthorized`] and
+//! [`Event::AuthFailed`](overseer_core::socket::Event::AuthFailed).
 //!
 //! Requests rejected with HTTP 429 are retried once: after the endpoint's window resets when
 //! that is within [`RateLimitPolicy::max_wait`], or after [`RateLimitPolicy::global_delay`] for

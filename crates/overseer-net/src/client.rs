@@ -38,6 +38,8 @@ struct Inner {
     /// Server, current token and server password. Locked only to copy or update it, never
     /// across an `.await`.
     session: Mutex<api::Session>,
+    /// The session's token, published to [`Client::token_updates`] on every change.
+    tokens: tokio::sync::watch::Sender<Option<Token>>,
     credentials: Option<Credentials>,
     /// Serializes sign-ins, so concurrent rejections sign in once.
     sign_in: tokio::sync::Mutex<()>,
@@ -97,7 +99,22 @@ impl Client {
 
     /// Replaces the token used by every clone of this client and by future socket connections.
     pub fn set_token(&self, token: Option<Token>) {
-        self.session().set_token(token);
+        let mut session = self.session();
+        session.set_token(token.clone());
+        // Published under the session lock, so watchers see changes in the order they were made.
+        self.inner.tokens.send_if_modified(|current| {
+            let changed = *current != token;
+            *current = token;
+            changed
+        });
+    }
+
+    /// Every change of the shared token: [`Self::set_token`], `X-Token` rotations, sign-ins and
+    /// the socket's `auth ok` tokens. The receiver starts at the current token; persist each new
+    /// value if you store tokens.
+    #[must_use]
+    pub fn token_updates(&self) -> tokio::sync::watch::Receiver<Option<Token>> {
+        self.inner.tokens.subscribe()
     }
 
     /// Executes an endpoint; a rotated `X-Token` replaces the shared token.
@@ -432,6 +449,7 @@ impl ClientBuilder {
                 .connect_timeout(Duration::from_secs(10))
                 .build()?,
         };
+        let tokens = tokio::sync::watch::Sender::new(self.token.clone());
         let mut session = api::Session::new(self.server.clone(), self.token);
         session.set_server_password(self.server_password);
         Ok(Client {
@@ -440,6 +458,7 @@ impl ClientBuilder {
                 server: self.server,
                 user_agent,
                 session: Mutex::new(session),
+                tokens,
                 credentials: self.credentials,
                 sign_in: tokio::sync::Mutex::new(()),
                 world: Mutex::new(None),

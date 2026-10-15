@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 overseer-core = { path = "crates/overseer-core" }
+overseer-net = { path = "crates/overseer-net" }
 async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
 base64 = "0.23"
 flate2 = "1.1"

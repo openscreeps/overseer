@@ -267,6 +267,8 @@ async fn auth_ok_tokens_reach_the_http_client() {
         .token(Token::new("t1"))
         .build()
         .unwrap();
+    let mut tokens = client.token_updates();
+    assert_eq!(*tokens.borrow_and_update(), Some(Token::new("t1")));
     let mut socket = client.connect().await.unwrap();
     assert_eq!(socket.world().user(), Some("u1"));
     assert_eq!(
@@ -293,6 +295,8 @@ async fn auth_ok_tokens_reach_the_http_client() {
     assert_eq!(events, ["connected", "Authenticated", "Protocol(14)"]);
     assert_eq!(lines, ["gzip on", "auth t1", "subscribe user:u1/cpu"]);
     assert_eq!(client.token(), Some(Token::new("t2")));
+    assert!(tokens.has_changed().unwrap());
+    assert_eq!(*tokens.borrow_and_update(), Some(Token::new("t2")));
 
     client.send(&endpoints::AuthMe).await.unwrap();
     let last = server.requests().pop().unwrap();
