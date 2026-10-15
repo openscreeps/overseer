@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_tungstenite::WebSocketStream;
 use async_tungstenite::tokio::{TokioAdapter, accept_async};
@@ -55,6 +55,13 @@ struct State {
     /// Whether the upgrade with this index (from 0) is accepted; others get HTTP 503.
     upgrades: Box<Upgrades>,
     upgrade_count: AtomicUsize,
+    /// Keep-alive: connections serve further requests, and a request arriving on a connection
+    /// idle for longer than this is dropped (see [`Server::start_keep_alive`]). `None` closes
+    /// every connection after one request.
+    keep_alive: Option<Duration>,
+    connections: AtomicUsize,
+    /// Paths of the requests dropped on idle keep-alive connections.
+    dropped: Mutex<Vec<String>>,
     requests: Mutex<Vec<Request>>,
     sockets: mpsc::UnboundedSender<Ws>,
 }
@@ -73,6 +80,26 @@ impl Server {
         routes: impl Fn(&Request) -> R + Send + Sync + 'static,
         upgrades: impl Fn(usize) -> bool + Send + Sync + 'static,
     ) -> Self {
+        Self::launch(routes, upgrades, None).await
+    }
+
+    /// Like [`Self::start`], but keeps connections open for further requests, like Node's
+    /// keep-alive. A request arriving on a connection that idled for longer than `idle` is
+    /// dropped unanswered with its connection, as when Node's keep-alive timeout closes the
+    /// connection while the client reuses it: the client cannot have noticed the close yet.
+    pub async fn start_keep_alive<R: Into<Response>>(
+        routes: impl Fn(&Request) -> R + Send + Sync + 'static,
+        upgrades: impl Fn(usize) -> bool + Send + Sync + 'static,
+        idle: Duration,
+    ) -> Self {
+        Self::launch(routes, upgrades, Some(idle)).await
+    }
+
+    async fn launch<R: Into<Response>>(
+        routes: impl Fn(&Request) -> R + Send + Sync + 'static,
+        upgrades: impl Fn(usize) -> bool + Send + Sync + 'static,
+        keep_alive: Option<Duration>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = ServerUrl::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let (sender, sockets) = mpsc::unbounded_channel();
@@ -80,12 +107,16 @@ impl Server {
             routes: Box::new(move |request| routes(request).into()),
             upgrades: Box::new(upgrades),
             upgrade_count: AtomicUsize::new(0),
+            keep_alive,
+            connections: AtomicUsize::new(0),
+            dropped: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
             sockets: sender,
         });
         let accepting = Arc::clone(&state);
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                accepting.connections.fetch_add(1, Ordering::SeqCst);
                 tokio::spawn(serve(stream, Arc::clone(&accepting)));
             }
         });
@@ -107,18 +138,44 @@ impl Server {
 
     /// The HTTP requests served so far.
     pub fn requests(&self) -> Vec<Request> {
-        self.state
-            .requests
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.state.requests).clone()
+    }
+
+    /// The `/socket/websocket` requests answered so far (accepted or rejected), not counting
+    /// dropped ones.
+    pub fn upgrades(&self) -> usize {
+        self.state.upgrade_count.load(Ordering::SeqCst)
+    }
+
+    /// The TCP connections accepted so far.
+    pub fn connections(&self) -> usize {
+        self.state.connections.load(Ordering::SeqCst)
+    }
+
+    /// The paths of the requests dropped on idle keep-alive connections so far.
+    pub fn dropped(&self) -> Vec<String> {
+        lock(&self.state.dropped).clone()
     }
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 async fn serve(mut stream: TcpStream, state: Arc<State>) {
-    let Some(head) = peek_head(&stream).await else {
-        return;
-    };
+    let mut idle_since = None;
+    while let Some(open) = serve_one(stream, &state, &mut idle_since).await {
+        stream = open;
+    }
+}
+
+/// Serves one request; returns the connection when it stays open for another one.
+async fn serve_one(
+    mut stream: TcpStream,
+    state: &State,
+    idle_since: &mut Option<Instant>,
+) -> Option<TcpStream> {
+    let head = peek_head(&stream).await?;
     let mut consumed = vec![0; head.len()];
     let mut lines = head.lines();
     let mut request_line = lines.next().unwrap_or_default().split_whitespace();
@@ -126,6 +183,13 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
     let target = request_line.next().unwrap_or_default();
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let (path, query) = (path.to_owned(), query.to_owned());
+    if let (Some(idle), Some(since)) = (state.keep_alive, *idle_since)
+        && since.elapsed() > idle
+    {
+        // Closed with the request unread and unanswered.
+        lock(&state.dropped).push(path);
+        return None;
+    }
     if path == "/socket/websocket" {
         let index = state.upgrade_count.fetch_add(1, Ordering::SeqCst);
         if (state.upgrades)(index) {
@@ -139,7 +203,7 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
                 )
                 .await;
         }
-        return;
+        return None;
     }
     let mut token = None;
     let mut length = 0;
@@ -157,7 +221,7 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
     if stream.read_exact(&mut consumed).await.is_err()
         || stream.read_exact(&mut body).await.is_err()
     {
-        return;
+        return None;
     }
     let request = Request {
         method,
@@ -171,22 +235,28 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
         headers,
         body,
     } = (state.routes)(&request);
-    state
-        .requests
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(request);
+    lock(&state.requests).push(request);
     let headers = headers
         .iter()
         .fold(String::new(), |mut lines, (name, value)| {
             let _ = write!(lines, "{name}: {value}\r\n");
             lines
         });
+    let connection = if state.keep_alive.is_some() {
+        "keep-alive"
+    } else {
+        "close"
+    };
     let head = format!(
-        "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
+        "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: {connection}\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(&[head.into_bytes(), body].concat()).await;
+    stream
+        .write_all(&[head.into_bytes(), body].concat())
+        .await
+        .ok()?;
+    *idle_since = Some(Instant::now());
+    state.keep_alive.map(|_| stream)
 }
 
 /// The request head up to and including the blank line, left in the stream.

@@ -150,6 +150,12 @@
 //! [`SocketEvent::Disconnected`] and [`SocketEvent::Reconnecting`], and resubscribes every
 //! channel; room states start over with the next update.
 //!
+//! The socket upgrade shares the HTTP client's connection pool, so it may land on a keep-alive
+//! connection the server has just closed for idling. Natively, [`Client::connect`] and every
+//! reconnect therefore send an upgrade whose connection is reset or closed before any response
+//! arrives once more, on a new connection; an answer of the server (any HTTP status) is never
+//! retried. Browsers open a new connection for every `WebSocket` and get no such retry.
+//!
 //! Private servers rotate session tokens on authenticated replies (`X-Token`) and on the
 //! socket's `auth ok`; both replace the client's shared token ([`Client::token`]; persist every
 //! value of [`Client::token_updates`] if you store tokens), so HTTP requests and new socket

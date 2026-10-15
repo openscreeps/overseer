@@ -1,10 +1,11 @@
 //! Driver behaviour against an in-process server: reconnects, backoff, keep-alive, token
-//! sharing, sign-in, rate limits, client flows and the event stream.
+//! sharing, sign-in, rate limits, client flows, the event stream and upgrade retries.
 
 mod flows;
 mod server;
 mod signin;
 mod socket;
+mod upgrade;
 
 use std::time::Duration;
 

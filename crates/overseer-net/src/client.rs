@@ -35,6 +35,10 @@ pub struct Client {
 #[derive(Debug)]
 struct Inner {
     http: reqwest::Client,
+    /// The application supplied `http` ([`ClientBuilder::http_client`]): a retried socket
+    /// upgrade goes through it, as its settings cannot be copied into a fresh client.
+    #[cfg(not(target_arch = "wasm32"))]
+    custom_http: bool,
     server: ServerUrl,
     /// Sent natively; browsers set their own.
     #[cfg(not(target_arch = "wasm32"))]
@@ -212,6 +216,14 @@ impl Client {
     /// Opens a socket connection for the [`World`] ([`Self::world`]), authenticated with the
     /// current token (anonymous without one).
     ///
+    /// The upgrade shares the client's connection pool, so it may reuse a keep-alive connection
+    /// the server has just closed for idling (Node closes them after 5 s). Natively, an upgrade
+    /// whose connection is reset or closed before any response arrives is therefore sent once
+    /// more on a new connection (with a custom [`ClientBuilder::http_client`]: through that
+    /// client, whose pool has dropped the failed connection). An answer of the server, such as
+    /// an HTTP error, is never retried. In browsers the `WebSocket` opens its own connection.
+    /// Reconnects of the [`Socket`] open their connections the same way.
+    ///
     /// # Errors
     ///
     /// Returns the errors of [`Self::world`] and [`Error::WebSocket`] when the connection or
@@ -222,12 +234,37 @@ impl Client {
         Ok(Socket::new(self.clone(), world, websocket))
     }
 
-    /// Opens a WebSocket to the server's socket endpoint.
+    /// Opens a WebSocket to the server's socket endpoint, retrying a lost connection natively
+    /// (see [`Self::connect`]).
     pub(crate) async fn open(&self) -> Result<WebSocket, Error> {
-        let request = self.inner.http.get(self.inner.server.socket().clone());
+        let response = self.upgrade(&self.inner.http).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        let response = match response {
+            Err(reqwest_websocket::Error::Reqwest(error)) if connection_lost(&error) => {
+                let fresh;
+                let client = if self.inner.custom_http {
+                    &self.inner.http
+                } else {
+                    // A new client has an empty pool: the upgrade opens a new connection.
+                    fresh = default_http()?;
+                    &fresh
+                };
+                self.upgrade(client).await
+            }
+            response => response,
+        };
+        Ok(response?.into_websocket().await?)
+    }
+
+    /// Sends the socket upgrade request through `client`.
+    async fn upgrade(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<reqwest_websocket::UpgradeResponse, reqwest_websocket::Error> {
+        let request = client.get(self.inner.server.socket().clone());
         #[cfg(not(target_arch = "wasm32"))]
         let request = request.header(http::header::USER_AGENT, self.inner.user_agent.clone());
-        Ok(request.upgrade().send().await?.into_websocket().await?)
+        request.upgrade().send().await
     }
 
     pub(crate) fn reconnect_policy(&self) -> &ReconnectPolicy {
@@ -412,6 +449,10 @@ impl ClientBuilder {
     /// should not follow redirects (tokens must never follow a redirect). The default client is
     /// HTTP/1.1-only, follows no redirects and has a 10 s connect timeout; in browsers it is a
     /// plain `fetch` client, and redirects, timeouts and the HTTP version are the browser's.
+    ///
+    /// A socket upgrade that lost a pooled connection is retried through this client (see
+    /// [`Client::connect`]), which takes another pooled connection if it holds one; the default
+    /// client retries on a new one-shot client with an empty pool instead.
     pub fn http_client(mut self, http: reqwest::Client) -> Self {
         self.http = Some(http);
         self
@@ -474,6 +515,8 @@ impl ClientBuilder {
         // Browsers send their own `User-Agent`.
         #[cfg(target_arch = "wasm32")]
         let _ = user_agent;
+        #[cfg(not(target_arch = "wasm32"))]
+        let custom_http = self.http.is_some();
         let http = match self.http {
             Some(http) => http,
             None => default_http()?,
@@ -484,6 +527,8 @@ impl ClientBuilder {
         Ok(Client {
             inner: Arc::new(Inner {
                 http,
+                #[cfg(not(target_arch = "wasm32"))]
+                custom_http,
                 server: self.server,
                 #[cfg(not(target_arch = "wasm32"))]
                 user_agent,
@@ -520,4 +565,35 @@ fn default_http() -> reqwest::Result<reqwest::Client> {
 #[cfg(target_arch = "wasm32")]
 fn default_http() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder().build()
+}
+
+/// Whether a request failed because its connection was reset or closed before any response
+/// arrived (not while connecting, not on a timeout, not on a malformed response).
+#[cfg(not(target_arch = "wasm32"))]
+fn connection_lost(error: &reqwest::Error) -> bool {
+    use std::error::Error as _;
+    use std::io::ErrorKind;
+
+    if !error.is_request() || error.is_connect() || error.is_timeout() {
+        return false;
+    }
+    let mut source = error.source();
+    while let Some(error) = source {
+        if let Some(error) = error.downcast_ref::<hyper::Error>()
+            && (error.is_incomplete_message() || error.is_canceled() || error.is_closed())
+        {
+            return true;
+        }
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                error.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+            );
+        }
+        source = error.source();
+    }
+    false
 }

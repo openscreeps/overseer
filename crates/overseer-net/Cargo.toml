@@ -17,6 +17,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Tells a connection lost before the socket upgrade's response from other send errors (see
+# `Client::connect`); already a dependency of reqwest.
+hyper.workspace = true
 # The crypto provider for reqwest's rustls (see `ClientBuilder::build`).
 rustls.workspace = true
 # `rt` for `rt::spawn`, `time` for the timers of `rt`.

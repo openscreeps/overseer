@@ -29,7 +29,9 @@ use keep_alive::KeepAlive;
 /// How a dropped socket connection is re-established.
 ///
 /// The `n`th consecutive attempt waits `initial_delay · 2ⁿ⁻¹`, at most `max_delay`. The count
-/// starts over once a connection is open.
+/// starts over once a connection is open. Each attempt opens its connection like
+/// [`Client::connect`], natively including one immediate retry of an upgrade whose connection
+/// was lost before the server answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReconnectPolicy {
     /// Delay before the first attempt.
