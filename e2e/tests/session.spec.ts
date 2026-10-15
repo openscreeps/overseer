@@ -3,6 +3,13 @@
 
 import { expect, SERVER_NAME, signIn, test } from './fixtures';
 
+declare global {
+  interface Window {
+    /** How often the app saved its profiles (`overseer.profiles`) since the page loaded. */
+    e2eProfileSaves?: number;
+  }
+}
+
 test.describe('session', () => {
   test('resumes after a reload', async ({ signedInPage: page, player, server }) => {
     const account = page.getByRole('button', { name: `Account: ${player.username}` });
@@ -31,6 +38,14 @@ test.describe('session', () => {
       if (route.request().method() === 'GET' && ++calls === 2) await held;
       await route.fallback();
     });
+    await page.addInitScript(() => {
+      const setItem = Storage.prototype.setItem;
+      window.e2eProfileSaves = 0;
+      Storage.prototype.setItem = function (key: string, value: string) {
+        if (key === 'overseer.profiles') window.e2eProfileSaves = (window.e2eProfileSaves ?? 0) + 1;
+        setItem.call(this, key, value);
+      };
+    });
     await signIn(page, server, account);
     const button = page.getByRole('button', { name: `Account: ${account.username}` });
     await button.click();
@@ -40,10 +55,13 @@ test.describe('session', () => {
     const answered = page.waitForResponse(
       (response) => new URL(response.url()).pathname.endsWith('/api/auth/me'),
     );
+    const saves = await page.evaluate(() => window.e2eProfileSaves ?? 0);
     release();
     await answered;
-    // The app saved the profiles again (same account); the menu is still there and open.
-    await page.waitForTimeout(500);
+    // The app saves the profiles again (same account); the menu is still there and open.
+    await expect
+      .poll(() => page.evaluate(() => window.e2eProfileSaves ?? 0))
+      .toBeGreaterThan(saves);
     await expect(button).toHaveAttribute('aria-expanded', 'true');
     await expect(signOut).toBeVisible();
   });

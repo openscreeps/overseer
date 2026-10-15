@@ -19,6 +19,11 @@
 //!
 //! `--rust-only` and `--ui-only` select one suite. The exit code is non-zero when any step
 //! fails; a summary of every step closes the run.
+//!
+//! `OVERSEER_E2E_SLOW=<factor>` (e.g. `4`) runs the UI tests the way the CI runner does on a
+//! fast machine: software WebGL (`SwiftShader`), pages whose CPU runs `<factor>` times slower
+//! and whose responses arrive `<factor>` × 125 ms later, and two workers (see
+//! `e2e/playwright.config.ts`).
 
 use std::ffi::OsString;
 use std::fs::{self, File};

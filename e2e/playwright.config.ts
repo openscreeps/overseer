@@ -2,12 +2,18 @@
 // builds the app, starts a disposable game server and sets the environment read here and by the
 // fixtures (`tests/fixtures`). Two projects run every test: `direct` serves the app from a plain
 // static server, `proxy` from `overseer-proxy --static` in front of the game server.
+//
+// `OVERSEER_E2E_SLOW=<factor>` emulates the CI runner on a fast machine: Chromium draws WebGL
+// with SwiftShader (software, as on the runner; headless Chromium already does, headed runs
+// too), every page runs `<factor>` times slower with slower responses (the fixtures, through
+// CDP) and two workers run, as in CI.
 
 import { resolve } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 import type { Mode } from './tests/fixtures';
 
 const ci = Boolean(process.env.CI);
+const slow = Number(process.env.OVERSEER_E2E_SLOW ?? 0) > 1;
 const directPort = Number(process.env.OVERSEER_E2E_DIRECT_PORT ?? 4610);
 const proxyPort = Number(process.env.OVERSEER_E2E_PROXY_PORT ?? 4611);
 const dist = process.env.OVERSEER_E2E_DIST ?? resolve(__dirname, '../app/dist');
@@ -24,7 +30,7 @@ export default defineConfig<{ mode: Mode }>({
   fullyParallel: true,
   forbidOnly: ci,
   retries: ci ? 1 : 0,
-  workers: ci ? 2 : undefined,
+  workers: ci || slow ? 2 : undefined,
   timeout: 90_000,
   expect: { timeout: 15_000 },
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report' }]],
@@ -32,6 +38,7 @@ export default defineConfig<{ mode: Mode }>({
     ...devices['Desktop Chrome'],
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    launchOptions: slow ? { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] } : {},
   },
   projects: [
     { name: 'direct', use: { mode: 'direct', baseURL: `http://127.0.0.1:${directPort}/` } },
