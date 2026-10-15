@@ -1,7 +1,10 @@
-//! Vertex formats, the object shapes and the terrain mesh.
+//! Vertex and instance formats, the silhouettes of objects (and their prism meshes) and the
+//! raised-wall mesh of detail scenes.
+
+pub mod contour;
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use overseer::core::api::{Terrain, Tile};
 
 /// Height of a raised natural wall.
@@ -13,7 +16,7 @@ pub const WALL_TOP: u32 = 0x11_11_11;
 /// A room whose terrain has not arrived yet (sRGB): neutral, lighter than any terrain so
 /// that loading shows.
 pub const PENDING: u32 = 0x33_35_39;
-const WALL_SIDE: u32 = 0x26_26_26;
+const WALL_SIDE: u32 = 0x24_24_24;
 
 /// A terrain vertex: position, normal and linear colour.
 #[repr(C)]
@@ -27,18 +30,19 @@ pub struct TerrainVertex {
     pub color: [f32; 4],
 }
 
-/// A vertex of an object shape: position in the unit footprint (`-0.5..0.5` across, `0..1`
+/// A vertex of an object prism: position in the unit footprint (`-0.5..0.5` across, `0..1`
 /// up) and normal.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct ShapeVertex {
     /// Position in the unit footprint.
     pub position: [f32; 3],
-    /// Face normal.
+    /// Normal.
     pub normal: [f32; 3],
 }
 
-/// One drawn object shape: its footprint centre, size and linear colour.
+/// One drawn prism (the sides of an object in perspective, the selection frame): its
+/// footprint centre, size and linear colour.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct Instance {
@@ -48,6 +52,99 @@ pub struct Instance {
     pub scale: [f32; 3],
     /// Linear RGBA.
     pub color: [f32; 4],
+}
+
+/// The top of an object: a square on the ground (or on its prism) whose fragment shader
+/// draws the object's emblem (`objects.wgsl`), and the source of its drop shadow.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct Token {
+    /// Centre of the top, room-local (x, height, z).
+    pub position: [f32; 3],
+    /// Footprint width of the silhouette, in tiles (the drawn square is at least a tile).
+    pub size: f32,
+    /// Emblem (low byte, [`Glyph`](crate::scene::style::Glyph)), neighbour links (second
+    /// byte), silhouette ([`Shape`], third byte) and flags (high byte, `scene::style::flag`).
+    pub kind: u32,
+    /// Owner colour (sRGB); alpha 0 for unowned objects.
+    pub accent: [u8; 4],
+    /// Colour of the stored resource (sRGB); alpha: how full the store is.
+    pub fill: [u8; 4],
+    /// Hits (255: undamaged, no bar), progress, controller level, a spare byte.
+    pub gauges: [u8; 4],
+    /// Body part counts of a creep: move, work, carry, attack.
+    pub parts_a: [u8; 4],
+    /// Body part counts of a creep: ranged attack, heal, claim, tough.
+    pub parts_b: [u8; 4],
+    /// Opacity (fades in and out).
+    pub fade: f32,
+    /// Height of the ground under the object (its shadow falls there).
+    pub base: f32,
+}
+
+/// An action effect: a beam, bolt or burst between two room-local points.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct EffectInstance {
+    /// Start (the actor), room-local.
+    pub from: [f32; 3],
+    /// Progress of the effect, `0..1`.
+    pub progress: f32,
+    /// End (the target), room-local.
+    pub to: [f32; 3],
+    /// Width (beams) or radius (bursts), tiles.
+    pub width: f32,
+    /// Colour (sRGB) and strength.
+    pub color: [u8; 4],
+    /// How it is drawn (`scene::effects::Look`).
+    pub look: u32,
+}
+
+/// A room visual shape (line, circle, rectangle) drawn with a signed distance field.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct VisualInstance {
+    /// Line: start; circle: centre; rectangle: north-west corner (room-local tiles).
+    pub a: [f32; 2],
+    /// Line: end; circle: unused; rectangle: south-east corner.
+    pub b: [f32; 2],
+    /// Line: width; circle: radius; rectangle: unused.
+    pub size: f32,
+    /// Outline width (0: none).
+    pub stroke_width: f32,
+    /// Fill colour (sRGB, alpha = opacity; 0: none).
+    pub fill: [u8; 4],
+    /// Outline colour (sRGB, alpha = opacity).
+    pub stroke: [u8; 4],
+    /// Kind (low byte: 0 line, 1 circle, 2 rectangle) and dash style (second byte: 0 solid,
+    /// 1 dashed, 2 dotted).
+    pub kind: u32,
+}
+
+/// A vertex of a filled room visual polygon.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct FillVertex {
+    /// Room-local position (tiles).
+    pub position: [f32; 2],
+    /// sRGB colour and opacity.
+    pub color: [u8; 4],
+}
+
+/// A glyph of room visual text: a rectangle of the glyph atlas.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct GlyphInstance {
+    /// Room-local rectangle: north-west corner and size (tiles).
+    pub rect: [f32; 4],
+    /// Atlas rectangle: corner and size (`0..1`).
+    pub uv: [f32; 4],
+    /// Text colour (sRGB, alpha = opacity).
+    pub color: [u8; 4],
+    /// Outline colour (sRGB, alpha = opacity; 0: none).
+    pub stroke: [u8; 4],
+    /// Outline width in distance-field units (`0..0.5`).
+    pub stroke_width: f32,
 }
 
 /// A room of the flat world layer: its corner, its terrain and the overlays of its overview.
@@ -83,20 +180,136 @@ pub const fn rgba(rgb: u32, alpha: u8) -> [u8; 4] {
     [r, g, b, alpha]
 }
 
-/// The shapes objects are drawn with, in instance-buffer order.
+/// The silhouettes of objects, in prism-mesh order; [`Shape::Ring`] is the selection frame.
+/// Each fits the unit footprint; `objects.wgsl` (`silhouette`) evaluates the same outlines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Shape {
-    /// A box.
-    Box,
-    /// A 12-sided prism.
-    Cylinder,
-    /// A square frame (ramparts, extractors, the selection).
+    /// A disc.
+    Circle,
+    /// A square with rounded corners.
+    Square,
+    /// A square standing on a corner.
+    Diamond,
+    /// A hexagon with flat north and south sides.
+    Hexagon,
+    /// An octagon.
+    Octagon,
+    /// A triangle pointing north.
+    Triangle,
+    /// A pentagon pointing north.
+    Pentagon,
+    /// A square frame (the selection).
     Ring,
 }
 
+/// A rounded regular polygon: sides, angle of the first side's normal (from north,
+/// clockwise), apothem and corner radius, in the unit footprint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Polygon {
+    /// Number of sides (0: a circle of radius `apothem`).
+    pub sides: u8,
+    /// Angle of the first side's outward normal, radians clockwise from north.
+    pub angle: f32,
+    /// Distance from the centre to the sides.
+    pub apothem: f32,
+    /// Corner radius.
+    pub rounding: f32,
+}
+
+/// The direction of an angle measured clockwise from north (`-y`), in footprint
+/// coordinates (x east, y south).
+fn direction(angle: f32) -> Vec2 {
+    Vec2::new(angle.sin(), -angle.cos())
+}
+
+impl Polygon {
+    /// Signed distance from `p` (footprint coordinates) to the outline (`objects.wgsl`
+    /// evaluates it; the tests check the outline against it).
+    #[cfg(test)]
+    pub fn sd(&self, p: Vec2) -> f32 {
+        if self.sides == 0 {
+            return p.length() - self.apothem;
+        }
+        let sector = std::f32::consts::TAU / f32::from(self.sides);
+        let half = sector / 2.0;
+        let angle = p.x.atan2(-p.y);
+        let local = (angle - self.angle + half).rem_euclid(sector) - half;
+        let length = p.length();
+        let q = Vec2::new(length * local.cos(), (length * local.sin()).abs());
+        let apothem = self.apothem - self.rounding;
+        let x = q.x - apothem;
+        let y = q.y - apothem * half.tan();
+        Vec2::new(x, y.max(0.0)).length() * x.signum() - self.rounding
+    }
+
+    /// The outline, counter-clockwise on screen (x east, y south: clockwise in the plane),
+    /// with outward normals.
+    pub fn outline(&self) -> Vec<(Vec2, Vec2)> {
+        if self.sides == 0 {
+            return (0..32_u16)
+                .map(|step| {
+                    let normal = direction(f32::from(step) / 32.0 * std::f32::consts::TAU);
+                    (normal * self.apothem, normal)
+                })
+                .collect();
+        }
+        let sector = std::f32::consts::TAU / f32::from(self.sides);
+        let inner = (self.apothem - self.rounding) / (sector / 2.0).cos();
+        let mut points = Vec::new();
+        for side in 0..self.sides {
+            let from = self.angle + sector * f32::from(side);
+            let corner = direction(from + sector / 2.0) * inner;
+            for step in 0..=4_u8 {
+                let normal = direction(from + sector * f32::from(step) / 4.0);
+                points.push((corner + normal * self.rounding, normal));
+            }
+        }
+        points
+    }
+}
+
 impl Shape {
-    /// Every shape, in instance-buffer order.
-    pub const ALL: [Self; 3] = [Self::Box, Self::Cylinder, Self::Ring];
+    /// The prism shapes, in mesh order.
+    pub const ALL: [Self; 8] = [
+        Self::Circle,
+        Self::Square,
+        Self::Diamond,
+        Self::Hexagon,
+        Self::Octagon,
+        Self::Triangle,
+        Self::Pentagon,
+        Self::Ring,
+    ];
+
+    /// The outline of a silhouette (`None` for the ring).
+    pub fn polygon(self) -> Option<Polygon> {
+        use std::f32::consts::{FRAC_PI_4, PI};
+        let polygon = |sides, angle, apothem, rounding| Polygon {
+            sides,
+            angle,
+            apothem,
+            rounding,
+        };
+        Some(match self {
+            Self::Circle => polygon(0, 0.0, 0.5, 0.0),
+            Self::Square => polygon(4, 0.0, 0.5, 0.1),
+            Self::Diamond => polygon(4, FRAC_PI_4, 0.5 * FRAC_PI_4.cos(), 0.05),
+            Self::Hexagon => polygon(6, 0.0, 0.5 * (PI / 6.0).cos(), 0.05),
+            Self::Octagon => polygon(8, 0.0, 0.5, 0.05),
+            Self::Triangle => polygon(3, PI, 0.25, 0.06),
+            Self::Pentagon => polygon(5, PI, 0.5 * (PI / 5.0).cos(), 0.05),
+            Self::Ring => return None,
+        })
+    }
+
+    /// The index of the shape (`Token::kind`'s third byte).
+    #[expect(clippy::cast_possible_truncation, reason = "fewer than 256 shapes")]
+    pub fn index(self) -> u32 {
+        Self::ALL
+            .iter()
+            .position(|shape| *shape == self)
+            .unwrap_or(0) as u32
+    }
 }
 
 /// Vertices and indices of a mesh; indices are absolute (no base vertex: WebGL2 lacks it).
@@ -145,16 +358,15 @@ impl<V> Mesh<V> {
     }
 }
 
-/// The shapes in one mesh, and the index range of each [`Shape`] (in [`Shape::ALL`] order).
-pub fn shapes() -> (Mesh<ShapeVertex>, [std::ops::Range<u32>; 3]) {
+/// The prisms in one mesh, and the index range of each [`Shape`] (in [`Shape::ALL`] order).
+pub fn shapes() -> (Mesh<ShapeVertex>, [std::ops::Range<u32>; 8]) {
     let mut mesh = Mesh::default();
-    let mut ranges = [0..0, 0..0, 0..0];
+    let mut ranges: [std::ops::Range<u32>; 8] = Default::default();
     for (shape, range) in Shape::ALL.into_iter().zip(&mut ranges) {
         let start = mesh.indices.len();
-        match shape {
-            Shape::Box => add_box(&mut mesh),
-            Shape::Cylinder => add_cylinder(&mut mesh, 12),
-            Shape::Ring => add_ring(&mut mesh, 0.36),
+        match shape.polygon() {
+            Some(polygon) => add_prism(&mut mesh, &polygon),
+            None => add_ring(&mut mesh, 0.36),
         }
         *range = index(start)..index(mesh.indices.len());
     }
@@ -173,17 +385,59 @@ fn shape_vertex(normal: Vec3) -> impl Fn(Vec3) -> ShapeVertex {
     }
 }
 
-/// A box over `-0.5..0.5` × `0..1` × `-0.5..0.5` without a bottom face.
-fn add_box(mesh: &mut Mesh<ShapeVertex>) {
-    let (low, high) = (-0.5, 0.5);
-    let top = [
-        Vec3::new(low, 1.0, low),
-        Vec3::new(high, 1.0, low),
-        Vec3::new(high, 1.0, high),
-        Vec3::new(low, 1.0, high),
-    ];
-    mesh.quad(top, Vec3::Y, shape_vertex(Vec3::Y));
-    add_walls(mesh, high, 1.0, Vec3::ONE);
+/// A prism of a silhouette from the ground to height 1, with smooth side normals and a top
+/// cap a little below 1 (the object's token covers it; far enough below not to fight it
+/// for depth).
+fn add_prism(mesh: &mut Mesh<ShapeVertex>, polygon: &Polygon) {
+    let outline = polygon.outline();
+    let Ok(base) = u32::try_from(mesh.vertices.len()) else {
+        return;
+    };
+    let ground = |point: Vec2, height: f32| Vec3::new(point.x, height, point.y);
+    for (point, normal) in &outline {
+        let normal = Vec3::new(normal.x, 0.0, normal.y);
+        mesh.vertices
+            .push(shape_vertex(normal)(ground(*point, 0.0)));
+        mesh.vertices
+            .push(shape_vertex(normal)(ground(*point, 1.0)));
+    }
+    let count = index(outline.len());
+    for side in 0..count {
+        let next = (side + 1) % count;
+        let (a, b) = (base + side * 2, base + next * 2);
+        // Counter-clockwise seen from outside: the outline runs clockwise seen from above.
+        let corners = [
+            ground(outline[side as usize].0, 0.0),
+            ground(outline[next as usize].0, 0.0),
+            ground(outline[next as usize].0, 1.0),
+        ];
+        let outward = Vec3::new(
+            outline[side as usize].1.x + outline[next as usize].1.x,
+            0.0,
+            outline[side as usize].1.y + outline[next as usize].1.y,
+        );
+        let facing = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .dot(outward);
+        if facing >= 0.0 {
+            mesh.indices.extend([a, b, b + 1, a, b + 1, a + 1]);
+        } else {
+            mesh.indices.extend([a, b + 1, b, a, a + 1, b + 1]);
+        }
+    }
+    let cap = 0.94;
+    for side in 0..outline.len() {
+        let next = (side + 1) % outline.len();
+        mesh.triangle(
+            [
+                Vec3::new(0.0, cap, 0.0),
+                ground(outline[side].0, cap),
+                ground(outline[next].0, cap),
+            ],
+            Vec3::Y,
+            shape_vertex(Vec3::Y),
+        );
+    }
 }
 
 /// The four outer (`sign` = 1) or inner (`sign` = -1, normals inward) side walls of a square
@@ -200,28 +454,6 @@ fn add_walls(mesh: &mut Mesh<ShapeVertex>, half: f32, height: f32, sign: Vec3) {
         ];
         let normal = normal * sign;
         mesh.quad(corners, normal, shape_vertex(normal));
-    }
-}
-
-/// A prism of `sides` sides inscribed in the unit footprint, without a bottom face.
-fn add_cylinder(mesh: &mut Mesh<ShapeVertex>, sides: u16) {
-    let corner = |side: u16| {
-        let angle = f32::from(side) / f32::from(sides) * std::f32::consts::TAU;
-        Vec3::new(angle.cos() * 0.5, 0.0, angle.sin() * 0.5)
-    };
-    for side in 0..sides {
-        let (a, b) = (corner(side), corner(side + 1));
-        let normal = ((a + b) / 2.0).normalize_or(Vec3::X);
-        mesh.quad(
-            [a, b, b + Vec3::Y, a + Vec3::Y],
-            normal,
-            shape_vertex(normal),
-        );
-        mesh.triangle(
-            [Vec3::Y, a + Vec3::Y, b + Vec3::Y],
-            Vec3::Y,
-            shape_vertex(Vec3::Y),
-        );
     }
 }
 
@@ -262,63 +494,7 @@ pub fn tile_height(tile: Tile) -> f32 {
     }
 }
 
-/// The terrain mesh: one top quad per tile and the sides of walls next to lower tiles or the
-/// room edge.
+/// The raised walls of a detail scene (see [`contour`]).
 pub fn terrain(terrain: &Terrain) -> Mesh<TerrainVertex> {
-    let mut mesh = Mesh::default();
-    let is_wall = |x: i16, y: i16| {
-        u8::try_from(x)
-            .ok()
-            .zip(u8::try_from(y).ok())
-            .and_then(|(x, y)| terrain.get(x, y))
-            == Some(Tile::Wall)
-    };
-    for y in 0..50_u8 {
-        for x in 0..50_u8 {
-            let tile = terrain.get(x, y).unwrap_or(Tile::Plain);
-            let height = tile_height(tile);
-            let color = linear(match tile {
-                Tile::Plain => PLAIN,
-                Tile::Swamp => SWAMP,
-                Tile::Wall => WALL_TOP,
-            });
-            let (left, top) = (f32::from(x), f32::from(y));
-            let corners = [
-                Vec3::new(left, height, top),
-                Vec3::new(left + 1.0, height, top),
-                Vec3::new(left + 1.0, height, top + 1.0),
-                Vec3::new(left, height, top + 1.0),
-            ];
-            mesh.quad(corners, Vec3::Y, terrain_vertex(Vec3::Y, color));
-            if tile != Tile::Wall {
-                continue;
-            }
-            let side = linear(WALL_SIDE);
-            let centre = Vec3::new(left + 0.5, 0.0, top + 0.5);
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if is_wall(i16::from(x) + dx, i16::from(y) + dy) {
-                    continue;
-                }
-                let normal = Vec3::new(f32::from(dx), 0.0, f32::from(dy));
-                let along = Vec3::new(normal.z, 0.0, normal.x) * 0.5;
-                let base = centre + normal * 0.5;
-                let corners = [
-                    base - along,
-                    base + along,
-                    base + along + Vec3::Y * height,
-                    base - along + Vec3::Y * height,
-                ];
-                mesh.quad(corners, normal, terrain_vertex(normal, side));
-            }
-        }
-    }
-    mesh
-}
-
-fn terrain_vertex(normal: Vec3, color: [f32; 4]) -> impl Fn(Vec3) -> TerrainVertex {
-    move |position| TerrainVertex {
-        position: position.to_array(),
-        normal: normal.to_array(),
-        color,
-    }
+    contour::walls(terrain)
 }

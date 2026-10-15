@@ -42,17 +42,22 @@ async function expectDrawn(canvas: Locator) {
 const LEVELS = ['Overview', 'Terrain', 'Minimap', 'Live rooms'] as const;
 type Level = (typeof LEVELS)[number];
 
-/** The level of detail the status bar shows, once it stopped changing. */
+/**
+ * The level of detail the status bar shows once it stopped changing: the same for a second
+ * (the camera eases zoom and glides after pans for a few hundred milliseconds).
+ */
 async function settledLevel(page: Page): Promise<Level> {
   const read = async () => {
     const text = (await status(page).textContent()) ?? '';
     return LEVELS.find((level) => text.includes(level));
   };
   let previous = await read();
-  for (let i = 0; i < 40; i++) {
+  let stable = 0;
+  for (let i = 0; i < 60; i++) {
     await page.waitForTimeout(150);
     const current = await read();
-    if (current !== undefined && current === previous) return current;
+    stable = current !== undefined && current === previous ? stable + 1 : 0;
+    if (stable >= 7) return current as Level;
     previous = current;
   }
   throw new Error(`the level of detail does not settle (last: ${previous})`);

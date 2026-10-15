@@ -97,6 +97,59 @@ fn tile_color(code: u32) -> vec3<f32> {
     return globals.plain.rgb;
 }
 
+// Signed distance (tiles) to the region of a cell whose corners (NW, NE, SW, SE as 0 or
+// 1) are of a kind, at cell coordinate `q`: `mesh/contour.rs` (`cell_sd`) has the rules.
+fn cell_sd(c: vec4<f32>, q: vec2<f32>) -> f32 {
+    let count = c.x + c.y + c.z + c.w;
+    if count < 0.5 {
+        return 1.0;
+    }
+    if count > 3.5 {
+        return -1.0;
+    }
+    if count < 1.5 {
+        let corner = vec2<f32>(c.y + c.w, c.z + c.w);
+        return length(q - corner) - 0.5;
+    }
+    if count > 2.5 {
+        let m = vec4<f32>(1.0) - c;
+        let corner = vec2<f32>(m.y + m.w, m.z + m.w);
+        return 0.5 - length(q - corner);
+    }
+    if c.x == c.w {
+        if c.x > 0.5 {
+            return min(length(q), length(q - vec2<f32>(1.0))) - 0.5;
+        }
+        return min(length(q - vec2<f32>(1.0, 0.0)), length(q - vec2<f32>(0.0, 1.0))) - 0.5;
+    }
+    if c.x == c.y {
+        return select(0.5 - q.y, q.y - 0.5, c.x > 0.5);
+    }
+    return select(0.5 - q.x, q.x - 0.5, c.x > 0.5);
+}
+
+// Terrain at room-local `local` with smoothed outlines (`mesh/contour.rs`), `px` tiles per
+// pixel: walls rounded, swamps blended in, a soft shadow on the ground around walls.
+fn smooth_terrain(slot: u32, local: vec2<f32>, px: f32) -> vec3<f32> {
+    let cell = floor(local - vec2<f32>(0.5));
+    let q = local - vec2<f32>(0.5) - cell;
+    let codes = vec4<u32>(
+        tile_code(slot, cell),
+        tile_code(slot, cell + vec2<f32>(1.0, 0.0)),
+        tile_code(slot, cell + vec2<f32>(0.0, 1.0)),
+        tile_code(slot, cell + vec2<f32>(1.0, 1.0)),
+    );
+    let walls = select(vec4<f32>(0.0), vec4<f32>(1.0), codes == vec4<u32>(1u));
+    // Swamps run under walls: no plain seams where they meet.
+    let swamps = select(vec4<f32>(0.0), vec4<f32>(1.0), codes != vec4<u32>(0u));
+    let wall = cell_sd(walls, q);
+    let swamp = cell_sd(swamps, q);
+    let aa = max(px, 1e-4);
+    var color = mix(globals.plain.rgb, globals.swamp.rgb, clamp(0.5 - swamp / aa, 0.0, 1.0));
+    color = color * (1.0 - 0.4 * (1.0 - smoothstep(0.0, 0.5, wall)));
+    return mix(color, globals.wall.rgb, clamp(0.5 - wall / aa, 0.0, 1.0));
+}
+
 @fragment
 fn room_fragment(in: RoomOut) -> @location(0) vec4<f32> {
     // Tiles per pixel (derivatives and sampling in uniform control flow, before branches).
@@ -111,15 +164,25 @@ fn room_fragment(in: RoomOut) -> @location(0) vec4<f32> {
         + globals.plain.rgb * shares.b) * light + globals.pending.rgb * missing;
     let near = globals.params.x;
     if near > 0.0 {
-        // Full resolution, decoded from the packed terrain: four taps a quarter pixel apart
-        // (rotated grid) antialias tile edges and average tiles smaller than a pixel.
         var tiles = globals.pending.rgb;
         if in.slot != PENDING {
-            let a = tile_color(tile_code(in.slot, in.local + vec2<f32>(-0.125, -0.375) * footprint));
-            let b = tile_color(tile_code(in.slot, in.local + vec2<f32>(0.375, -0.125) * footprint));
-            let c = tile_color(tile_code(in.slot, in.local + vec2<f32>(0.125, 0.375) * footprint));
-            let d = tile_color(tile_code(in.slot, in.local + vec2<f32>(-0.375, 0.125) * footprint));
-            tiles = (a + b + c + d) * 0.25 * light;
+            // Tiles of a few pixels and more: smoothed outlines; smaller ones: four taps a
+            // quarter pixel apart (rotated grid) average what a pixel covers.
+            let px = max(footprint.x, footprint.y);
+            let sharp = 1.0 - smoothstep(0.2, 0.45, px);
+            var averaged = vec3<f32>(0.0);
+            if sharp < 1.0 {
+                let a = tile_color(tile_code(in.slot, in.local + vec2<f32>(-0.125, -0.375) * footprint));
+                let b = tile_color(tile_code(in.slot, in.local + vec2<f32>(0.375, -0.125) * footprint));
+                let c = tile_color(tile_code(in.slot, in.local + vec2<f32>(0.125, 0.375) * footprint));
+                let d = tile_color(tile_code(in.slot, in.local + vec2<f32>(-0.375, 0.125) * footprint));
+                averaged = (a + b + c + d) * 0.25;
+            }
+            var smoothed = vec3<f32>(0.0);
+            if sharp > 0.0 {
+                smoothed = smooth_terrain(in.slot, in.local, px);
+            }
+            tiles = mix(averaged, smoothed, sharp) * light;
         }
         color = mix(color, tiles, near);
     }

@@ -17,7 +17,17 @@ thiserror.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-web-sys = { workspace = true, features = ["HtmlCanvasElement", "Performance", "Window"] }
+# Room visual text is rasterized with the browser's canvas text API (`OffscreenCanvas`).
+wasm-bindgen.workspace = true
+web-sys = { workspace = true, features = [
+    "HtmlCanvasElement",
+    "ImageData",
+    "OffscreenCanvas",
+    "OffscreenCanvasRenderingContext2d",
+    "Performance",
+    "TextMetrics",
+    "Window",
+] }
 wgpu = { workspace = true, features = ["webgl", "webgpu"] }
 
 [dev-dependencies]

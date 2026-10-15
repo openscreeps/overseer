@@ -223,8 +223,16 @@ impl Camera {
         Vec3::new(self.target.x, 0.0, self.target.y)
     }
 
+    /// The view direction (unit) in the current mode.
+    pub fn forward(&self) -> Vec3 {
+        match self.mode {
+            ViewMode::TopDown => Vec3::NEG_Y,
+            ViewMode::Perspective => (self.target3() - self.eye()).normalize_or(Vec3::NEG_Y),
+        }
+    }
+
     /// The eye position in the current mode.
-    fn eye(&self) -> Vec3 {
+    pub fn eye(&self) -> Vec3 {
         match self.mode {
             ViewMode::TopDown => self.target3() + Vec3::Y * TOP_DOWN_EYE,
             ViewMode::Perspective => {

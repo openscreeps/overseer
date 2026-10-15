@@ -1,8 +1,10 @@
 //! The wgpu side: buffers and textures mirroring the [`World`], and the render pass of a
 //! frame. Layers are drawn in order: the rooms (terrain from the overview texture and the
 //! packed terrain texture, status and owner, borders; one instanced draw) and minimap points
-//! flat on the ground without depth, then the detail scenes with depth (blended by their
-//! opacity) and the selection frame over everything.
+//! flat on the ground without depth; then each detail scene: raised walls and object prisms
+//! (perspective only) with depth, shadows and object tokens (blended, far to near), action
+//! effects (added), bot visuals (polygon fills, shapes, text); the selection frame over
+//! everything.
 
 mod pipelines;
 
@@ -14,7 +16,11 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use crate::MINIMAP_ROOMS;
 use crate::camera::room_origin;
-use crate::mesh::{self, Instance, PointInstance, RoomInstance};
+use crate::mesh::{
+    self, EffectInstance, FillVertex, GlyphInstance, Instance, PointInstance, RoomInstance, Token,
+    VisualInstance,
+};
+use crate::text::ATLAS_SIDE;
 use crate::view::{Fades, View};
 use crate::world::terrain::{LAYER_HEIGHT, LAYER_WIDTH};
 use crate::world::{DETAIL_SLOTS, Detail, POINTS, Upload, World};
@@ -42,6 +48,7 @@ struct Globals {
     wall: [f32; 4],
     pending: [f32; 4],
     overview: [f32; 4],
+    eye: [f32; 4],
 }
 
 /// The per-room uniform block of detail scenes (`Locals` in `shader.wgsl`).
@@ -57,19 +64,26 @@ struct Locals {
 pub struct Draw {
     /// World to clip space.
     pub view_projection: Mat4,
+    /// The camera's eye (world).
+    pub eye: Vec3,
+    /// Whether the camera is in perspective (prisms and raised walls show).
+    pub perspective: bool,
     /// Layer opacities.
     pub fades: Fades,
     /// The selection frame.
     pub selection: Option<Instance>,
-    /// Frame time (ms), for the detail scenes' fade-in.
+    /// Frame time (ms), for fades and animations.
     pub now: f64,
 }
 
 impl Draw {
     /// The frame of `view` at `now`.
     pub fn of(view: &View, now: f64) -> Self {
+        let eye = view.eye();
         Self {
             view_projection: view.camera.view_projection(),
+            eye: eye.position,
+            perspective: eye.perspective,
             fades: view.fades(),
             selection: view.selection(),
             now,
@@ -86,16 +100,78 @@ struct Targets {
     msaa: Option<wgpu::TextureView>,
 }
 
+/// A vertex buffer of `T`s that grows (to the next power of two) when a scene needs more.
+#[derive(Debug)]
+struct Slab {
+    label: &'static str,
+    stride: usize,
+    buffer: wgpu::Buffer,
+    /// Items the buffer holds.
+    capacity: usize,
+    /// Items written.
+    len: u32,
+}
+
+impl Slab {
+    fn new(device: &wgpu::Device, label: &'static str, stride: usize, capacity: usize) -> Self {
+        Self {
+            label,
+            stride,
+            buffer: buffer(device, label, capacity * stride, wgpu::BufferUsages::VERTEX),
+            capacity,
+            len: 0,
+        }
+    }
+
+    /// Makes room for `items` (outside drawing: allocates only when growing).
+    fn reserve(&mut self, device: &wgpu::Device, items: usize) {
+        if items > self.capacity {
+            self.capacity = items.next_power_of_two();
+            self.buffer = buffer(
+                device,
+                self.label,
+                self.capacity * self.stride,
+                wgpu::BufferUsages::VERTEX,
+            );
+        }
+    }
+
+    /// Writes `items` from the start; nothing when they do not fit (see `reserve`).
+    fn write<T: Pod>(&mut self, queue: &wgpu::Queue, items: &[T]) {
+        if items.len() > self.capacity {
+            self.len = 0;
+            return;
+        }
+        if !items.is_empty() {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(items));
+        }
+        self.len = u32::try_from(items.len()).unwrap_or(0);
+    }
+
+    /// The bytes of items `range`.
+    fn slice(&self, range: Range<u32>) -> wgpu::BufferSlice<'_> {
+        let stride = self.stride as u64;
+        self.buffer
+            .slice(u64::from(range.start) * stride..u64::from(range.end) * stride)
+    }
+}
+
 /// GPU resources of one detail slot.
 #[derive(Debug)]
 struct DetailGpu {
     /// [`Detail::id`] of the scene uploaded (0: none).
     id: u64,
     terrain_version: u64,
-    /// Terrain vertex and index buffers and index count.
+    /// Wall vertex and index buffers and index count.
     terrain: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
-    instances: wgpu::Buffer,
-    capacity: usize,
+    tokens: Slab,
+    sides: Slab,
+    effects: Slab,
+    /// Visuals uploaded: the scene's visuals version.
+    visuals_version: u64,
+    prims: Slab,
+    fills: Slab,
+    glyphs: Slab,
     locals: wgpu::Buffer,
     group: wgpu::BindGroup,
 }
@@ -125,9 +201,12 @@ pub struct Gpu {
     overview_sampler: wgpu::Sampler,
     /// Group 1 of the rooms: both textures (`None` until they exist or after either changed).
     rooms_group: Option<wgpu::BindGroup>,
+    /// The glyph atlas (`R8Unorm`, see `text.rs`) and its group.
+    atlas: wgpu::Texture,
+    atlas_group: wgpu::BindGroup,
     shape_vertices: wgpu::Buffer,
     shape_indices: wgpu::Buffer,
-    shape_ranges: [Range<u32>; 3],
+    shape_ranges: [Range<u32>; 8],
     rooms: wgpu::Buffer,
     room_capacity: usize,
     room_count: u32,
@@ -170,12 +249,45 @@ impl Gpu {
                 resource: globals.as_entire_binding(),
             }],
         });
-        let overview_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("overview"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..wgpu::SamplerDescriptor::default()
+        let linear = |label| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                ..wgpu::SamplerDescriptor::default()
+            })
+        };
+        let overview_sampler = linear("overview");
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_SIDE,
+                height: ATLAS_SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = linear("glyph atlas");
+        let atlas_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glyph atlas"),
+            layout: &pipelines.atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
         });
         let (shapes, shape_ranges) = mesh::shapes();
         let shape_vertices = device.create_buffer_init(&BufferInitDescriptor {
@@ -198,7 +310,7 @@ impl Gpu {
         let room_capacity = 1;
         let rooms = buffer(&device, "rooms", size_of::<RoomInstance>(), vertex);
         let details = (0..DETAIL_SLOTS)
-            .map(|_| detail_gpu(&device, &pipelines, 64))
+            .map(|_| detail_gpu(&device, &pipelines))
             .collect();
         let selection = buffer(&device, "selection", size_of::<Instance>(), vertex);
         let world_locals = device.create_buffer_init(&BufferInitDescriptor {
@@ -222,6 +334,8 @@ impl Gpu {
             overview: None,
             overview_sampler,
             rooms_group: None,
+            atlas,
+            atlas_group,
             shape_vertices,
             shape_indices,
             shape_ranges,
@@ -242,7 +356,8 @@ impl Gpu {
     }
 
     /// Uploads what changed in the world: room instances, terrain and overview texels,
-    /// minimap slots and detail terrain; grows buffers and textures to the world's needs.
+    /// minimap slots, glyphs, detail walls and visuals; grows buffers and textures to the
+    /// world's needs.
     pub fn sync(&mut self, world: &mut World) {
         self.sync_rooms(world);
         self.sync_textures(world);
@@ -260,12 +375,39 @@ impl Gpu {
             }
         });
         minimaps.dirty = dirty;
+        let atlas = &self.atlas;
+        world.atlas.flush(|origin, field| {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: atlas,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: origin.0,
+                        y: origin.1,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                field,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(crate::text::CELL),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: crate::text::CELL,
+                    height: crate::text::CELL,
+                    depth_or_array_layers: 1,
+                },
+            );
+        });
         for (gpu, detail) in self.details.iter_mut().zip(world.details()) {
             if let Some(detail) = detail {
-                sync_detail(&self.device, gpu, detail);
+                sync_detail(&self.device, &self.queue, gpu, detail);
             } else {
                 gpu.id = 0;
                 gpu.terrain = None;
+                gpu.visuals_version = 0;
             }
         }
     }
@@ -429,8 +571,11 @@ impl Gpu {
     }
 
     /// Writes the uniforms and instances of a frame.
-    fn prepare(&self, draw: &Draw, world: &World) {
+    fn prepare(&mut self, draw: &Draw, world: &World) {
         let terrain = |rgb| mesh::linear(rgb);
+        // Seconds, wrapping every hour (f32 keeps sub-millisecond steps).
+        #[expect(clippy::cast_possible_truncation, reason = "below 3600 after the wrap")]
+        let time = (draw.now / 1000.0).rem_euclid(3600.0) as f32;
         let globals = Globals {
             view_projection: draw.view_projection.to_cols_array_2d(),
             light: light().extend(0.0).to_array(),
@@ -445,18 +590,17 @@ impl Gpu {
             wall: terrain(mesh::WALL_TOP),
             pending: terrain(mesh::PENDING),
             overview: world.overview.placement(),
+            eye: draw.eye.extend(time).to_array(),
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        for (gpu, detail) in self.details.iter().zip(world.details()) {
+        for (gpu, detail) in self.details.iter_mut().zip(world.details()) {
             let Some(detail) = detail else {
                 continue;
             };
-            let instances = detail.scene.instances();
-            if !instances.is_empty() && instances.len() <= gpu.capacity {
-                self.queue
-                    .write_buffer(&gpu.instances, 0, bytemuck::cast_slice(instances));
-            }
+            gpu.tokens.write(&self.queue, detail.scene.tokens());
+            gpu.sides.write(&self.queue, detail.scene.sides());
+            gpu.effects.write(&self.queue, detail.scene.effects());
             let origin = room_origin(detail.room);
             let tint = world.tint(detail.room);
             let [r, g, b, _] = mesh::linear(u32::from_be_bytes([0, tint[0], tint[1], tint[2]]));
@@ -480,11 +624,14 @@ impl Gpu {
 
     /// Draws a frame of the world into `output` (a view of [`Self::format`], sized by the
     /// latest [`Self::resize`]).
-    pub fn draw(&self, output: &wgpu::TextureView, draw: &Draw, world: &World) {
+    pub fn draw(&mut self, output: &wgpu::TextureView, draw: &Draw, world: &World) {
+        if self.targets.is_none() {
+            return;
+        }
+        self.prepare(draw, world);
         let Some(targets) = &self.targets else {
             return;
         };
-        self.prepare(draw, world);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -525,7 +672,7 @@ impl Gpu {
                 pass.set_vertex_buffer(0, self.shape_vertices.slice(..));
                 pass.set_vertex_buffer(1, self.selection.slice(..));
                 pass.set_index_buffer(self.shape_indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(self.shape_ranges[2].clone(), 0, 0..1);
+                pass.draw_indexed(self.shape_ranges[7].clone(), 0, 0..1);
             }
         }
         self.queue.submit([encoder.finish()]);
@@ -559,7 +706,7 @@ impl Gpu {
         }
     }
 
-    /// The detail scenes: terrain, then objects per shape.
+    /// The detail scenes: walls and prisms (perspective), shadows, tokens, effects, visuals.
     fn draw_details(&self, pass: &mut wgpu::RenderPass<'_>, draw: &Draw, world: &World) {
         let bounds = world.bounds();
         for (gpu, detail) in self.details.iter().zip(world.details()) {
@@ -573,27 +720,54 @@ impl Gpu {
                 continue;
             }
             pass.set_bind_group(1, &gpu.group, &[]);
-            if let Some((vertices, indices, count)) = &gpu.terrain {
-                pass.set_pipeline(&self.pipelines.detail_terrain);
-                pass.set_vertex_buffer(0, vertices.slice(..));
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*count, 0, 0..1);
-            }
-            if detail.scene.instances().len() > gpu.capacity {
-                continue;
-            }
-            pass.set_pipeline(&self.pipelines.objects);
-            pass.set_vertex_buffer(0, self.shape_vertices.slice(..));
-            pass.set_index_buffer(self.shape_indices.slice(..), wgpu::IndexFormat::Uint32);
-            for (shape, range) in self.shape_ranges.iter().zip(&detail.frame.ranges) {
-                if range.is_empty() {
-                    continue;
+            if draw.perspective {
+                if let Some((vertices, indices, count)) = &gpu.terrain {
+                    pass.set_pipeline(&self.pipelines.detail_terrain);
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..*count, 0, 0..1);
                 }
-                // WebGL2 has no first-instance offset: bind the buffer at the first instance.
-                let stride = size_of::<Instance>() as u64;
-                let bytes = u64::from(range.start) * stride..u64::from(range.end) * stride;
-                pass.set_vertex_buffer(1, gpu.instances.slice(bytes));
-                pass.draw_indexed(shape.clone(), 0, 0..range.end - range.start);
+                if gpu.sides.len > 0 {
+                    pass.set_pipeline(&self.pipelines.sides);
+                    pass.set_vertex_buffer(0, self.shape_vertices.slice(..));
+                    pass.set_index_buffer(self.shape_indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (shape, range) in self.shape_ranges.iter().zip(&detail.frame.sides) {
+                        if range.is_empty() || range.end > gpu.sides.len {
+                            continue;
+                        }
+                        // WebGL2 has no first-instance offset: bind at the first instance.
+                        pass.set_vertex_buffer(1, gpu.sides.slice(range.clone()));
+                        pass.draw_indexed(shape.clone(), 0, 0..range.end - range.start);
+                    }
+                }
+            }
+            if gpu.tokens.len > 0 {
+                pass.set_vertex_buffer(0, gpu.tokens.slice(0..gpu.tokens.len));
+                pass.set_pipeline(&self.pipelines.shadows);
+                pass.draw(0..6, 0..gpu.tokens.len);
+                pass.set_pipeline(&self.pipelines.tokens);
+                pass.draw(0..6, 0..gpu.tokens.len);
+            }
+            if gpu.effects.len > 0 {
+                pass.set_pipeline(&self.pipelines.effects);
+                pass.set_vertex_buffer(0, gpu.effects.slice(0..gpu.effects.len));
+                pass.draw(0..6, 0..gpu.effects.len);
+            }
+            if gpu.fills.len > 0 {
+                pass.set_pipeline(&self.pipelines.fills);
+                pass.set_vertex_buffer(0, gpu.fills.slice(0..gpu.fills.len));
+                pass.draw(0..gpu.fills.len, 0..1);
+            }
+            if gpu.prims.len > 0 {
+                pass.set_pipeline(&self.pipelines.prims);
+                pass.set_vertex_buffer(0, gpu.prims.slice(0..gpu.prims.len));
+                pass.draw(0..6, 0..gpu.prims.len);
+            }
+            if gpu.glyphs.len > 0 {
+                pass.set_pipeline(&self.pipelines.glyphs);
+                pass.set_bind_group(2, &self.atlas_group, &[]);
+                pass.set_vertex_buffer(0, gpu.glyphs.slice(0..gpu.glyphs.len));
+                pass.draw(0..6, 0..gpu.glyphs.len);
             }
         }
     }
@@ -604,20 +778,22 @@ fn light() -> Vec3 {
     Vec3::new(-0.4, 1.0, -0.3).normalize()
 }
 
-/// Uploads a detail scene's terrain when it changed and grows its instance buffer.
-fn sync_detail(device: &wgpu::Device, gpu: &mut DetailGpu, detail: &Detail) {
+/// Uploads a detail scene's walls and visuals when they changed and grows its instance
+/// buffers to what its frames need.
+fn sync_detail(device: &wgpu::Device, queue: &wgpu::Queue, gpu: &mut DetailGpu, detail: &Detail) {
     let (terrain, version) = detail.scene.terrain();
     if gpu.id != detail.id || gpu.terrain_version != version {
         gpu.id = detail.id;
         gpu.terrain_version = version;
+        gpu.visuals_version = 0;
         gpu.terrain = (!terrain.indices.is_empty()).then(|| {
             let vertices = device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("terrain vertices"),
+                label: Some("wall vertices"),
                 contents: bytemuck::cast_slice(&terrain.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
             let indices = device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("terrain indices"),
+                label: Some("wall indices"),
                 contents: bytemuck::cast_slice(&terrain.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
@@ -625,15 +801,24 @@ fn sync_detail(device: &wgpu::Device, gpu: &mut DetailGpu, detail: &Detail) {
             (vertices, indices, count)
         });
     }
-    let needed = detail.scene.instance_capacity();
-    if needed > gpu.capacity {
-        gpu.capacity = needed.next_power_of_two();
-        gpu.instances = instance_buffer(device, gpu.capacity);
+    let (objects, effects) = detail.scene.capacity();
+    gpu.tokens.reserve(device, objects);
+    gpu.sides.reserve(device, objects);
+    gpu.effects.reserve(device, effects);
+    let visuals = detail.scene.visuals();
+    if gpu.visuals_version != visuals.version {
+        gpu.visuals_version = visuals.version;
+        gpu.prims.reserve(device, visuals.prims.len());
+        gpu.fills.reserve(device, visuals.fills.len());
+        gpu.glyphs.reserve(device, visuals.glyphs.len());
+        gpu.prims.write(queue, &visuals.prims);
+        gpu.fills.write(queue, &visuals.fills);
+        gpu.glyphs.write(queue, &visuals.glyphs);
     }
 }
 
-/// An empty detail slot with room for `capacity` instances.
-fn detail_gpu(device: &wgpu::Device, pipelines: &Pipelines, capacity: usize) -> DetailGpu {
+/// An empty detail slot.
+fn detail_gpu(device: &wgpu::Device, pipelines: &Pipelines) -> DetailGpu {
     let locals = buffer(
         device,
         "locals",
@@ -645,20 +830,16 @@ fn detail_gpu(device: &wgpu::Device, pipelines: &Pipelines, capacity: usize) -> 
         id: 0,
         terrain_version: 0,
         terrain: None,
-        instances: instance_buffer(device, capacity),
-        capacity,
+        tokens: Slab::new(device, "tokens", size_of::<Token>(), 64),
+        sides: Slab::new(device, "prisms", size_of::<Instance>(), 64),
+        effects: Slab::new(device, "effects", size_of::<EffectInstance>(), 16),
+        visuals_version: 0,
+        prims: Slab::new(device, "visual shapes", size_of::<VisualInstance>(), 16),
+        fills: Slab::new(device, "visual fills", size_of::<FillVertex>(), 16),
+        glyphs: Slab::new(device, "visual text", size_of::<GlyphInstance>(), 16),
         locals,
         group,
     }
-}
-
-fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
-    buffer(
-        device,
-        "instances",
-        capacity * size_of::<Instance>(),
-        wgpu::BufferUsages::VERTEX,
-    )
 }
 
 fn locals_group(

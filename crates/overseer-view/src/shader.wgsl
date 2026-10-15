@@ -1,5 +1,6 @@
-// Detail scenes (appended to common.wgsl): terrain meshes and object shapes in room-local
-// tiles, moved to their room and faded by the per-room uniforms.
+// Detail scenes (appended to common.wgsl): raised walls and object prisms in room-local
+// tiles, moved to their room and faded by the per-room uniforms. `objects.wgsl`,
+// `effects.wgsl` and `visuals.wgsl` follow in the same module.
 
 struct Locals {
     // xyz: world offset of the room; w: opacity.
@@ -23,8 +24,10 @@ fn terrain_vertex(
 ) -> Varyings {
     var out: Varyings;
     out.position = globals.view_projection * vec4<f32>(position + locals.offset.xyz, 1.0);
+    // Wall sides darken towards the ground.
+    let occlusion = select(1.0, 0.55 + 0.45 * clamp(position.y / 0.6, 0.0, 1.0), abs(normal.y) < 0.5);
     let shaded = lit(normal, color);
-    out.color = vec4<f32>(mix(shaded.rgb, locals.tint.rgb, locals.tint.a), locals.offset.w);
+    out.color = vec4<f32>(mix(shaded.rgb * occlusion, locals.tint.rgb, locals.tint.a), locals.offset.w);
     return out;
 }
 
@@ -41,7 +44,9 @@ fn object_vertex(
     out.position = globals.view_projection * vec4<f32>(world, 1.0);
     // Normals of a scaled shape: inverse scale (scales are never zero).
     let shaded = lit(normal / scale, color);
-    out.color = vec4<f32>(shaded.rgb, shaded.a * locals.offset.w);
+    // Prism sides darken towards the ground.
+    let occlusion = select(1.0, 0.6 + 0.4 * position.y, abs(normal.y) < 0.5);
+    out.color = vec4<f32>(shaded.rgb * occlusion, shaded.a * locals.offset.w);
     return out;
 }
 

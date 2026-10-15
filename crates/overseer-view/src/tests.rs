@@ -14,13 +14,21 @@ use serde_json::{Value, json};
 
 use crate::camera::{rect_extent, room_centre};
 use crate::gpu::{Draw, Gpu};
-use crate::scene::Scene;
+use crate::scene::{Eye, Scene, Timing};
+use crate::text::Atlas;
 use crate::view::{Fades, View};
 use crate::world::{Limits, World, tile_origin};
 use crate::{
     CameraState, DETAIL_PX_PER_ROOM, Lod, MINIMAP_PX_PER_ROOM, MINIMAP_ROOMS, MOVE_DURATION_MS,
     PointerButton, Scope, TERRAIN_PX_PER_ROOM, ViewMode,
 };
+
+mod camera_motion;
+mod effects;
+mod look;
+mod motion;
+mod terrain_shape;
+mod visuals;
 
 const ME: &str = "5a0f0e0e0e0e0e0e0e0e0e01";
 const SIZE: Vec2 = Vec2::new(800.0, 600.0);
@@ -126,6 +134,7 @@ fn minimap(user: &str) -> RoomMap {
 /// A room scope on `W1N1` showing an empty snapshot.
 fn view(mode: ViewMode) -> View {
     let mut view = View::new(Limits::WEBGL2);
+    view.set_smooth(false);
     view.set_scope(Scope::Room(room("W1N1")));
     view.resize(SIZE.x, SIZE.y);
     view.set_mode(mode);
@@ -136,6 +145,7 @@ fn view(mode: ViewMode) -> View {
 /// A world scope over the shard, fitted.
 fn world_view() -> View {
     let mut view = View::new(Limits::WEBGL2);
+    view.set_smooth(false);
     view.set_scope(Scope::World(shard()));
     view.resize(SIZE.x, SIZE.y);
     view
@@ -164,9 +174,9 @@ fn drag(view: &mut View, button: PointerButton, from: Vec2, to: Vec2) {
     view.pointer_down(1, from, button);
     for step in 1..=4 {
         #[expect(clippy::cast_precision_loss, reason = "small numbers")]
-        view.pointer_move(1, from.lerp(to, step as f32 / 4.0));
+        view.pointer_move(1, from.lerp(to, step as f32 / 4.0), 0.0);
     }
-    assert_eq!(view.pointer_up(1, to), None, "a drag is not a click");
+    assert_eq!(view.pointer_up(1, to, 0.0), None, "a drag is not a click");
 }
 
 /// Every probe tile whose top centre is on screen picks itself, and the ray through the
@@ -230,7 +240,7 @@ fn projection_and_picking_round_trip_in_both_modes() {
             Vec2::new(470.0, 260.0),
         );
         assert_round_trips(&view, &probes);
-        view.wheel(Vec2::new(300.0, 200.0), -300.0);
+        view.wheel(Vec2::new(300.0, 200.0), -300.0, 0.0);
         assert_round_trips(&view, &probes);
         if mode == ViewMode::Perspective {
             drag(
@@ -318,7 +328,7 @@ fn wheel_and_pinch_zoom_around_the_pointer() {
         };
         let grabbed = view.camera.ground_point(anchor, 0.0).unwrap();
         let wide = span(&view);
-        view.wheel(anchor, -400.0);
+        view.wheel(anchor, -400.0, 0.0);
         assert!(span(&view) < wide * 0.7, "{mode:?}: wheel up zooms in");
         let under = view.camera.ground_point(anchor, 0.0).unwrap();
         assert!(
@@ -329,15 +339,15 @@ fn wheel_and_pinch_zoom_around_the_pointer() {
         let narrow = span(&view);
         view.pointer_down(1, Vec2::new(380.0, 300.0), PointerButton::Primary);
         view.pointer_down(2, Vec2::new(420.0, 300.0), PointerButton::Primary);
-        view.pointer_move(1, Vec2::new(300.0, 300.0));
-        view.pointer_move(2, Vec2::new(500.0, 300.0));
+        view.pointer_move(1, Vec2::new(300.0, 300.0), 0.0);
+        view.pointer_move(2, Vec2::new(500.0, 300.0), 0.0);
         assert!(
             span(&view) < narrow * 0.5,
             "{mode:?}: spreading fingers zooms in"
         );
-        assert_eq!(view.pointer_up(1, Vec2::new(300.0, 300.0)), None);
+        assert_eq!(view.pointer_up(1, Vec2::new(300.0, 300.0), 0.0), None);
         assert_eq!(
-            view.pointer_up(2, Vec2::new(500.0, 300.0)),
+            view.pointer_up(2, Vec2::new(500.0, 300.0), 0.0),
             None,
             "a pinch is no click"
         );
@@ -363,120 +373,212 @@ fn a_click_returns_the_room_tile_and_its_objects_topmost_first() {
         .project(tile_centre(&view, w1n1, 20, 20))
         .unwrap();
     view.pointer_down(7, point, PointerButton::Primary);
-    view.pointer_move(7, point + Vec2::new(2.0, -2.0));
-    let pick = view.pointer_up(7, point + Vec2::new(2.0, -2.0)).unwrap();
+    view.pointer_move(7, point + Vec2::new(2.0, -2.0), 0.0);
+    let pick = view
+        .pointer_up(7, point + Vec2::new(2.0, -2.0), 0.0)
+        .unwrap();
     assert_eq!((pick.room, pick.x, pick.y), (w1n1, 20, 20));
     assert_eq!(
         pick.objects,
         ["creep-a", "creep-b", "energy", "rampart", "spawn", "road"]
     );
     assert_eq!(
-        view.pointer_up(7, point),
+        view.pointer_up(7, point, 0.0),
         None,
         "released pointers are forgotten"
     );
 }
 
+/// A scene showing `snapshot` at `now` (no text rasterizer).
+fn show(scene: &mut Scene, snapshot: &RoomSnapshot, now: f64) -> bool {
+    scene.set_room(snapshot, Timing::at(now), &mut Atlas::default())
+}
+
 #[test]
-fn moved_objects_glide_and_new_or_removed_objects_snap() {
+fn moved_objects_glide_new_ones_fade_in_and_removed_ones_fade_out() {
     let terrain = terrain();
     let mut scene = Scene::default();
-    scene.set_room(
+    show(
+        &mut scene,
         &snapshot(
             &terrain,
             vec![creep("mover", 10, 10, ME), creep("gone", 1, 1, ME)],
         ),
         0.0,
     );
+    assert_eq!(
+        scene.drawn("mover", 0.0).unwrap().3,
+        1.0,
+        "the first snapshot snaps"
+    );
     let start = 1000.0;
-    scene.set_room(
+    show(
+        &mut scene,
         &snapshot(
             &terrain,
             vec![creep("mover", 11, 9, ME), creep("new", 30, 30, ME)],
         ),
         start,
     );
-    let at = |scene: &mut Scene, time: f64| {
-        let frame = scene.frame(time);
-        let offsets: Vec<[f32; 3]> = scene.instances().iter().map(|i| i.offset).collect();
-        (offsets, frame.animating)
+    let at = |scene: &mut Scene, id: &str, time: f64| {
+        let animating = scene.frame(time, &Eye::default()).animating;
+        (scene.drawn(id, time), animating)
     };
-    // Instances follow snapshot order; the removed object is gone, the new one in place.
-    let (offsets, animating) = at(&mut scene, start);
-    assert_eq!(offsets, [[10.5, 0.0, 10.5], [30.5, 0.0, 30.5]]);
+    let (mover, animating) = at(&mut scene, "mover", start);
+    assert_eq!(mover.unwrap().0, Vec2::new(10.0, 10.0));
     assert!(animating);
-    let (offsets, animating) = at(&mut scene, start + MOVE_DURATION_MS / 2.0);
+    let (new, _) = at(&mut scene, "new", start);
     assert_eq!(
-        offsets[0],
-        [11.0, 0.0, 10.0],
+        new.unwrap().0,
+        Vec2::new(30.0, 30.0),
+        "new objects appear in place"
+    );
+    assert_eq!(new.unwrap().3, 0.0, "and fade in");
+    let (gone, _) = at(&mut scene, "gone", start);
+    assert_eq!(
+        gone.unwrap().3,
+        1.0,
+        "removed objects fade out from where they were"
+    );
+    assert_eq!(scene.ghost_count(), 1);
+    let (mover, _) = at(&mut scene, "mover", start + MOVE_DURATION_MS / 2.0);
+    assert_eq!(
+        mover.unwrap().0,
+        Vec2::new(10.5, 9.5),
         "halfway (smoothstep is symmetric)"
     );
-    assert!(animating);
-    let (offsets, _) = at(&mut scene, start + MOVE_DURATION_MS / 4.0);
-    assert!(
-        offsets[0][0] > 10.5 && offsets[0][0] < 10.75,
-        "eased in: {offsets:?}"
-    );
-    let (offsets, animating) = at(&mut scene, start + MOVE_DURATION_MS);
-    assert_eq!(offsets[0], [11.5, 0.0, 9.5]);
-    assert!(!animating, "done after the duration");
+    let (mover, _) = at(&mut scene, "mover", start + MOVE_DURATION_MS / 4.0);
+    let x = mover.unwrap().0.x;
+    assert!(x > 10.1 && x < 10.25, "eased in: {x}");
+    let (mover, _) = at(&mut scene, "mover", start + MOVE_DURATION_MS);
+    assert_eq!(mover.unwrap().0, Vec2::new(11.0, 9.0));
+    let settled = start + crate::scene::FADE_MS;
+    let (new, animating) = at(&mut scene, "new", settled);
+    assert_eq!(new.unwrap().3, 1.0);
+    assert!(!animating, "done after the glide and the fades");
+    assert_eq!(scene.ghost_count(), 0, "faded ghosts are dropped");
+    assert_eq!(scene.tokens().len(), 2);
 
     // A move during a move starts from where the object is drawn.
-    let restart = start + MOVE_DURATION_MS + 100.0;
-    scene.set_room(
+    let restart = settled + 100.0;
+    show(
+        &mut scene,
         &snapshot(&terrain, vec![creep("mover", 12, 9, ME)]),
         restart,
     );
-    scene.set_room(
+    show(
+        &mut scene,
         &snapshot(&terrain, vec![creep("mover", 13, 9, ME)]),
         restart + MOVE_DURATION_MS / 2.0,
     );
-    let (offsets, animating) = at(&mut scene, restart + MOVE_DURATION_MS / 2.0);
-    assert_eq!(offsets, [[12.0, 0.0, 9.5]]);
+    let (mover, animating) = at(&mut scene, "mover", restart + MOVE_DURATION_MS / 2.0);
+    assert_eq!(mover.unwrap().0, Vec2::new(11.5, 9.0));
     assert!(animating);
     // An unchanged snapshot keeps the movement going.
-    scene.set_room(
+    show(
+        &mut scene,
         &snapshot(&terrain, vec![creep("mover", 13, 9, ME)]),
         restart + MOVE_DURATION_MS * 0.75,
     );
-    let (offsets, animating) = at(&mut scene, restart + MOVE_DURATION_MS * 1.5);
-    assert_eq!(offsets, [[13.5, 0.0, 9.5]]);
+    let (mover, animating) = at(&mut scene, "mover", restart + MOVE_DURATION_MS * 1.5);
+    assert_eq!(mover.unwrap().0, Vec2::new(13.0, 9.0));
     assert!(!animating);
+}
+
+#[test]
+fn creeps_inside_their_spawn_hide_and_fade_in_when_they_leave() {
+    let terrain = terrain();
+    let mut scene = Scene::default();
+    let spawning = |spawning: bool| {
+        object(json!({
+            "_id": "baby", "type": "creep", "room": "W1N1", "x": 20, "y": 20, "user": ME,
+            "name": "baby", "hits": 100, "hitsMax": 100, "store": {}, "spawning": spawning,
+            "body": [{"type": "move", "hits": 100}],
+        }))
+    };
+    show(&mut scene, &snapshot(&terrain, vec![spawning(true)]), 0.0);
+    scene.frame(0.0, &Eye::default());
+    assert!(scene.tokens().is_empty(), "hidden in the spawn");
+    show(
+        &mut scene,
+        &snapshot(&terrain, vec![spawning(false)]),
+        500.0,
+    );
+    scene.frame(500.0, &Eye::default());
+    assert!(scene.tokens().is_empty(), "fades in as it leaves");
+    scene.frame(500.0 + crate::scene::FADE_MS / 2.0, &Eye::default());
+    let fade = scene.tokens()[0].fade;
+    assert!(fade > 0.0 && fade < 1.0, "{fade}");
+    scene.frame(500.0 + crate::scene::FADE_MS, &Eye::default());
+    assert_eq!(scene.tokens()[0].fade, 1.0);
+}
+
+#[test]
+fn motion_can_be_switched_off() {
+    let terrain = terrain();
+    let mut scene = Scene::default();
+    scene.set_features(crate::scene::Features {
+        motion: false,
+        ..crate::scene::Features::default()
+    });
+    show(
+        &mut scene,
+        &snapshot(&terrain, vec![creep("c", 10, 10, ME)]),
+        0.0,
+    );
+    show(
+        &mut scene,
+        &snapshot(&terrain, vec![creep("c", 11, 10, ME)]),
+        100.0,
+    );
+    assert_eq!(scene.drawn("c", 100.0).unwrap().0, Vec2::new(11.0, 10.0));
 }
 
 #[test]
 fn another_room_snaps_every_object() {
     let terrain = terrain();
     let mut scene = Scene::default();
-    scene.set_room(&snapshot(&terrain, vec![creep("c", 10, 10, ME)]), 0.0);
+    show(
+        &mut scene,
+        &snapshot(&terrain, vec![creep("c", 10, 10, ME)]),
+        0.0,
+    );
     let other = snapshot_of("W2N1", &terrain, vec![creep("c", 40, 40, ME)]);
-    scene.set_room(&other, 100.0);
-    let frame = scene.frame(100.0);
+    show(&mut scene, &other, 100.0);
+    let frame = scene.frame(100.0, &Eye::default());
     assert!(!frame.animating);
-    assert_eq!(scene.instances()[0].offset, [40.5, 0.0, 40.5]);
+    assert_eq!(scene.drawn("c", 100.0).unwrap().0, Vec2::new(40.0, 40.0));
+    assert_eq!(scene.drawn("c", 100.0).unwrap().3, 1.0);
+    assert_eq!(scene.ghost_count(), 0);
 }
 
 #[test]
-fn terrain_is_rebuilt_only_when_it_changes() {
+fn the_wall_mesh_is_rebuilt_only_when_the_terrain_changes() {
     let terrain = terrain();
     let mut scene = Scene::default();
     assert_eq!(scene.terrain().1, 0);
-    assert!(scene.set_room(&snapshot(&terrain, Vec::new()), 0.0));
+    assert!(show(&mut scene, &snapshot(&terrain, Vec::new()), 0.0));
     let (mesh, version) = scene.terrain();
     assert_eq!(version, 1);
-    // 2500 tops; wall sides: 50 facing the plains, 50 + 2 × 5 at the room edge.
-    assert_eq!(mesh.indices.len(), (2500 + 50 + 50 + 10) * 6);
-    assert!(!scene.set_room(&snapshot(&terrain, vec![creep("c", 9, 9, ME)]), 1.0));
+    assert!(!mesh.indices.is_empty(), "walls are raised");
+    assert!(!show(
+        &mut scene,
+        &snapshot(&terrain, vec![creep("c", 9, 9, ME)]),
+        1.0
+    ));
     let equal = Arc::new((*terrain).clone());
     assert!(
-        !scene.set_room(&snapshot(&equal, Vec::new()), 2.0),
+        !show(&mut scene, &snapshot(&equal, Vec::new()), 2.0),
         "equal terrain"
     );
     assert_eq!(scene.terrain().1, 1);
     let plains = Arc::new(Terrain::decode(&"0".repeat(2500)).unwrap());
-    assert!(scene.set_room(&snapshot(&plains, Vec::new()), 3.0));
+    assert!(show(&mut scene, &snapshot(&plains, Vec::new()), 3.0));
     assert_eq!(scene.terrain().1, 2);
-    assert_eq!(scene.terrain().0.indices.len(), 2500 * 6);
+    assert!(
+        scene.terrain().0.indices.is_empty(),
+        "no walls: nothing raised"
+    );
 }
 
 #[test]
@@ -490,25 +592,71 @@ fn objects_stand_on_raised_walls_and_take_owner_colours() {
         creep("invader", 12, 10, "2"),
         creep("keeper", 13, 10, "3"),
     ];
-    scene.set_room(&snapshot(&terrain, objects), 0.0);
-    scene.frame(0.0);
-    let instances = scene.instances().to_vec();
+    show(&mut scene, &snapshot(&terrain, objects), 0.0);
+    let base = scene.drawn("tunnel", 0.0).unwrap().1;
+    assert_eq!(base, crate::mesh::WALL_HEIGHT, "road on a wall");
+    let colors = |scene: &Scene| {
+        ["mine", "theirs", "invader", "keeper"].map(|id| scene.drawn(id, 0.0).unwrap().2)
+    };
+    let before = colors(&scene);
+    assert_eq!(before[0], before[1], "no user signed in: all players alike");
+    assert_ne!(before[1], before[2]);
+    assert_ne!(before[2], before[3]);
     assert_eq!(
-        instances[0].offset[1],
-        crate::mesh::WALL_HEIGHT,
-        "road on a wall"
+        scene.drawn("tunnel", 0.0).unwrap().2[3],
+        0,
+        "roads have no owner"
     );
-    let colors: Vec<[f32; 4]> = instances[1..].iter().map(|i| i.color).collect();
-    assert_eq!(colors[0], colors[1], "no user signed in: all players alike");
-    assert_ne!(colors[1], colors[2]);
-    assert_ne!(colors[2], colors[3]);
     scene.set_user(Some(ME.to_owned()));
-    scene.frame(0.0);
-    let colors: Vec<[f32; 4]> = scene.instances()[1..].iter().map(|i| i.color).collect();
+    let after = colors(&scene);
     assert_ne!(
-        colors[0], colors[1],
+        after[0], after[1],
         "own creep differs from another player's"
     );
+    // Tokens sit on top of their prism; prisms only show in perspective.
+    let frame = scene.frame(0.0, &Eye::default());
+    assert!(frame.sides.iter().all(std::ops::Range::is_empty));
+    assert!(scene.sides().is_empty(), "no prisms top-down");
+    let eye = Eye {
+        perspective: true,
+        ..Eye::default()
+    };
+    let frame = scene.frame(0.0, &eye);
+    let creeps = &frame.sides[0];
+    assert_eq!(creeps.len(), 4, "four creep cylinders");
+}
+
+#[test]
+fn tokens_are_drawn_far_to_near() {
+    let terrain = terrain();
+    let mut scene = Scene::default();
+    let objects = vec![
+        creep("creep", 20, 20, ME),
+        structure("road", "road", 20, 20),
+        structure("rampart", "rampart", 20, 20),
+        structure("road", "far", 20, 40),
+    ];
+    show(&mut scene, &snapshot(&terrain, objects), 0.0);
+    // Top-down: by height.
+    scene.frame(0.0, &Eye::default());
+    let heights: Vec<f32> = scene
+        .tokens()
+        .iter()
+        .map(|token| token.position[1])
+        .collect();
+    assert!(
+        heights.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{heights:?}"
+    );
+    // Looking north from the south: the far road first.
+    let eye = Eye {
+        position: Vec3::new(20.5, 10.0, 60.0),
+        forward: Vec3::new(0.0, -0.5, -1.0).normalize(),
+        perspective: true,
+    };
+    scene.frame(0.0, &eye);
+    assert_eq!(scene.tokens().len(), 4);
+    assert_eq!(scene.tokens()[3].position[2], 40.5, "the nearest last");
 }
 
 #[test]
@@ -546,7 +694,7 @@ fn zoom_is_continuous_across_the_lod_thresholds() {
         let (mut size, mut fades) = (view.camera.px_per_room(), view.fades());
         for _ in 0..2000 {
             let half_height = view.camera.half_height();
-            view.wheel(anchor, -10.0);
+            view.wheel(anchor, -10.0, 0.0);
             if view.camera.half_height() >= half_height {
                 break;
             }
@@ -1165,10 +1313,10 @@ fn detail_scenes_fade_in_and_are_replaced_farthest_first() {
         #[expect(clippy::cast_precision_loss, reason = "small numbers")]
         world.set_room(&snapshot_of(name, &terrain, Vec::new()), index as f64);
     }
-    let (_, animating) = world.frame(10.0);
+    let (_, animating) = world.frame(10.0, &crate::scene::Eye::default());
     assert!(animating, "fading in");
     assert!(world.detail(room("E0S0")).unwrap().arrival(310.0) >= 1.0);
-    let (_, animating) = world.frame(400.0);
+    let (_, animating) = world.frame(400.0, &crate::scene::Eye::default());
     assert!(!animating);
     world.set_room(&snapshot_of("E0S1", &terrain, Vec::new()), 500.0);
     assert!(
@@ -1265,6 +1413,28 @@ fn frames_render_through_the_noop_backend() {
         }
         view.world
             .set_room(&snapshot_of("W1N1", &terrain, objects.clone()), 0.0);
+        // The next tick: actions (effects), bot visuals with text (a fake rasterizer).
+        view.world.atlas = Atlas::new(Some(Box::new(visuals::Boxes::default())));
+        let mut next = snapshot_of("W1N1", &terrain, objects.clone());
+        next.objects.push(object(json!({
+            "_id": "worker", "type": "creep", "room": "W1N1", "x": 6, "y": 9, "user": ME,
+            "name": "worker", "hits": 100, "hitsMax": 100, "store": {},
+            "body": [{"type": "work", "hits": 100}],
+            "actionLog": {
+                "build": {"x": 7, "y": 7}, "rangedAttack": {"x": 8, "y": 8},
+                "attack": {"x": 6, "y": 8}, "attacked": {}, "rangedMassAttack": {},
+                "say": {"message": "hi", "isPublic": true},
+            },
+        })));
+        next.visuals = serde_json::from_value(json!([
+            {"t": "l", "x1": 1, "y1": 1, "x2": 9, "y2": 9, "s": {"lineStyle": "dashed"}},
+            {"t": "c", "x": 5, "y": 5, "s": {"stroke": "#ff0000", "radius": 2}},
+            {"t": "r", "x": 2, "y": 2, "w": 3, "h": 2, "s": {"stroke": "red", "lineStyle": "dotted"}},
+            {"t": "p", "points": [[0, 0], [4, 0], [2, 3]], "s": {"fill": "blue"}},
+            {"t": "t", "text": "Overseer", "x": 25, "y": 25, "s": {"backgroundColor": "#000"}},
+        ]))
+        .unwrap();
+        view.world.set_room(&next, 500.0);
         view.world
             .set_room(&snapshot_of("W0N1", &terrain, objects), 0.0);
         view.world.mark_no_terrain(room("W2N2"));
@@ -1279,10 +1449,18 @@ fn frames_render_through_the_noop_backend() {
         ] {
             view.set_mode(mode);
             place(&mut view, Vec2::new(-50.0, -50.0), px_per_room);
-            view.world.frame(1000.0);
+            let (_, animating) = view.world.frame(600.0, &view.eye());
+            assert!(animating, "effects play");
+            if mode == ViewMode::Perspective && px_per_room > DETAIL_PX_PER_ROOM {
+                let detail = view.world.detail(room("W1N1")).unwrap();
+                assert!(!detail.scene.sides().is_empty(), "prisms in perspective");
+            }
             gpu.sync(&mut view.world);
-            gpu.draw(&output, &Draw::of(&view, 1000.0), &view.world);
+            gpu.draw(&output, &Draw::of(&view, 600.0), &view.world);
         }
+        let detail = view.world.detail(room("W1N1")).unwrap();
+        assert!(!detail.scene.effects().is_empty(), "effects drawn");
+        assert!(!detail.scene.visuals().glyphs.is_empty(), "text drawn");
         // A texture that grows (more rooms than reserved) and new bounds: new textures,
         // everything uploaded again.
         let layers = view.world.terrain.layers();

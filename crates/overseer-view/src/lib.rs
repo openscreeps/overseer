@@ -62,17 +62,86 @@
 //!
 //! # Detail scenes
 //!
-//! Both [`ViewMode`]s draw the same 3D scene: the terrain (plains and swamps flat, natural
-//! walls raised) and every object as a simple shape whose size and colour follow its kind
-//! and owner. The [`ViewMode::TopDown`] camera is orthographic and looks straight down; the
-//! [`ViewMode::Perspective`] camera orbits the same target at a distance framing the same
-//! zoom. A selected tile ([`Viewer::select`]) is framed in yellow over everything (at least
-//! 14 pixels wide, so it shows at every zoom).
+//! Both [`ViewMode`]s draw the same 3D scene. The [`ViewMode::TopDown`] camera is
+//! orthographic and looks straight down; the [`ViewMode::Perspective`] camera orbits the
+//! same target at a distance framing the same zoom. A selected tile ([`Viewer::select`]) is
+//! framed in yellow over everything (at least 14 pixels wide, so it shows at every zoom).
 //!
-//! A room's terrain mesh is rebuilt only when a snapshot brings a different terrain. Objects
-//! are matched by id between snapshots: one that moved glides to its new tile over
-//! [`MOVE_DURATION_MS`] ([`FrameStats::animating`] is `true` meanwhile); new objects appear
-//! and removed objects disappear at once. Up to four rooms keep a scene at once.
+//! ## Style
+//!
+//! Everything is drawn procedurally in the viewer's own style (no game art):
+//!
+//! - **Terrain** outlines are smoothed ("rounded marching squares" over tile centres, see
+//!   `mesh/contour.rs`): a lone wall is a disc, straight runs keep their tile edges, outer
+//!   corners are rounded and inner corners filleted with half a tile, diagonal neighbours
+//!   stay apart as in the game. The flat world layer evaluates the same shapes as signed
+//!   distances per pixel (swamps blended in, a soft shadow on the ground around walls) once
+//!   tiles are a few pixels wide; in perspective the walls are raised along the same
+//!   outline, sides darkening towards the ground.
+//! - **Objects** are tokens: a square on top of the tile (or of the object's prism) whose
+//!   fragment shader draws the emblem with antialiased signed distance fields. Each kind
+//!   has its own silhouette (disc, rounded square, diamond, hexagon, octagon, triangle,
+//!   pentagon, rings and joined blocks) and emblem. Owned objects carry their owner's colour
+//!   as a rim (own green, other players red, Invaders orange, Source Keepers purple; a
+//!   reserved controller its reserver's); structures are slate. Creeps show a ring of body
+//!   parts (one segment per part, a colour per type) around their carried resource. Stores
+//!   (creeps, spawns, extensions, towers, links, labs, nukers, power spawns) show as a
+//!   glowing core of radius ∝ √fill in the main resource's colour, tanks (storage,
+//!   terminal, container, factory) as a level; damaged objects get a hits bar (not walls
+//!   and ramparts); controllers show their level as pips and their progress as an arc,
+//!   spawns their spawning progress, construction sites theirs. Ramparts are translucent
+//!   blocks over what they protect; roads link to neighbouring roads (diagonals only where
+//!   no orthogonal path exists), constructed walls and ramparts merge with neighbours.
+//!   Where tiles are only a few pixels wide each token turns into its silhouette in one
+//!   summary colour (owner or kind), so the room stays readable when zoomed out.
+//! - **Perspective** adds prisms under the tokens (lit, darkening towards the ground) and
+//!   a bevel lit from the light's side; tokens with a prism cast a soft shadow in both
+//!   modes. Tokens are blended far to near.
+//!
+//! ## Motion
+//!
+//! The server's tick duration is measured from snapshot arrivals: the median of the latest
+//! intervals between snapshots of a room (divided by the ticks between them, gaps of more
+//! than five ticks ignored), within [`MIN_TICK_MS`]..=[`MAX_TICK_MS`], a second before the
+//! first interval ([`Viewer::tick_ms`]). Objects are matched by id between snapshots; one
+//! that moved glides (smoothstep) from where it is drawn to its new tile over 82 % of a
+//! tick (at least [`MOVE_DURATION_MS`]), so it arrives just before the next tick. New
+//! objects (and creeps leaving their spawn) fade and grow in, removed ones fade out where
+//! they were, over 350 ms; a creep still spawning is hidden. A room's first snapshot and
+//! another room snap. [`FrameStats::animating`] is `true` while anything moves, fades or
+//! plays. A snapshot costs under a millisecond to apply (busy rooms of 330 objects); the
+//! wall mesh is rebuilt only when the terrain changes, and frames allocate nothing.
+//!
+//! ## Action effects
+//!
+//! The action logs of creeps, power creeps, towers, links, labs, factories and invader
+//! cores become effects from the snapshot's arrival, synced to the measured tick: beams
+//! (harvest flows from the source, build, repair, upgrade, reserve, attack controller,
+//! melee attack and heal, lab reactions) for 60 % of a tick, bolts (ranged attack and heal,
+//! link transfers) for 40 %, bursts, a spreading ring for mass attacks and flashes on
+//! objects that were attacked or healed; beams follow a gliding actor. They glow (added to
+//! what is behind) and are drawn as ribbons facing the camera. A room's first snapshot
+//! plays none (its log is old news). Creeps' `say` messages show as bubbles.
+//!
+//! ## Bot visuals
+//!
+//! `RoomSnapshot::visuals` (lines, circles, rectangles, polygons, text) are drawn just
+//! above the ground with the game's defaults and styles (colours as CSS colours, opacity,
+//! widths, `dashed` and `dotted` outlines); shapes as antialiased signed distance fields,
+//! polygon fills as triangles (ear clipping), text from a glyph atlas of signed distance
+//! fields rasterized at runtime by the browser's canvas text API (`sans-serif`; sizes are
+//! followed, families and weights are not), sharp at every zoom. Native builds have no
+//! rasterizer: text is laid out but not drawn.
+//!
+//! ## Options
+//!
+//! [`Viewer::set_options`] switches [`ViewOptions`] (all on by default): `motion` (glides,
+//! else objects jump), `effects`, `visuals` (and `say` bubbles), `smooth_camera` (a
+//! released pan glides on with inertia, decaying over about 325 ms; the wheel zoom eases in
+//! around the pointer over about 70 ms per step; else the camera follows input exactly).
+//!
+//! Up to four rooms keep a scene at once. Ambient animations (portal swirl, nuke and
+//! spawning pulses) only advance while frames are drawn.
 //!
 //! # Interest
 //!
@@ -150,6 +219,7 @@ mod clock;
 mod gpu;
 mod mesh;
 mod scene;
+mod text;
 mod view;
 mod world;
 
@@ -164,8 +234,13 @@ use overseer::map::{Interest, RoomCoord, RoomMap, RoomRect, RoomStat};
 use crate::gpu::{Draw, Gpu};
 use crate::view::View;
 
-/// How long an object glides to a new tile, in milliseconds.
+/// Shortest glide of an object to a new tile, in milliseconds: objects glide over most of
+/// the measured tick (see the crate documentation), never quicker than this.
 pub const MOVE_DURATION_MS: f64 = 250.0;
+/// Shortest tick duration assumed when measuring the server's ticks, in milliseconds.
+pub const MIN_TICK_MS: f64 = 100.0;
+/// Longest tick duration assumed when measuring the server's ticks, in milliseconds.
+pub const MAX_TICK_MS: f64 = 6000.0;
 /// How long an animated [`Viewer::look_at`] or [`Viewer::fit`] takes, in milliseconds.
 pub const FLIGHT_MS: f64 = 600.0;
 /// Room size (CSS pixels) from which terrain is drawn: [`Lod::Terrain`].
@@ -282,6 +357,45 @@ pub struct Pick {
     pub objects: Vec<String>,
 }
 
+/// Feature switches of the drawing ([`Viewer::set_options`]); everything is on by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches a settings screen shows one by one"
+)]
+pub struct ViewOptions {
+    /// Objects glide between tiles over the measured tick (off: they jump).
+    pub motion: bool,
+    /// Action effects: beams, bolts, bursts and hit flashes.
+    pub effects: bool,
+    /// Bot room visuals and creeps' `say` bubbles.
+    pub visuals: bool,
+    /// Pan inertia and an eased wheel zoom (off: the camera follows input exactly).
+    pub smooth_camera: bool,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        Self {
+            motion: true,
+            effects: true,
+            visuals: true,
+            smooth_camera: true,
+        }
+    }
+}
+
+impl ViewOptions {
+    const fn features(self) -> scene::Features {
+        scene::Features {
+            motion: self.motion,
+            effects: self.effects,
+            visuals: self.visuals,
+        }
+    }
+}
+
 /// Measurements of one [`Viewer::render`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameStats {
@@ -321,6 +435,7 @@ pub struct Viewer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     backend: &'static str,
+    options: ViewOptions,
 }
 
 impl Viewer {
@@ -481,23 +596,44 @@ impl Viewer {
 
     /// A pointer moved to CSS pixel `(x, y)`; pans, orbits or pinches while pressed.
     pub fn pointer_move(&mut self, id: i32, x: f32, y: f32) {
-        self.view.pointer_move(id, Vec2::new(x, y));
+        self.view.pointer_move(id, Vec2::new(x, y), clock::now());
     }
 
     /// A press released without dragging is a click: returns what is under it (`None`
-    /// outside the scope).
+    /// outside the scope). A pan released while moving glides on (see [`ViewOptions`]).
     pub fn pointer_up(&mut self, id: i32, x: f32, y: f32) -> Option<Pick> {
-        self.view.pointer_up(id, Vec2::new(x, y))
+        self.view.pointer_up(id, Vec2::new(x, y), clock::now())
     }
 
-    /// Zooms around CSS pixel `(x, y)`; positive `delta_y` (scrolling down) zooms out.
+    /// Zooms around CSS pixel `(x, y)`; positive `delta_y` (scrolling down) zooms out. The
+    /// zoom eases in over the next frames (see [`ViewOptions`]).
     pub fn wheel(&mut self, x: f32, y: f32, delta_y: f32) {
-        self.view.wheel(Vec2::new(x, y), delta_y);
+        self.view.wheel(Vec2::new(x, y), delta_y, clock::now());
     }
 
     /// Highlights a room's tile (`None` clears the highlight).
     pub const fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
         self.view.select(tile);
+    }
+
+    /// Switches features of the drawing on or off.
+    pub fn set_options(&mut self, options: ViewOptions) {
+        self.options = options;
+        self.view.set_smooth(options.smooth_camera);
+        self.view.world.set_features(options.features());
+    }
+
+    /// The feature switches in use.
+    #[must_use]
+    pub const fn options(&self) -> ViewOptions {
+        self.options
+    }
+
+    /// The server's tick duration as measured from snapshot arrivals (milliseconds; an
+    /// assumed second before two snapshots of a room arrived).
+    #[must_use]
+    pub fn tick_ms(&self) -> f64 {
+        self.view.world.tick_ms()
     }
 
     /// Draws a frame.
@@ -512,7 +648,8 @@ impl Viewer {
         let flying = self.view.advance(start);
         // Detail scenes advance only while shown.
         let (objects, moving) = if self.view.fades().detail > 0.0 {
-            self.view.world.frame(start)
+            let eye = self.view.eye();
+            self.view.world.frame(start, &eye)
         } else {
             (0, false)
         };
@@ -668,6 +805,7 @@ mod web {
             surface,
             config,
             backend,
+            options: super::ViewOptions::default(),
         })
     }
 

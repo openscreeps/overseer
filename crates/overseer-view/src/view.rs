@@ -6,6 +6,7 @@ use overseer::map::{Interest, RoomCoord, RoomRect};
 
 use crate::camera::{self, Camera, room_at, room_centre};
 use crate::mesh::{Instance, WALL_HEIGHT, linear};
+use crate::scene::Eye;
 use crate::world::{self, Limits, World, tile_origin};
 use crate::{
     CameraState, DETAIL_PX_PER_ROOM, DETAIL_ROOMS, FLIGHT_MS, Lod, MINIMAP_PX_PER_ROOM,
@@ -136,6 +137,74 @@ pub struct View {
     moved: bool,
     flight: Option<Flight>,
     selected: Option<(RoomCoord, u8, u8)>,
+    /// Pan inertia and eased wheel zoom are on.
+    smooth: bool,
+    /// The latest positions of a panning pointer (time, CSS point), newest last.
+    trail: [(f64, Vec2); TRAIL],
+    /// Pan inertia after a released drag.
+    glide: Option<Glide>,
+    /// A wheel zoom easing in.
+    zoom: Option<ZoomEase>,
+}
+
+/// Positions kept to measure a drag's release velocity.
+const TRAIL: usize = 6;
+/// A drag's velocity is measured over its last this many milliseconds.
+const TRAIL_MS: f64 = 90.0;
+/// Time constant of the inertia's decay (ms).
+const GLIDE_DECAY_MS: f32 = 325.0;
+/// Inertia stops below this speed (CSS pixels per millisecond).
+const GLIDE_STOP: f32 = 0.02;
+/// Releases slower than this (CSS pixels per millisecond) do not glide.
+const GLIDE_START: f32 = 0.15;
+/// Time constant of the wheel zoom's easing (ms).
+const ZOOM_EASE_MS: f32 = 70.0;
+/// The rest of an eased zoom below this (log factor) is applied at once.
+const ZOOM_STOP: f32 = 1e-3;
+
+/// Pan inertia: the view keeps moving after a drag, slowing down.
+#[derive(Clone, Copy, Debug)]
+struct Glide {
+    /// CSS pixels per millisecond.
+    velocity: Vec2,
+    last: f64,
+}
+
+/// A wheel zoom easing in around a CSS point.
+#[derive(Clone, Copy, Debug)]
+struct ZoomEase {
+    anchor: Vec2,
+    /// Log of the zoom factor still to apply.
+    remaining: f32,
+    last: f64,
+}
+
+/// Milliseconds from `last` to `now`, as `f32` (never negative).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "frame intervals are small; f32 is plenty"
+)]
+fn elapsed(now: f64, last: f64) -> f32 {
+    (now - last).max(0.0) as f32
+}
+
+/// The velocity (CSS pixels per millisecond) of a drag released at `now`, from its trail
+/// (newest last); `None` when it was slow or had stopped before the release.
+fn release_velocity(trail: &[(f64, Vec2); TRAIL], now: f64) -> Option<Vec2> {
+    let (newest_time, newest) = trail[TRAIL - 1];
+    if now - newest_time > 50.0 {
+        return None;
+    }
+    let (oldest_time, oldest) = trail
+        .iter()
+        .copied()
+        .find(|(time, _)| newest_time - time <= TRAIL_MS)?;
+    let span = elapsed(newest_time, oldest_time);
+    if span <= 0.0 {
+        return None;
+    }
+    let velocity = (newest - oldest) / span;
+    (velocity.length() >= GLIDE_START).then_some(velocity)
 }
 
 impl View {
@@ -162,6 +231,10 @@ impl View {
             moved: false,
             flight: None,
             selected: None,
+            smooth: true,
+            trail: [(f64::NEG_INFINITY, Vec2::ZERO); TRAIL],
+            glide: None,
+            zoom: None,
         };
         view.camera.set_bounds(bounds);
         view.camera.fit();
@@ -248,18 +321,64 @@ impl View {
         }
     }
 
-    /// Advances a flight to `now`; returns whether it continues.
+    /// Advances a flight, pan inertia and an eased zoom to `now`; returns whether any
+    /// continues.
     pub fn advance(&mut self, now: f64) -> bool {
-        let Some(flight) = self.flight else {
-            return false;
-        };
-        let (target, half_height, done) = flight.at(now);
-        self.camera.set_view(target, half_height);
-        if done {
-            self.flight = None;
+        let mut moving = false;
+        if let Some(flight) = self.flight {
+            let (target, half_height, done) = flight.at(now);
+            self.camera.set_view(target, half_height);
+            if done {
+                self.flight = None;
+            }
+            self.changed();
+            moving |= !done;
         }
-        self.changed();
-        !done
+        if let Some(mut glide) = self.glide.take() {
+            let elapsed = elapsed(now, glide.last);
+            let decay = (-elapsed / GLIDE_DECAY_MS).exp();
+            // The distance covered while the velocity decays exponentially.
+            let step = glide.velocity * GLIDE_DECAY_MS * (1.0 - decay);
+            let centre = self.camera.size() / 2.0;
+            self.camera.pan(centre, centre + step);
+            glide.velocity *= decay;
+            glide.last = now;
+            self.changed();
+            if glide.velocity.length() > GLIDE_STOP {
+                self.glide = Some(glide);
+                moving = true;
+            }
+        }
+        if let Some(mut zoom) = self.zoom.take() {
+            let elapsed = elapsed(now, zoom.last);
+            let share = 1.0 - (-elapsed / ZOOM_EASE_MS).exp();
+            let step = if zoom.remaining.abs() < ZOOM_STOP {
+                zoom.remaining
+            } else {
+                zoom.remaining * share
+            };
+            self.camera.zoom(zoom.anchor, step.exp());
+            zoom.remaining -= step;
+            zoom.last = now;
+            self.changed();
+            if zoom.remaining != 0.0 {
+                self.zoom = Some(zoom);
+                moving = true;
+            }
+        }
+        moving
+    }
+
+    /// Sets whether pan inertia and the wheel zoom ease (`false`: they act at once).
+    pub fn set_smooth(&mut self, smooth: bool) {
+        self.smooth = smooth;
+        if !smooth {
+            self.glide = None;
+            if let Some(zoom) = self.zoom.take() {
+                self.camera.zoom(zoom.anchor, zoom.remaining.exp());
+                self.changed();
+            }
+        }
     }
 
     /// Moves the view by CSS pixels (positive: east and south).
@@ -283,12 +402,15 @@ impl View {
     /// The user takes over the camera.
     const fn interrupt(&mut self) {
         self.flight = None;
+        self.glide = None;
         self.moved = true;
     }
 
-    /// A pointer was pressed at a CSS point.
+    /// A pointer was pressed at a CSS point (it stops pan inertia).
     pub fn pointer_down(&mut self, id: i32, point: Vec2, button: PointerButton) {
         self.pointers.retain(|pointer| pointer.id != id);
+        self.glide = None;
+        self.trail = [(f64::NEG_INFINITY, Vec2::ZERO); TRAIL];
         // A second pointer: pinch, never a click.
         self.dragged = !self.pointers.is_empty();
         self.pointers.push(Pointer {
@@ -299,8 +421,8 @@ impl View {
         });
     }
 
-    /// A pointer moved; pans, orbits or pinches when pressed.
-    pub fn pointer_move(&mut self, id: i32, point: Vec2) {
+    /// A pointer moved at `now` (ms); pans, orbits or pinches when pressed.
+    pub fn pointer_move(&mut self, id: i32, point: Vec2, now: f64) {
         let Some(index) = self.pointers.iter().position(|pointer| pointer.id == id) else {
             return;
         };
@@ -316,18 +438,24 @@ impl View {
             }
             self.dragged = true;
             self.interrupt();
-            let pans = match self.camera.mode {
-                ViewMode::TopDown => true,
-                ViewMode::Perspective => pointer.button != PointerButton::Primary,
-            };
-            if pans {
+            if self.pans(pointer.button) {
                 self.camera.pan(pointer.last, point);
+                self.trail.rotate_left(1);
+                self.trail[TRAIL - 1] = (now, point);
             } else {
                 self.camera.orbit(point - pointer.last);
             }
             self.changed();
         }
         self.pointers[index].last = point;
+    }
+
+    /// Whether dragging with `button` pans (else it orbits).
+    fn pans(&self, button: PointerButton) -> bool {
+        match self.camera.mode {
+            ViewMode::TopDown => true,
+            ViewMode::Perspective => button != PointerButton::Primary,
+        }
     }
 
     /// Two-pointer gesture: one pointer moved from `moved.0` to `moved.1`, the other is at
@@ -344,20 +472,39 @@ impl View {
         self.changed();
     }
 
-    /// A pointer was released; a press released without dragging is a click and returns what
-    /// is under it (`None` outside the scope).
-    pub fn pointer_up(&mut self, id: i32, point: Vec2) -> Option<Pick> {
+    /// A pointer was released at `now` (ms); a press released without dragging is a click
+    /// and returns what is under it (`None` outside the scope). A pan released while
+    /// moving keeps gliding.
+    pub fn pointer_up(&mut self, id: i32, point: Vec2, now: f64) -> Option<Pick> {
         let index = self.pointers.iter().position(|pointer| pointer.id == id)?;
-        self.pointers.remove(index);
+        let pointer = self.pointers.remove(index);
         let click = self.pointers.is_empty() && !self.dragged;
+        if self.smooth && self.pointers.is_empty() && self.dragged && self.pans(pointer.button) {
+            self.glide = release_velocity(&self.trail, now).map(|velocity| Glide {
+                velocity,
+                last: now,
+            });
+        }
         click.then(|| self.pick(point)).flatten()
     }
 
-    /// Zooms around a CSS point; positive `delta_y` (scrolling down) zooms out.
-    pub fn wheel(&mut self, point: Vec2, delta_y: f32) {
+    /// Zooms around a CSS point at `now` (ms); positive `delta_y` (scrolling down) zooms
+    /// out. With smoothing the zoom eases in over a few frames (wheel steps add up).
+    pub fn wheel(&mut self, point: Vec2, delta_y: f32, now: f64) {
         self.interrupt();
-        self.camera.zoom(point, (delta_y * WHEEL_ZOOM).exp());
-        self.changed();
+        let log = delta_y * WHEEL_ZOOM;
+        if self.smooth {
+            let remaining = self.zoom.map_or(0.0, |zoom| zoom.remaining);
+            let last = self.zoom.map_or(now, |zoom| zoom.last);
+            self.zoom = Some(ZoomEase {
+                anchor: point,
+                remaining: remaining + log,
+                last,
+            });
+        } else {
+            self.camera.zoom(point, log.exp());
+            self.changed();
+        }
     }
 
     /// The level of detail: from the room size in a world scope, always
@@ -465,6 +612,15 @@ impl View {
     /// Highlights a tile.
     pub const fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
         self.selected = tile;
+    }
+
+    /// Where the camera looks from, for the detail scenes.
+    pub fn eye(&self) -> Eye {
+        Eye {
+            position: self.camera.eye(),
+            forward: self.camera.forward(),
+            perspective: self.camera.mode == ViewMode::Perspective,
+        }
     }
 
     /// The selection frame, if a tile of the scope is selected: at least

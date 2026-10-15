@@ -20,7 +20,9 @@ pub use overview::Overview;
 pub use terrain::TerrainStore;
 
 use crate::camera::{room_centre, room_origin};
-use crate::scene::{Frame, Scene};
+use crate::scene::motion::TickClock;
+use crate::scene::{Eye, Features, Frame, Scene, Timing};
+use crate::text::Atlas;
 
 /// Detail scenes kept at once: the rooms of [`DETAIL_ROOMS`](crate::DETAIL_ROOMS) plus room
 /// for those the interest is moving away from.
@@ -204,6 +206,11 @@ pub struct World {
     pub minimaps: Minimaps,
     details: Vec<Option<Detail>>,
     next_id: u64,
+    /// Tick duration measured from snapshot arrivals.
+    clock: TickClock,
+    /// Glyphs of room visual text.
+    pub atlas: Atlas,
+    features: Features,
 }
 
 impl World {
@@ -224,6 +231,9 @@ impl World {
             minimaps: Minimaps::default(),
             details: (0..DETAIL_SLOTS).map(|_| None).collect(),
             next_id: 1,
+            clock: TickClock::default(),
+            atlas: Atlas::browser(),
+            features: Features::default(),
         }
     }
 
@@ -329,6 +339,7 @@ impl World {
         if slot.as_ref().is_none_or(|detail| detail.room != room) {
             let mut scene = Scene::default();
             scene.set_user(self.me.clone());
+            scene.set_features(self.features);
             *slot = Some(Detail {
                 id: self.next_id,
                 room,
@@ -337,9 +348,16 @@ impl World {
                 frame: Frame::default(),
             });
             self.next_id += 1;
+            self.clock.forget(room);
         }
+        self.clock.observe(room, snapshot.game_time, now);
+        let timing = Timing {
+            now,
+            tick_ms: self.clock.tick_ms(),
+            glide_ms: self.clock.glide_ms(),
+        };
         if let Some(detail) = slot {
-            detail.scene.set_room(snapshot, now);
+            detail.scene.set_room(snapshot, timing, &mut self.atlas);
         }
         true
     }
@@ -351,6 +369,20 @@ impl World {
                 *slot = None;
             }
         }
+        self.clock.forget(room);
+    }
+
+    /// Sets the feature switches of every scene.
+    pub fn set_features(&mut self, features: Features) {
+        self.features = features;
+        for detail in self.details.iter_mut().flatten() {
+            detail.scene.set_features(features);
+        }
+    }
+
+    /// The measured tick duration (ms).
+    pub fn tick_ms(&self) -> f64 {
+        self.clock.tick_ms()
     }
 
     /// The detail scene of a room.
@@ -366,15 +398,20 @@ impl World {
         &self.details
     }
 
-    /// Advances the detail scenes to `now` (ms). Returns the objects drawn and whether any
-    /// is still moving or fading in.
-    pub fn frame(&mut self, now: f64) -> (usize, bool) {
+    /// Advances the detail scenes to `now` (ms) seen from `eye` (world coordinates).
+    /// Returns the objects drawn and whether anything still moves, fades or plays.
+    pub fn frame(&mut self, now: f64, eye: &Eye) -> (usize, bool) {
         let (mut objects, mut animating) = (0, false);
         for detail in self.details.iter_mut().flatten() {
             if !self.focus.bounds.contains(detail.room) {
                 continue;
             }
-            detail.frame = detail.scene.frame(now);
+            let origin = room_origin(detail.room);
+            let local = Eye {
+                position: eye.position - glam::Vec3::new(origin.x, 0.0, origin.y),
+                ..*eye
+            };
+            detail.frame = detail.scene.frame(now, &local);
             objects += detail.scene.object_count();
             animating |= detail.frame.animating || detail.arrival(now) < 1.0;
         }

@@ -17,6 +17,8 @@ struct Globals {
     // The world rectangle the overview texture covers: x, z of its corner, then its width
     // and depth (tiles).
     overview: vec4<f32>,
+    // xyz: the camera's eye (world); w: animation time in seconds (wraps every hour).
+    eye: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
