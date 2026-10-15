@@ -37,16 +37,34 @@
 //! # }
 //! ```
 //!
+//! # Session lifecycle
+//!
+//! A session runs until [`Overseer::shutdown`], until its last handle is dropped, or until
+//! the socket gives up reconnecting ([`ConnectionStatus::Closed`]); its background tasks end
+//! with it.
+//!
+//! Private servers (`openscreeps/server` and the upstream Screeps server) issue session
+//! tokens that expire a minute (by default) after they were issued and replace them with every
+//! authenticated reply (`X-Token`). Once the server has replaced the token this way, the
+//! session keeps it valid: whenever no new token arrived for 25 seconds it sends
+//! `GET /api/auth/me`, whose reply carries the next token ([`Overseer::tokens`] reports it like
+//! any other). Every authenticated request of the app postpones it. Tokens the server never
+//! replaces (screeps.com API tokens) and anonymous sessions cause no extra requests. A failed
+//! refresh does not end the session: a rejected token is reported as [`Notice::AuthFailed`]
+//! (refreshing then waits for a new token), other failures are tried again 25 seconds later
+//! and connection problems show in [`Overseer::status`]. After the session ends, a stored
+//! session token stays valid for about a minute.
+//!
 //! # Native and web
 //!
 //! The crate builds natively and for browsers (`wasm32-unknown-unknown`), so one app can run on
 //! desktop, mobile and the web:
 //!
 //! - Natively, [`Overseer::connect`] must be called inside a tokio runtime with the time driver;
-//!   the background task is a tokio task, and handles and operation futures are `Send`.
+//!   the background tasks are tokio tasks, and handles and operation futures are `Send`.
 //! - In browsers there is no tokio runtime: call it from a future the browser runs (an exported
 //!   `async fn` of `wasm-bindgen`, `wasm_bindgen_futures::spawn_local` or
-//!   [`net::rt::spawn`]). The background task runs on the browser's event loop and timers on
+//!   [`net::rt::spawn`]). The background tasks run on the browser's event loop and timers on
 //!   `setTimeout`. Operation futures are not `Send` there (browser I/O is thread-bound).
 //! - Browser differences: no code directory sync ([`Code::pull_dir`] and friends are
 //!   native-only), the server must allow the page's origin (CORS) and expose `X-Token`, socket
@@ -120,6 +138,7 @@ pub mod market;
 pub mod memory;
 pub mod messages;
 mod profile;
+mod refresh;
 pub mod rooms;
 mod session;
 pub mod users;

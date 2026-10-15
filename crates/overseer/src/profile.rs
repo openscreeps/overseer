@@ -12,6 +12,13 @@ pub enum Auth {
     /// No account: HTTP endpoints that need none and the `server-message` channel only.
     Anonymous,
     /// An account API token (official server) or a session token from an earlier session.
+    ///
+    /// Session tokens of private servers expire a minute (by default) after they were issued
+    /// and are replaced with every authenticated reply: while the session runs it keeps its
+    /// token valid with a cheap request whenever it has been idle for 25 seconds, and
+    /// [`Overseer::tokens`](crate::Overseer::tokens) reports each new token to persist. API
+    /// tokens, which the server never replaces, cause no extra requests. See the crate's
+    /// [session lifecycle](crate#session-lifecycle).
     Token(Token),
     /// E-mail and password sign-in (`POST /api/auth/signin`, private servers). The session
     /// signs in on connect and again whenever the server rejects the session token.

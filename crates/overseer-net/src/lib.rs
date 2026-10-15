@@ -153,10 +153,12 @@
 //! Private servers rotate session tokens on authenticated replies (`X-Token`) and on the
 //! socket's `auth ok`; both replace the client's shared token ([`Client::token`]; persist every
 //! value of [`Client::token_updates`] if you store tokens), so HTTP requests and new socket
-//! connections always use the latest one. A client built with [`ClientBuilder::credentials`]
-//! signs in when it needs a token and has none, and signs in once more when the server rejects
-//! the token (HTTP 401 or the socket's `auth failed`) before retrying. Without credentials these
-//! failures are returned as [`ApiError::Unauthorized`] and
+//! connections always use the latest one. Their tokens expire a minute (by default) after they
+//! were issued, so an idle client must send an authenticated request now and then to keep one;
+//! [`Client::rotates_tokens`] tells whether the server rotated the token. A client built with
+//! [`ClientBuilder::credentials`] signs in when it needs a token and has none, and signs in once
+//! more when the server rejects the token (HTTP 401 or the socket's `auth failed`) before
+//! retrying. Without credentials these failures are returned as [`ApiError::Unauthorized`] and
 //! [`Event::AuthFailed`](overseer_core::socket::Event::AuthFailed).
 //!
 //! Requests rejected with HTTP 429 are retried once: after the endpoint's window resets when

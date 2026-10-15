@@ -1,11 +1,13 @@
 //! Sessions against an in-process server: subscription reference counting, room snapshots, the
-//! console, connection status and token updates, the account, messages, market and users.
+//! console, connection status and token updates, token refresh, the account, messages, market
+//! and users.
 
 mod account;
 mod console;
 mod live;
 mod market;
 mod messages;
+mod refresh;
 mod server;
 mod status;
 mod users;

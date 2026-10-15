@@ -24,7 +24,8 @@ tokio = { workspace = true, features = ["macros", "sync"] }
 
 [dev-dependencies]
 async-tungstenite.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+# `test-util` pauses time for the token refresh tests.
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 
 [lints]
 workspace = true

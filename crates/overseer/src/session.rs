@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::live::{self, Command, Feed, Registry, Watch};
 use crate::{
     Account, Auth, Code, Console, Error, History, Map, Market, Memory, Messages, Rooms,
-    ServerProfile, Users, hub,
+    ServerProfile, Users, hub, refresh,
 };
 
 /// State of the socket connection.
@@ -74,7 +74,8 @@ pub enum Notice {
 ///
 /// Cheap to clone; every clone (including those inside feature handles) shares the session.
 /// Created by [`Self::connect`]. Dropping the last clone shuts the session down like
-/// [`Self::shutdown`], without waiting for the socket to close.
+/// [`Self::shutdown`], without waiting for the socket to close. See the crate's
+/// [session lifecycle](crate#session-lifecycle).
 #[derive(Clone)]
 pub struct Overseer {
     inner: Arc<Inner>,
@@ -85,8 +86,9 @@ struct Inner {
     world: World,
     registry: Arc<Registry>,
     status: watch::Receiver<ConnectionStatus>,
-    /// The background task, until [`Overseer::shutdown`] takes it.
-    hub: Mutex<Option<JoinHandle<()>>>,
+    /// The background tasks (socket hub, token refresh), until [`Overseer::shutdown`] takes
+    /// them.
+    tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Console command recall, newest last.
     commands: Mutex<VecDeque<String>>,
     /// The signed-in user's profile once fetched ([`Account::me`]); the async lock makes
@@ -104,15 +106,17 @@ impl Drop for Inner {
 impl Overseer {
     /// Connects a session: builds the client for `profile`, discovers the server's world
     /// (`GET /api/version`, and `GET /api/auth/me` with a token or after signing in with
-    /// credentials), opens the socket and spawns the background task that drives it.
+    /// credentials), opens the socket and spawns the background tasks: the one driving the
+    /// socket and, unless anonymous, the one keeping rotating session tokens alive (see the
+    /// crate's [session lifecycle](crate#session-lifecycle)).
     ///
     /// Natively, must be called inside a tokio runtime with the time driver enabled (for
-    /// reconnect backoff, keep-alive and rate-limit waits); the background task is a tokio
-    /// task. In browsers (`wasm32-unknown-unknown`) no runtime is needed: call it from a
-    /// future the browser runs (`wasm_bindgen_futures::spawn_local`, an exported `async fn`
-    /// or [`overseer_net::rt::spawn`]); the background task runs on the browser's event loop
-    /// and timers on `setTimeout`. See [`overseer_net`]'s "Native and web" for what the
-    /// browser handles itself (CORS, keep-alive, redirects, `User-Agent`).
+    /// reconnect backoff, keep-alive, token refresh and rate-limit waits); the background tasks
+    /// are tokio tasks. In browsers (`wasm32-unknown-unknown`) no runtime is needed: call it
+    /// from a future the browser runs (`wasm_bindgen_futures::spawn_local`, an exported
+    /// `async fn` or [`overseer_net::rt::spawn`]); the background tasks run on the browser's
+    /// event loop and timers on `setTimeout`. See [`overseer_net`]'s "Native and web" for what
+    /// the browser handles itself (CORS, keep-alive, redirects, `User-Agent`).
     ///
     /// # Errors
     ///
@@ -120,6 +124,7 @@ impl Overseer {
     /// the socket cannot be opened.
     pub async fn connect(profile: ServerProfile) -> Result<Self, Error> {
         let mut builder = Client::builder(profile.url);
+        let signed_in = !matches!(profile.auth, Auth::Anonymous);
         match profile.auth {
             Auth::Anonymous => {}
             Auth::Token(token) => builder = builder.token(token),
@@ -139,14 +144,26 @@ impl Overseer {
         let (commands, receiver) = mpsc::unbounded_channel();
         let registry = Arc::new(Registry::new(commands));
         let (status_sender, status) = watch::channel(ConnectionStatus::Connecting);
-        let hub = hub::spawn(socket, Arc::clone(&registry), receiver, status_sender);
+        let mut tasks = vec![hub::spawn(
+            socket,
+            Arc::clone(&registry),
+            receiver,
+            status_sender,
+        )];
+        if signed_in {
+            tasks.push(refresh::spawn(
+                client.clone(),
+                status.clone(),
+                Arc::clone(&registry),
+            ));
+        }
         Ok(Self {
             inner: Arc::new(Inner {
                 client,
                 world,
                 registry,
                 status,
-                hub: Mutex::new(Some(hub)),
+                tasks: Mutex::new(tasks),
                 commands: Mutex::new(VecDeque::new()),
                 me: tokio::sync::Mutex::new(None),
             }),
@@ -190,16 +207,18 @@ impl Overseer {
         self.inner.registry.notices()
     }
 
-    /// Closes the socket and ends the background task. Every [`Watch`] and [`Feed`] then ends
+    /// Closes the socket and ends the background tasks. Every [`Watch`] and [`Feed`] then ends
     /// with [`Closed`](crate::Closed), and operations of the feature handles fail with
-    /// [`Error::Closed`]. The HTTP client stays usable through [`Self::client`].
+    /// [`Error::Closed`]. The HTTP client stays usable through [`Self::client`], but the
+    /// session no longer keeps its token alive.
     pub async fn shutdown(&self) {
         self.inner.registry.close();
         self.inner.registry.command(Command::Shutdown);
-        let hub = lock(&self.inner.hub).take();
-        if let Some(hub) = hub {
-            // The task only ends by returning; a panic would already have been reported.
-            let _ = hub.await;
+        let tasks = std::mem::take(&mut *lock(&self.inner.tasks));
+        // The hub ends first and closes the session, which ends the others.
+        for task in tasks {
+            // Tasks only end by returning; a panic would already have been reported.
+            let _ = task.await;
         }
     }
 

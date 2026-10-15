@@ -1,11 +1,12 @@
-//! Sign-in with credentials over HTTP and after the socket's `auth failed`.
+//! Sign-in with credentials over HTTP and after the socket's `auth failed`, and `X-Token`
+//! rotations.
 
 use overseer_core::Token;
 use overseer_core::api::{ApiError, endpoints};
 use overseer_core::socket::Event;
 use overseer_net::{Client, Error, SocketEvent};
 
-use crate::server::{self, Request, Server};
+use crate::server::{self, Request, Response, Server};
 use crate::{ME, VERSION, descriptions_until};
 
 /// A single-world server that accepts the tokens `fresh` and `renewed`; sign-in issues
@@ -17,6 +18,15 @@ fn accounts(request: &Request) -> (u16, String) {
         ("/api/auth/me", Some("fresh" | "renewed")) => (200, ME.to_owned()),
         _ => (401, r#"{"error":"unauthorized"}"#.to_owned()),
     }
+}
+
+/// [`accounts`], whose `GET /api/auth/me` replies rotate the token to `rotated`.
+fn rotating(request: &Request) -> Response {
+    let mut response = Response::from(accounts(request));
+    if request.path == "/api/auth/me" && response.status == 200 {
+        response.headers.push(("X-Token", "rotated".to_owned()));
+    }
+    response
 }
 
 /// `(method, path, token)` of each request.
@@ -57,6 +67,8 @@ async fn unauthorized_replies_sign_in_again_and_retry_once() {
         "{sign_in}"
     );
     assert!(sign_in.contains(r#""password":"secret""#), "{sign_in}");
+    // A sign-in is no rotation.
+    assert!(!client.rotates_tokens());
 }
 
 #[tokio::test]
@@ -74,6 +86,21 @@ async fn credentials_sign_in_when_no_token_is_held() {
             entry("GET", "/api/auth/me", Some("renewed")),
         ]
     );
+}
+
+#[tokio::test]
+async fn x_token_rotations_replace_the_token_and_are_reported() {
+    let server = Server::start(rotating, |_| true).await;
+    let client = Client::builder(server.url())
+        .token(Token::new("stale"))
+        .build()
+        .unwrap();
+    // A token set by the app is no rotation.
+    client.set_token(Some(Token::new("fresh")));
+    assert!(!client.rotates_tokens());
+    client.send(&endpoints::AuthMe).await.unwrap();
+    assert_eq!(client.token(), Some(Token::new("rotated")));
+    assert!(client.rotates_tokens());
 }
 
 #[tokio::test]

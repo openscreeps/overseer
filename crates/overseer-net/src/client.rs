@@ -5,6 +5,7 @@ mod rate_limit;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -43,6 +44,8 @@ struct Inner {
     session: Mutex<api::Session>,
     /// The session's token, published to [`Client::token_updates`] on every change.
     tokens: tokio::sync::watch::Sender<Option<Token>>,
+    /// A reply replaced a held token through `X-Token`.
+    rotated: AtomicBool,
     credentials: Option<Credentials>,
     /// Serializes sign-ins, so concurrent rejections sign in once.
     sign_in: tokio::sync::Mutex<()>,
@@ -118,6 +121,16 @@ impl Client {
     #[must_use]
     pub fn token_updates(&self) -> tokio::sync::watch::Receiver<Option<Token>> {
         self.inner.tokens.subscribe()
+    }
+
+    /// Whether the server has replaced a held token through an `X-Token` reply since the client
+    /// was built: it issues session tokens that expire unless used, such as the one-minute
+    /// tokens of private servers, which every authenticated reply replaces. Sign-ins,
+    /// [`Self::set_token`] and the socket's `auth ok` do not count; screeps.com API tokens never
+    /// rotate.
+    #[must_use]
+    pub fn rotates_tokens(&self) -> bool {
+        self.inner.rotated.load(Ordering::Relaxed)
     }
 
     /// Executes an endpoint; a rotated `X-Token` replaces the shared token.
@@ -295,6 +308,10 @@ impl Client {
         let used = session.token().cloned();
         let result = self.exchange(&mut session, endpoint).await;
         if session.token() != used.as_ref() {
+            // Only `X-Token` changes the copy; stored before the change is published.
+            if used.is_some() {
+                self.inner.rotated.store(true, Ordering::Relaxed);
+            }
             self.set_token(session.token().cloned());
         }
         let limit = match &result {
@@ -472,6 +489,7 @@ impl ClientBuilder {
                 user_agent,
                 session: Mutex::new(session),
                 tokens,
+                rotated: AtomicBool::new(false),
                 credentials: self.credentials,
                 sign_in: tokio::sync::Mutex::new(()),
                 world: Mutex::new(None),
