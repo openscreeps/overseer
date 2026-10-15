@@ -1,12 +1,13 @@
 [package]
 name = "xtask"
-description = "Repository automation: API reference vendoring and code generation"
+description = "Repository automation: API reference vendoring, code generation and end-to-end tests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
+ctrlc.workspace = true
 serde_json.workspace = true
 
 [lints]

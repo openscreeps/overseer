@@ -9,8 +9,12 @@
 //!   `reference/`; `--check` fails instead of writing when the generated files are stale.
 //! - `web-demo` builds the browser demo (`web/demo`) into the static bundle
 //!   `target/web-demo/` (needs the `wasm-bindgen` CLI matching the locked crate version).
+//! - `e2e [--rust-only | --ui-only] [--no-build] [-- <playwright args>]` runs the live feature
+//!   tests and the Playwright UI tests against a disposable world of the `openscreeps/server`
+//!   checkout (`OPENSCREEPS_SERVER_DIR`, else `../server`); see `e2e.rs`.
 
 mod codegen;
+mod e2e;
 mod vendor;
 mod web_demo;
 
@@ -20,7 +24,7 @@ use std::process::ExitCode;
 /// Errors are reported as text; every command is a one-shot developer tool.
 type Error = Box<dyn std::error::Error>;
 
-const USAGE: &str = "usage: cargo xtask codegen [--check] | cargo xtask vendor [<openapi checkout>] | cargo xtask web-demo";
+const USAGE: &str = "usage: cargo xtask codegen [--check] | cargo xtask vendor [<openapi checkout>] | cargo xtask web-demo | cargo xtask e2e [--rust-only | --ui-only] [--no-build] [-- <playwright args>]";
 
 fn main() -> ExitCode {
     let root = workspace_root();
@@ -32,6 +36,7 @@ fn main() -> ExitCode {
         ["vendor"] => vendor::run(&root, &root.join("../openapi")),
         ["vendor", checkout] => vendor::run(&root, Path::new(checkout)),
         ["web-demo"] => web_demo::run(&root),
+        ["e2e", options @ ..] => e2e::run(&root, options),
         _ => Err(USAGE.into()),
     };
     match result {

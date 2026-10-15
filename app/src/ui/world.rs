@@ -6,22 +6,23 @@
 //! the map viewer and the world (which writes what the world fetches back to the cache and
 //! reports its loading progress to the status bar).
 //! The camera comes back from the saved state (per server and shard), the route's room is
-//! looked at when the camera does not already show it. The room in focus follows clicks,
-//! the room search and, once zoomed into the live level, the room under the centre; it is
-//! kept in the route and the saved state.
+//! looked at when the camera does not already show it; on a first visit (neither) the world
+//! opens on the account's start room (one of its rooms, else the server's default). The room
+//! in focus follows clicks, the room search and, once zoomed into the live level, the room
+//! under the centre; it is kept in the route and the saved state.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::prelude::*;
-use overseer::Overseer;
 use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent, WorldProgress};
+use overseer::{Overseer, StartRoom};
 use overseer_view::{Lod, Scope, ViewMode, Viewer};
 use web_sys::KeyboardEvent;
 
 use crate::feed::{Feed, Reach};
 use crate::profiles::Server;
-use crate::route::{Route, Shard};
+use crate::route::{Route, Shard, parse_room};
 use crate::saved::{BOUNDS_MAX_AGE_MS, Bounds};
 use crate::session;
 use crate::state::AppState;
@@ -232,8 +233,39 @@ pub async fn open_world(
     Ok(Feed::start(world, |_| {}, progress))
 }
 
+/// A first visit's room (`opening` holds none yet): the account's start room
+/// ([`overseer::Account::start_room`]) on `shard` when the world `bounds` hold it and no room
+/// was chosen meanwhile. Best effort: without it the whole world shows.
+async fn open_on_start_room(
+    map: MapState,
+    opening: StoredValue<Option<RoomCoord>>,
+    overseer: &Overseer,
+    shard: &Shard,
+    bounds: RoomRect,
+) {
+    if opening.get_value().is_some() {
+        return;
+    }
+    let Ok(start) = overseer.account().start_room(shard.name()).await else {
+        return;
+    };
+    if let Some(room) = start_room_in(start.as_ref(), bounds)
+        && map.room.get_untracked().is_none()
+    {
+        opening.set_value(Some(room));
+        map.room.set(Some(room));
+    }
+}
+
+/// The room of the account's `start` room when the world `bounds` hold it.
+fn start_room_in(start: Option<&StartRoom>, bounds: RoomRect) -> Option<RoomCoord> {
+    start
+        .and_then(|start| parse_room(&start.room))
+        .filter(|room| bounds.contains(*room))
+}
+
 /// The world screen of `server`'s shard `shard`, signed in with `overseer`, focused on the
-/// route's `room`.
+/// route's `room` (none: the saved camera, else the account's start room).
 #[component]
 #[expect(
     clippy::needless_pass_by_value,
@@ -310,7 +342,9 @@ pub fn WorldScreen(
     });
     Effect::new(move |_| map.backend.set(surface.backend.get()));
 
-    // Open the world (again on retry).
+    // Open the world (again on retry). A first visit (no room in the route, no saved camera)
+    // opens on the account's start room: one of its rooms, else the server's default.
+    let opening = StoredValue::new(room);
     let overseer_for_load = overseer.clone();
     let shard_for_load = shard.clone();
     let url_for_load = url.clone();
@@ -324,6 +358,9 @@ pub fn WorldScreen(
         spawn_scoped(async move {
             match open_world(state, map, &overseer, &url, &shard).await {
                 Ok(feed) => {
+                    if room.is_none() && saved_camera.is_none() {
+                        open_on_start_room(map, opening, &overseer, &shard, feed.bounds()).await;
+                    }
                     map.bounds.set(Some(feed.bounds()));
                     map.feed.set(Some(feed));
                     map.phase.set(Phase::Ready);
@@ -334,7 +371,6 @@ pub fn WorldScreen(
     });
 
     // Attach the viewer to the world once both exist.
-    let initial_room = room;
     Effect::new(move |attached: Option<bool>| {
         let Some(feed) = map.feed.get() else {
             return false;
@@ -351,7 +387,7 @@ pub fn WorldScreen(
                 viewer.set_camera(camera);
                 viewer.set_mode(map.mode.get_untracked());
             }
-            if let Some(room) = initial_room
+            if let Some(room) = opening.get_value()
                 && feed.bounds().contains(room)
                 && viewer.focused_room() != Some(room)
             {
@@ -602,5 +638,41 @@ impl CameraSaver {
         self.state.update_saved(|saved| {
             saved.place_mut(&url).cameras.insert(shard, camera);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use overseer::StartRoom;
+    use overseer::map::{RoomCoord, RoomRect};
+
+    use super::start_room_in;
+
+    fn room(name: &str) -> RoomCoord {
+        name.parse().unwrap()
+    }
+
+    fn start(room: &str) -> StartRoom {
+        StartRoom {
+            shard: None,
+            room: room.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_start_room_must_lie_in_the_world() {
+        // A centred world of 11 × 11 rooms.
+        let bounds = RoomRect::new(room("W5N5"), room("E5S5"));
+        assert_eq!(
+            start_room_in(Some(&start("W3N2")), bounds),
+            Some(room("W3N2"))
+        );
+        assert_eq!(
+            start_room_in(Some(&start("e5s5")), bounds),
+            Some(room("E5S5"))
+        );
+        assert_eq!(start_room_in(Some(&start("W6N0")), bounds), None);
+        assert_eq!(start_room_in(Some(&start("sim")), bounds), None);
+        assert_eq!(start_room_in(None, bounds), None);
     }
 }

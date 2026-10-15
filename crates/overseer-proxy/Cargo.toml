@@ -32,6 +32,8 @@ tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
 url.workspace = true
 
 [dev-dependencies]
+# The live tests (`tests/live`) drive the client through the proxy.
+overseer-net.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 
 [lints]

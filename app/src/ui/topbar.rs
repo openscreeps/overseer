@@ -9,6 +9,7 @@ use overseer::ConnectionStatus;
 use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
+use crate::profiles::Profiles;
 use crate::route::{Route, Shard, parse_room};
 use crate::state::AppState;
 use crate::ui::window::ModeSwitch;
@@ -450,24 +451,43 @@ fn DrawerToggle() -> impl IntoView {
     }
 }
 
+/// The route slug and display name of the account signed in on the server with base URL
+/// `server`: its saved username, "Account" until it is known.
+///
+/// A memo, so that it changes only when the slug or the name does: a resume rewrites the
+/// saved profiles (`begin`, `remember_username`) with the same account, and rebuilding the
+/// account menu then would close it under the user's pointer.
+fn signed_in_account(
+    profiles: Signal<Profiles>,
+    server: Signal<Option<String>>,
+) -> Memo<Option<(String, String)>> {
+    Memo::new(move |_| {
+        let url = server.get()?;
+        profiles.with(|profiles| {
+            let slug = profiles.slug(&url)?;
+            let name = profiles
+                .server(&url)?
+                .user
+                .as_ref()
+                .and_then(|user| user.username.clone())
+                .unwrap_or_else(|| "Account".to_owned());
+            Some((slug, name))
+        })
+    })
+}
+
 /// The signed-in account: profile and sign-out.
 #[component]
 fn AccountMenu() -> impl IntoView {
     let state = AppState::expect();
-    let account = move || {
-        state.profiles.track();
-        state.session.track();
-        state.session_server().and_then(|server| {
-            let slug = state.slug(&server.url)?;
-            let name = server
-                .user
-                .and_then(|user| user.username)
-                .unwrap_or_else(|| "Account".to_owned());
-            Some((slug, name))
-        })
-    };
+    let server = Signal::derive(move || {
+        state
+            .session
+            .with(|session| session.as_ref().map(|session| session.server.clone()))
+    });
+    let account = signed_in_account(state.profiles.into(), server);
     move || {
-        account().map(|(slug, name)| {
+        account.get().map(|(slug, name)| {
             let label = format!("Account: {name}");
             let button_name = name.clone();
             view! {
@@ -505,5 +525,77 @@ fn AccountMenu() -> impl IntoView {
                 </Menu>
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use leptos::prelude::*;
+    use leptos::reactive::effect::ImmediateEffect;
+    use leptos::reactive::owner::Owner;
+
+    use super::signed_in_account;
+    use crate::profiles::{Profiles, SavedUser, Server, ServerKind};
+
+    const URL: &str = "http://127.0.0.1:21025/";
+
+    fn profiles(username: Option<&str>) -> Profiles {
+        let mut server = Server::new("Local".to_owned(), URL.to_owned(), ServerKind::Private);
+        server.user = Some(SavedUser {
+            id: "u1".to_owned(),
+            username: username.map(str::to_owned),
+        });
+        let mut profiles = Profiles::default();
+        profiles.servers.push(server);
+        profiles
+    }
+
+    #[test]
+    fn the_account_changes_only_with_its_slug_or_name() {
+        let owner = Owner::new();
+        owner.set();
+        let saved = RwSignal::new(profiles(Some("alice")));
+        let server = RwSignal::new(Some(URL.to_owned()));
+        let account = signed_in_account(saved.into(), server.into());
+        // What the account menu would be rebuilt with, once per rebuild.
+        let builds = Arc::new(Mutex::new(Vec::new()));
+        let _menu = ImmediateEffect::new_isomorphic({
+            let builds = Arc::clone(&builds);
+            move || {
+                let account = account.get().map(|(slug, name)| format!("{slug} {name}"));
+                builds
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(account);
+            }
+        });
+        let built = || {
+            builds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        };
+        assert_eq!(built(), [Some("127.0.0.1-21025 alice".to_owned())]);
+
+        // A resume rewrites the profiles with the same account (`begin`, then
+        // `remember_username`): the menu is not rebuilt.
+        saved.set(profiles(Some("alice")));
+        saved.update(|profiles| profiles.servers[1].login = Some("alice".to_owned()));
+        assert_eq!(built().len(), 1);
+
+        saved.set(profiles(Some("bob")));
+        saved.set(profiles(None));
+        server.set(None);
+        assert_eq!(
+            built(),
+            [
+                Some("127.0.0.1-21025 alice".to_owned()),
+                Some("127.0.0.1-21025 bob".to_owned()),
+                Some("127.0.0.1-21025 Account".to_owned()),
+                None,
+            ]
+        );
     }
 }

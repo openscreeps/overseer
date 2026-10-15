@@ -45,6 +45,10 @@ description = "Build the Overseer desktop app and its installers (cargo tauri bu
 dir = "app/src-tauri"
 run = "cargo tauri build"
 
+[tasks.e2e]
+description = "Live feature tests and Playwright UI tests against a disposable OpenScreeps world from ../server (or $OPENSCREEPS_SERVER_DIR); --rust-only, --ui-only, --no-build"
+run = "cargo xtask e2e"
+
 [tasks.ci]
 description = "Everything CI runs, in order"
 depends = ["fmt", "codegen", "check", "test", "portable"]
