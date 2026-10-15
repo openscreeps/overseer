@@ -5,12 +5,18 @@ struct Globals {
     view_projection: mat4x4<f32>,
     // xyz: unit direction towards the light.
     light: vec4<f32>,
-    // x: terrain opacity, y: minimap opacity, z: room border opacity, w: 1 / atlas side.
+    // x: full-resolution terrain opacity over the overview, y: minimap opacity, z: room
+    // border opacity, w: 0.
     params: vec4<f32>,
     // Terrain colours (linear) of plains, swamps and wall tops.
     plain: vec4<f32>,
     swamp: vec4<f32>,
     wall: vec4<f32>,
+    // Colour (linear) of rooms whose terrain has not arrived.
+    pending: vec4<f32>,
+    // The world rectangle the overview texture covers: x, z of its corner, then its width
+    // and depth (tiles).
+    overview: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

@@ -394,7 +394,8 @@ fn Banner() -> impl IntoView {
     }
 }
 
-/// Connection, tick, level of detail, frame time and graphics backend.
+/// Connection, tick, level of detail, the world's loading progress (while loading), frame
+/// time and graphics backend.
 #[component]
 fn StatusBar() -> impl IntoView {
     let state = AppState::expect();
@@ -420,6 +421,19 @@ fn StatusBar() -> impl IntoView {
         Some(Lod::Minimap) => "Minimap",
         Some(Lod::Detail) => "Live rooms",
     };
+    let progress = move || {
+        map.progress
+            .get()
+            .as_ref()
+            .and_then(crate::feed::progress_label)
+            .map(|label| {
+                view! {
+                    <span class="status-item" role="status" title="Loading the world">
+                        {label}
+                    </span>
+                }
+            })
+    };
     let frame = move || {
         map.frame_ms
             .get()
@@ -433,6 +447,7 @@ fn StatusBar() -> impl IntoView {
             </span>
             <span class="status-item">{tick}</span>
             <span class="status-item" title="Level of detail">{lod}</span>
+            {progress}
             <span class="status-item">{frame}</span>
             <span class="status-item">{move || map.backend.get().unwrap_or("—")}</span>
             <span class="status-item platform">

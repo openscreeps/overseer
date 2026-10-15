@@ -16,7 +16,7 @@ use crate::camera::{rect_extent, room_centre};
 use crate::gpu::{Draw, Gpu};
 use crate::scene::Scene;
 use crate::view::{Fades, View};
-use crate::world::{World, tile_origin};
+use crate::world::{Limits, World, tile_origin};
 use crate::{
     CameraState, DETAIL_PX_PER_ROOM, Lod, MINIMAP_PX_PER_ROOM, MINIMAP_ROOMS, MOVE_DURATION_MS,
     PointerButton, Scope, TERRAIN_PX_PER_ROOM, ViewMode,
@@ -111,6 +111,7 @@ fn stat(status: RoomStatus, owner: Option<(&str, u8)>) -> RoomStat {
         safe_mode: false,
         mineral: None,
         mineral_density: None,
+        fetched_at: 0,
     }
 }
 
@@ -124,7 +125,7 @@ fn minimap(user: &str) -> RoomMap {
 
 /// A room scope on `W1N1` showing an empty snapshot.
 fn view(mode: ViewMode) -> View {
-    let mut view = View::new(4);
+    let mut view = View::new(Limits::WEBGL2);
     view.set_scope(Scope::Room(room("W1N1")));
     view.resize(SIZE.x, SIZE.y);
     view.set_mode(mode);
@@ -133,8 +134,8 @@ fn view(mode: ViewMode) -> View {
 }
 
 /// A world scope over the shard, fitted.
-fn world_view(atlas_per_row: u32) -> View {
-    let mut view = View::new(atlas_per_row);
+fn world_view() -> View {
+    let mut view = View::new(Limits::WEBGL2);
     view.set_scope(Scope::World(shard()));
     view.resize(SIZE.x, SIZE.y);
     view
@@ -522,7 +523,7 @@ fn the_selection_frame_sits_on_the_tile_and_stays_visible_when_zoomed_out() {
         ring.offset,
         [corner.x + 0.5, crate::mesh::WALL_HEIGHT, corner.y + 0.5]
     );
-    let mut world = world_view(4);
+    let mut world = world_view();
     world.select(Some((w1n1, 3, 3)));
     let ring = world.selection().unwrap();
     let pixels = ring.scale[0] / world.camera.tiles_per_px();
@@ -534,7 +535,7 @@ fn the_selection_frame_sits_on_the_tile_and_stays_visible_when_zoomed_out() {
 #[test]
 fn zoom_is_continuous_across_the_lod_thresholds() {
     for mode in [ViewMode::TopDown, ViewMode::Perspective] {
-        let mut view = world_view(4);
+        let mut view = world_view();
         view.set_mode(mode);
         assert_eq!(view.lod(), Lod::Overview, "the fitted shard");
         assert_eq!(view.fades().terrain, 0.0);
@@ -600,31 +601,44 @@ fn zoom_is_continuous_across_the_lod_thresholds() {
 
 /// Rooms of an interest list are distinct, inside `visible` and nearest to `centre` first.
 fn assert_nearest_first(rooms: &[RoomCoord], visible: RoomRect, centre: Vec2) {
+    let mut seen = std::collections::HashSet::new();
     let mut distances = Vec::new();
-    for (index, room) in rooms.iter().enumerate() {
+    for room in rooms {
         assert!(visible.contains(*room), "{room} not in view");
-        assert!(!rooms[..index].contains(room), "{room} twice");
+        assert!(seen.insert(*room), "{room} twice");
         distances.push(room_centre(*room).distance(centre));
     }
     assert!(
         distances.windows(2).all(|pair| pair[0] <= pair[1] + 1e-3),
-        "{distances:?}"
+        "not nearest first"
     );
 }
 
 #[test]
 fn interest_follows_the_level_of_detail() {
-    let mut view = world_view(4);
-    let atlas = view.world.atlas.capacity();
-    assert_eq!(atlas, 16);
-    // Overview: the whole shard's stats, nothing else.
+    let mut view = world_view();
+    // Overview: the whole shard's stats and terrain of every room, nearest first.
+    assert_eq!(view.lod(), Lod::Overview);
     let interest = view.interest();
     assert_eq!(interest.stats, Some(shard()));
-    assert!(
-        interest.terrain.is_empty() && interest.minimaps.is_empty() && interest.detail.is_empty()
-    );
+    assert_eq!(interest.terrain.len(), shard().len(), "every room in view");
+    assert_nearest_first(&interest.terrain, shard(), view.camera.target());
+    assert!(interest.minimaps.is_empty() && interest.detail.is_empty());
+    // Rooms with terrain or known absent are still listed (the world map skips them).
+    view.world.set_terrain(room("W0N0"), &terrain());
+    view.world.mark_no_terrain(room("W1N0"));
+    assert_eq!(view.interest().terrain.len(), shard().len());
+    // Zoomed out on a corner, only the rooms in view.
+    place(&mut view, rect_extent(shard()).0, 8.0);
+    assert_eq!(view.lod(), Lod::Overview);
+    let interest = view.interest();
+    let visible = view.visible_rooms();
+    assert!(visible.len() < shard().len());
+    assert_eq!(interest.terrain.len(), visible.len());
+    assert_eq!(Some(interest.terrain[0]), view.focused_room());
+    assert_nearest_first(&interest.terrain, visible, view.camera.target());
 
-    // Terrain: the rooms in view, nearest first, at most an atlas of them.
+    // Terrain: the rooms in view, nearest first.
     let e3s5 = room("E3S5");
     let centre = room_centre(e3s5) + Vec2::new(10.0, -5.0);
     place(&mut view, centre, 50.0);
@@ -633,7 +647,7 @@ fn interest_follows_the_level_of_detail() {
     let visible = view.visible_rooms();
     assert_eq!(interest.stats, Some(visible));
     assert_eq!((visible.width(), visible.height()), (17, 13));
-    assert_eq!(interest.terrain.len(), atlas);
+    assert_eq!(interest.terrain.len(), visible.len());
     assert_eq!(interest.terrain[0], e3s5);
     assert_nearest_first(&interest.terrain, visible, centre);
     assert!(interest.minimaps.is_empty() && interest.detail.is_empty());
@@ -662,7 +676,7 @@ fn interest_follows_the_level_of_detail() {
     let interest = view.interest();
     assert_eq!(interest.detail, [e3s5, room("E4S5")]);
     assert_eq!(interest.minimaps[..2], [e3s5, room("E4S5")]);
-    assert!(interest.terrain.len() <= atlas);
+    assert_eq!(interest.terrain.len(), view.visible_rooms().len());
 
     // At the shard's edge the lists stay inside the bounds.
     place(&mut view, rect_extent(shard()).0, 200.0);
@@ -685,7 +699,7 @@ fn interest_follows_the_level_of_detail() {
 fn picking_crosses_room_borders_in_both_modes() {
     let (west, east) = (room("W0S0"), room("E0S0"));
     for mode in [ViewMode::TopDown, ViewMode::Perspective] {
-        let mut view = world_view(4);
+        let mut view = world_view();
         view.set_mode(mode);
         let terrain = terrain();
         view.world
@@ -722,7 +736,7 @@ fn picking_crosses_room_borders_in_both_modes() {
 #[test]
 fn a_room_scope_keeps_the_camera_over_its_room() {
     let w5n5 = room("W5N5");
-    let mut view = View::new(4);
+    let mut view = View::new(Limits::WEBGL2);
     view.set_scope(Scope::Room(w5n5));
     view.resize(SIZE.x, SIZE.y);
     let (min, max) = rect_extent(Scope::Room(w5n5).bounds());
@@ -768,7 +782,7 @@ fn a_room_scope_keeps_the_camera_over_its_room() {
 
 #[test]
 fn camera_state_round_trips() {
-    let mut view = world_view(4);
+    let mut view = world_view();
     view.set_mode(ViewMode::Perspective);
     place(&mut view, Vec2::new(-1234.5, 678.25), 140.0);
     drag(
@@ -782,7 +796,7 @@ fn camera_state_round_trips() {
     assert!(json.contains("\"mode\":\"Perspective\""), "{json}");
     let parsed: CameraState = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, state);
-    let mut other = world_view(4);
+    let mut other = world_view();
     other.set_camera_state(parsed);
     assert_eq!(other.camera_state(), state);
     assert_eq!(
@@ -805,7 +819,7 @@ fn camera_state_round_trips() {
 
 #[test]
 fn look_at_flies_and_fit_frames_the_scope() {
-    let mut view = world_view(4);
+    let mut view = world_view();
     let e3s5 = room("E3S5");
     view.look_at(e3s5, None, true, 1000.0);
     assert!(
@@ -832,25 +846,56 @@ fn look_at_flies_and_fit_frames_the_scope() {
     assert!(!view.advance(100.0));
 }
 
+/// What a flush hands out: `(level, layer, origin, size)` per rectangle.
+type Rects = Vec<(u32, u32, (u32, u32), (u32, u32))>;
+
+/// Flushes the terrain and the overview, as the GPU does.
+fn flush(world: &mut World) -> (Rects, Rects) {
+    let (mut terrain, mut overview) = (Vec::new(), Vec::new());
+    world
+        .terrain
+        .flush(|upload| terrain.push((upload.level, upload.layer, upload.origin, upload.size)));
+    world
+        .overview
+        .flush(|upload| overview.push((upload.level, upload.layer, upload.origin, upload.size)));
+    (terrain, overview)
+}
+
 #[test]
 fn updates_touch_only_the_rooms_that_changed() {
     let bounds = RoomRect::new(room("W4N4"), room("E4S4"));
-    let mut world = World::new(bounds, 4);
-    world.set_focus(bounds, room_centre(room("W0N0")));
-    // What a fresh world must upload in full.
+    let mut world = World::new(bounds, Limits::WEBGL2);
+    world.set_focus(room_centre(room("W0N0")));
+    // What a fresh world must upload in full: every instance, the overview (one rectangle
+    // per mip level: 100, 50, 25, 12, 6, 3 and 1 texels); no terrain yet.
     assert_eq!(world.cells.dirty.marks(), (true, Vec::new()));
-    assert_eq!(world.atlas.dirty.marks(), (true, Vec::new()));
     world.cells.dirty.drain(100, |_| {});
-    world.atlas.dirty.drain(16, |_| {});
+    let (terrain_rects, overview_rects) = flush(&mut world);
+    assert_eq!(terrain_rects, []);
+    let sizes: Vec<_> = overview_rects.iter().map(|rect| rect.3).collect();
+    assert_eq!(
+        sizes,
+        [
+            (100, 100),
+            (50, 50),
+            (25, 25),
+            (12, 12),
+            (6, 6),
+            (3, 3),
+            (1, 1)
+        ]
+    );
 
-    // An overview: one cell.
+    // An overview: one instance.
     let e1s2 = room("E1S2");
     world.set_stat(e1s2, Some(&stat(RoomStatus::Normal, Some(("other", 3)))));
     let index = (2 + 5) * 10 + (1 + 5);
     assert_eq!(world.cells.dirty.marks(), (false, vec![index]));
-    assert_ne!(
-        world.cells.instances()[index as usize].color,
-        world.cells.instances()[0].color
+    let instance = world.cells.instances()[index as usize];
+    assert_ne!(instance.overlay, world.cells.instances()[0].overlay);
+    assert!(
+        instance.overlay[3] > instance.tint[3],
+        "stronger zoomed out"
     );
     world.set_stat(e1s2, Some(&stat(RoomStatus::Normal, Some(("other", 3)))));
     assert_eq!(
@@ -860,22 +905,36 @@ fn updates_touch_only_the_rooms_that_changed() {
     );
     world.cells.dirty.drain(100, |_| {});
     assert_eq!(world.cells.dirty.marks(), (false, Vec::new()));
+    assert_eq!(flush(&mut world), (Vec::new(), Vec::new()), "no texels");
 
-    // A terrain: one atlas slot (texels and instance), tinted by the known overview.
+    // A terrain: its instance, its slot's 25×25 texels and its overview texels (10×10 at
+    // level 0, what covers them below).
     world.set_terrain(e1s2, &terrain());
-    let slot = world.atlas.slot(e1s2).unwrap();
-    assert_eq!(world.atlas.uploads, [slot]);
-    assert_eq!(world.atlas.dirty.marks(), (false, vec![slot]));
-    assert_ne!(world.atlas.instances()[slot as usize].tint[3], 0);
-    world.atlas.uploads.clear();
-    world.atlas.dirty.drain(16, |_| {});
+    let slot = world.terrain.slot(e1s2).unwrap();
+    assert_eq!(world.cells.instances()[index as usize].terrain, slot);
+    assert_eq!(world.cells.dirty.marks(), (false, vec![index]));
+    world.cells.dirty.drain(100, |_| {});
+    let (terrain_rects, overview_rects) = flush(&mut world);
+    assert_eq!(terrain_rects, [(0, 0, (0, 0), (25, 25))]);
+    assert_eq!(overview_rects.len(), 7, "one rectangle per level");
+    assert_eq!(overview_rects[0], (0, 0, (60, 70), (10, 10)));
+    for (level, rect) in overview_rects.iter().enumerate() {
+        assert_eq!(rect.0 as usize, level);
+        assert!(rect.3.0 <= (10 >> level) + 2 && rect.3.1 <= (10 >> level) + 2);
+    }
+    // The same terrain again: nothing.
     world.set_terrain(e1s2, &terrain());
-    assert!(world.atlas.uploads.is_empty(), "the same terrain again");
-    // A new overview of a room with terrain: its cell and its atlas tint.
+    assert_eq!(world.cells.dirty.marks(), (false, Vec::new()));
+    assert_eq!(flush(&mut world), (Vec::new(), Vec::new()));
+    // A new overview of a room with terrain: its instance only.
     world.set_stat(e1s2, Some(&stat(RoomStatus::Novice, None)));
     assert_eq!(world.cells.dirty.marks(), (false, vec![index]));
-    assert_eq!(world.atlas.dirty.marks(), (false, vec![slot]));
-    assert_eq!(world.atlas.uploads, [] as [u32; 0]);
+    assert_eq!(flush(&mut world), (Vec::new(), Vec::new()));
+    // A room without terrain on the server: its instance only.
+    world.cells.dirty.drain(100, |_| {});
+    world.mark_no_terrain(room("W4N4"));
+    assert_eq!(world.cells.dirty.marks(), (false, vec![0]));
+    assert_eq!(flush(&mut world), (Vec::new(), Vec::new()));
 
     // A minimap: its slot only.
     world.set_minimap(e1s2, Some(&minimap("other")));
@@ -885,9 +944,10 @@ fn updates_touch_only_the_rooms_that_changed() {
     world.set_minimap(room("W2S0"), Some(&minimap("another")));
     assert_eq!(world.minimaps.dirty.marks(), (false, vec![1]));
     assert_eq!(world.minimaps.points(1).len(), 7);
-    // Signing in recolours (everything, once).
+    // Signing in recolours (every instance, once) but uploads no texels.
     world.set_user(Some(ME.to_owned()));
     assert!(world.cells.dirty.marks().0);
+    assert_eq!(flush(&mut world), (Vec::new(), Vec::new()));
 }
 
 #[test]
@@ -909,51 +969,197 @@ fn dirty_marks_drain_as_merged_runs() {
     assert_eq!(runs, [] as [std::ops::Range<usize>; 0]);
 }
 
-#[test]
-fn the_atlas_keeps_the_rooms_nearest_to_the_camera() {
-    let bounds = RoomRect::new(room("E0S0"), room("E9S9"));
-    let mut world = World::new(bounds, 2);
-    let near = RoomRect::new(room("E0S0"), room("E1S1"));
-    world.set_focus(near, room_centre(room("E0S0")));
-    let rooms = ["E0S0", "E1S0", "E0S1", "E1S1", "E5S5", "E9S9"].map(room);
-    for room in rooms {
-        world.set_terrain(room, &terrain());
-    }
-    for room in &rooms[..4] {
-        assert!(world.atlas.slot(*room).is_some(), "{room} near");
-    }
-    assert_eq!(
-        world.atlas.slot(rooms[4]),
-        None,
-        "the atlas is full of nearer rooms"
-    );
-    // Rooms outside the bounds are stored but never placed.
-    world.set_terrain(room("W1N1"), &terrain());
-    assert!(world.atlas.has_terrain(room("W1N1")));
-    assert_eq!(world.atlas.slot(room("W1N1")), None);
+/// Three different terrains: walls, swamps and plains in changing places.
+fn terrains() -> [Terrain; 3] {
+    [0, 1, 2].map(|shift| {
+        let digits: String = (0..2500)
+            .map(|index: usize| match (index * 7 + index / 50 + shift) % 5 {
+                0 | 3 => '1',
+                1 => '2',
+                2 => '3',
+                _ => '0',
+            })
+            .collect();
+        Terrain::decode(&digits).unwrap()
+    })
+}
 
-    // Looking elsewhere brings the stored terrain back, replacing the farthest rooms.
-    world.atlas.uploads.clear();
-    world.set_focus(
-        RoomRect::new(room("E5S5"), room("E9S9")),
-        room_centre(room("E9S9")),
-    );
-    assert!(!world.refresh(), "everything placed");
-    assert!(world.atlas.slot(rooms[5]).is_some());
-    assert!(world.atlas.slot(rooms[4]).is_some());
+/// The code of a tile as `Terrain::packed` has it.
+fn code(tile: overseer::core::api::Tile) -> u8 {
+    match tile {
+        overseer::core::api::Tile::Plain => 0,
+        overseer::core::api::Tile::Wall => 1,
+        overseer::core::api::Tile::Swamp => 2,
+    }
+}
+
+/// Every tile of `slot` reads back as `terrain` through the shader's addressing.
+fn assert_decodes(world: &World, slot: u32, terrain: &Terrain) {
+    assert_eq!(&world.terrain.packed(slot), terrain.packed(), "slot {slot}");
+    for y in 0..50_u8 {
+        for x in 0..50_u8 {
+            assert_eq!(
+                world.terrain.tile(slot, u32::from(x), u32::from(y)),
+                code(terrain.get(x, y).unwrap()),
+                "slot {slot} tile ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn packed_terrain_decodes_like_the_shader_for_every_tile_kind() {
+    let terrains = terrains();
+    let kinds: std::collections::BTreeSet<u8> = (0..50_u8)
+        .flat_map(|y| (0..50_u8).map(move |x| (x, y)))
+        .map(|(x, y)| code(terrains[0].get(x, y).unwrap()))
+        .collect();
+    assert_eq!(kinds, [0, 1, 2].into(), "plains, walls and swamps");
+    // Enough rooms to fill a layer and start the next: slots across slot rows and layers.
+    let bounds = RoomRect::new(room("E0S0"), room("E49S39"));
+    assert_eq!(bounds.len(), 2000);
+    let mut world = World::new(bounds, Limits::WEBGL2);
+    for (index, room) in bounds.iter().enumerate() {
+        world.set_terrain(room, &terrains[index % 3]);
+    }
+    for slot in [0, 1, 39, 40, 41, 1639, 1640, 1999] {
+        assert_decodes(&world, slot, &terrains[slot as usize % 3]);
+    }
+
+    // The overview averages 5×5 tiles per texel: walls (red), swamps (green), plains (blue).
+    let simple = terrain();
+    let e0s0 = room("E0S0");
+    let mut world = World::new(RoomRect::new(e0s0, e0s0), Limits::WEBGL2);
+    assert_eq!(world.overview.texels_per_room(), 10);
+    assert_eq!(world.overview.texel(0, 0, 0), [0; 4], "the placeholder");
+    world.set_terrain(e0s0, &simple);
     assert_eq!(
-        world.atlas.slot(rooms[0]),
-        None,
-        "the farthest room gave its slot"
+        world.overview.texel(0, 0, 0),
+        [255, 0, 0, 255],
+        "x < 5: walls"
     );
-    assert_eq!(world.atlas.uploads.len(), 2);
-    assert_eq!(world.focus().centre, room_centre(room("E9S9")));
+    assert_eq!(
+        world.overview.texel(0, 6, 6),
+        [0, 255, 0, 255],
+        "30..35: swamp"
+    );
+    assert_eq!(world.overview.texel(0, 3, 3), [0, 0, 255, 255], "plains");
+    flush(&mut world);
+    // Level 1 (5×5): the first column is half walls, half plains.
+    assert_eq!(world.overview.texel(1, 0, 0), [128, 0, 128, 255]);
+}
+
+#[test]
+fn a_whole_shard_stays_resident_without_eviction() {
+    // screeps.com shard0: 182 × 182 rooms.
+    let bounds = RoomRect::new(room("W90N90"), room("E90S90"));
+    assert_eq!(bounds.len(), 33_124);
+    let mut world = World::new(bounds, Limits::WEBGL2);
+    assert_eq!(
+        world.terrain.layers(),
+        21,
+        "reserved for the whole shard up front"
+    );
+    assert_eq!(world.overview.size(), (1820, 1820), "10 texels per room");
+    let generation = (world.terrain.generation(), world.overview.generation());
+    flush(&mut world);
+    let terrains = terrains();
+    for (index, room) in bounds.iter().enumerate() {
+        world.set_terrain(room, &terrains[index % 3]);
+    }
+    assert_eq!(world.terrain.len(), 33_124, "every room kept");
+    assert_eq!(
+        (world.terrain.generation(), world.overview.generation()),
+        generation,
+        "no texture recreated"
+    );
+    let mut slots = std::collections::HashSet::new();
+    for (index, room) in bounds.iter().enumerate() {
+        let slot = world.terrain.slot(room).unwrap();
+        assert!(slots.insert(slot), "{room}: slot {slot} shared");
+        assert_eq!(world.cells.instances()[index].terrain, slot);
+    }
+    for slot in [0, 1639, 1640, 33_123] {
+        assert_decodes(&world, slot, &terrains[slot as usize % 3]);
+    }
+    // One flush uploads each room's texels once, in few rectangles.
+    let (terrain_rects, overview_rects) = flush(&mut world);
+    let texels: u32 = terrain_rects.iter().map(|rect| rect.3.0 * rect.3.1).sum();
+    assert_eq!(texels, 33_124 * 625);
+    assert!(
+        terrain_rects.len() <= 2 * 21,
+        "{} rectangles",
+        terrain_rects.len()
+    );
+    assert_eq!(
+        overview_rects.len(),
+        world.overview.level_count() as usize,
+        "one rectangle per level"
+    );
+
+    // Rooms beyond the reservation (outside the bounds) grow the texture and keep the rest.
+    let first = bounds.min;
+    for x in 0..1317 {
+        world.set_terrain(RoomCoord { x: 1000 + x, y: 0 }, &terrains[0]);
+    }
+    assert_eq!(world.terrain.layers(), 42, "twice the layers once full");
+    assert_ne!(world.terrain.generation(), generation.0);
+    assert_decodes(&world, world.terrain.slot(first).unwrap(), &terrains[0]);
+    assert_eq!(
+        world.terrain.set(first, &terrains[0]),
+        None,
+        "known: unchanged"
+    );
+}
+
+#[test]
+fn rooms_without_terrain_are_placeholders_and_absent_rooms_are_outside() {
+    use crate::world::terrain::state::{ABSENT, PENDING};
+    let bounds = RoomRect::new(room("W1N1"), room("E0S0"));
+    let mut world = World::new(bounds, Limits::WEBGL2);
+    let state = |world: &World, name: &str| {
+        world.cells.instances()[world.cells.index(room(name)).unwrap()].terrain
+    };
+    assert!(
+        world
+            .cells
+            .instances()
+            .iter()
+            .all(|instance| instance.terrain == PENDING)
+    );
+    world.mark_no_terrain(room("W1N1"));
+    assert_eq!(state(&world, "W1N1"), ABSENT);
+    world.set_terrain(room("W0N1"), &terrain());
+    assert_eq!(state(&world, "W0N1"), 0);
+    world.mark_no_terrain(room("W0N1"));
+    assert_eq!(state(&world, "W0N1"), 0, "known terrain wins");
+    assert_eq!(state(&world, "E0S0"), PENDING);
+    // The overview: loaded rooms' shares add up to one, the others' to nothing (drawn as
+    // the placeholder; absent rooms are not drawn at all).
+    let [r, g, b, _] = world.overview.texel(0, 10, 0);
+    assert_eq!(u16::from(r) + u16::from(g) + u16::from(b), 255);
+    assert_eq!(world.overview.texel(0, 0, 0), [0; 4]);
+    assert_eq!(world.overview.texel(0, 15, 15), [0; 4]);
+
+    // A wider scope keeps every state; terrain arriving late replaces an absent marker.
+    world.set_bounds(RoomRect::new(room("W2N2"), room("E1S1")));
+    assert_eq!(state(&world, "W1N1"), ABSENT);
+    assert_eq!(state(&world, "W0N1"), 0);
+    assert_eq!(state(&world, "W2N2"), PENDING);
+    let [r, g, b, _] = world.overview.texel(0, 20, 10);
+    assert_eq!(
+        u16::from(r) + u16::from(g) + u16::from(b),
+        255,
+        "W0N1 redrawn"
+    );
+    world.set_terrain(room("W1N1"), &terrain());
+    assert_eq!(state(&world, "W1N1"), 1);
 }
 
 #[test]
 fn detail_scenes_fade_in_and_are_replaced_farthest_first() {
-    let mut world = World::new(RoomRect::new(room("E0S0"), room("E9S9")), 2);
-    world.set_focus(world.bounds(), room_centre(room("E0S0")));
+    let mut world = World::new(RoomRect::new(room("E0S0"), room("E9S9")), Limits::WEBGL2);
+    world.set_focus(room_centre(room("E0S0")));
     let terrain = terrain();
     for (index, name) in ["E0S0", "E1S0", "E2S0", "E9S9"].into_iter().enumerate() {
         #[expect(clippy::cast_precision_loss, reason = "small numbers")]
@@ -974,7 +1180,7 @@ fn detail_scenes_fade_in_and_are_replaced_farthest_first() {
     assert!(world.detail(room("E0S1")).is_none());
     assert!(!world.set_room(&snapshot_of("sim", &terrain, Vec::new()), 600.0));
     assert!(
-        world.atlas.has_terrain(room("E2S0")),
+        world.terrain.has_terrain(room("E2S0")),
         "snapshots bring terrain"
     );
 }
@@ -1026,12 +1232,12 @@ fn frames_render_through_the_noop_backend() {
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default());
-    let per_row = crate::atlas_per_row(device.limits().max_texture_dimension_2d);
-    assert_eq!(per_row, 40, "2048 texels: 40 × 40 rooms");
+    let limits = Limits::of(&device.limits());
+    assert_eq!(limits, Limits::WEBGL2);
     for samples in [1, 4] {
-        let mut gpu = Gpu::new(device.clone(), queue.clone(), format, samples, per_row);
+        let mut gpu = Gpu::new(device.clone(), queue.clone(), format, samples);
         gpu.resize(320, 200);
-        let mut view = View::new(per_row);
+        let mut view = View::new(limits);
         view.set_scope(Scope::World(shard()));
         view.resize(320.0, 200.0);
         view.world.set_user(Some(ME.to_owned()));
@@ -1061,21 +1267,33 @@ fn frames_render_through_the_noop_backend() {
             .set_room(&snapshot_of("W1N1", &terrain, objects.clone()), 0.0);
         view.world
             .set_room(&snapshot_of("W0N1", &terrain, objects), 0.0);
+        view.world.mark_no_terrain(room("W2N2"));
         view.select(Some((room("W1N1"), 7, 7)));
         for (mode, px_per_room) in [
             (ViewMode::Perspective, 2.0),
             (ViewMode::TopDown, 2.0),
+            (ViewMode::TopDown, 30.0),
             (ViewMode::TopDown, 120.0),
             (ViewMode::Perspective, 500.0),
             (ViewMode::TopDown, 500.0),
         ] {
             view.set_mode(mode);
             place(&mut view, Vec2::new(-50.0, -50.0), px_per_room);
-            view.world.refresh();
             view.world.frame(1000.0);
             gpu.sync(&mut view.world);
             gpu.draw(&output, &Draw::of(&view, 1000.0), &view.world);
         }
+        // A texture that grows (more rooms than reserved) and new bounds: new textures,
+        // everything uploaded again.
+        let layers = view.world.terrain.layers();
+        for x in 0..i32::try_from(layers * 1640).unwrap() {
+            view.world
+                .set_terrain(RoomCoord { x: 1000 + x, y: 0 }, &terrain);
+        }
+        assert!(view.world.terrain.layers() > layers);
+        view.set_scope(Scope::World(RoomRect::new(room("W5N5"), room("E5S5"))));
+        gpu.sync(&mut view.world);
+        gpu.draw(&output, &Draw::of(&view, 1000.0), &view.world);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 }

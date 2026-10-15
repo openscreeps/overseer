@@ -1,8 +1,10 @@
 //! The world screen: the continuous map of a shard filling the window, the right drawer and
 //! the keyboard controls, plus [`MapState`], what the top bar and status bar know of the map.
 //!
-//! On start the screen opens the world (`Map::world`) and the shard's terrain cache, seeds the
-//! world with the cached rooms, and runs a [`Feed`] between the map viewer and the world.
+//! On start the screen opens the world (`Map::world`) and the shard's cache, seeds the world
+//! with the cached terrain, rooms without terrain and overviews, and runs a [`Feed`] between
+//! the map viewer and the world (which writes what the world fetches back to the cache and
+//! reports its loading progress to the status bar).
 //! The camera comes back from the saved state (per server and shard), the route's room is
 //! looked at when the camera does not already show it. The room in focus follows clicks,
 //! the room search and, once zoomed into the live level, the room under the centre; it is
@@ -13,7 +15,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use overseer::Overseer;
-use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent};
+use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent, WorldProgress};
 use overseer_view::{Lod, Scope, ViewMode, Viewer};
 use web_sys::KeyboardEvent;
 
@@ -78,6 +80,8 @@ pub struct MapState {
     pub frame_ms: RwSignal<Option<f32>>,
     /// The map's graphics backend.
     pub backend: RwSignal<Option<&'static str>>,
+    /// How much of the world's wanted terrain and overviews is known.
+    pub progress: RwSignal<Option<WorldProgress>>,
     /// Counts world screens, so that a leaving one does not clear its successor's state.
     generation: StoredValue<u64>,
 }
@@ -100,6 +104,7 @@ impl MapState {
             game_time: RwSignal::new(None),
             frame_ms: RwSignal::new(None),
             backend: RwSignal::new(None),
+            progress: RwSignal::new(None),
             generation: StoredValue::new(0),
         }
     }
@@ -155,11 +160,13 @@ impl MapState {
         self.game_time.try_set(None);
         self.frame_ms.try_set(None);
         self.backend.try_set(None);
+        self.progress.try_set(None);
     }
 }
 
 /// Opens the world `shard` of the server with base URL `server` (`overseer` connected to
-/// it) with its terrain cache: the feed, ready to subscribe to.
+/// it) seeded from its cache: the feed, ready to subscribe to, reporting its progress to
+/// `map`.
 ///
 /// The world's bounds come from the saved state while younger than [`BOUNDS_MAX_AGE_MS`]
 /// (no request); otherwise the library measures them and they are saved.
@@ -170,6 +177,7 @@ impl MapState {
 /// `IndexedDB` every room is fetched.
 pub async fn open_world(
     state: AppState,
+    map_state: MapState,
     overseer: &Overseer,
     server: &str,
     shard: &Shard,
@@ -198,19 +206,30 @@ pub async fn open_world(
                 .insert(key, Bounds { rect, at: now });
         });
     }
+    let progress = move |progress| {
+        map_state.progress.try_set(Some(progress));
+    };
     #[cfg(target_arch = "wasm32")]
     if let Ok(cache) = crate::terrain_cache::TerrainCache::open(server, shard.name()).await {
         let mut world = world;
-        if let Ok(rooms) = cache.load().await {
-            for (room, terrain) in rooms {
+        if let Ok(loaded) = cache.load().await {
+            for (room, terrain) in loaded.terrain {
                 world.insert_terrain(room, terrain);
             }
+            for room in loaded.no_terrain {
+                world.insert_no_terrain(room);
+            }
+            for (room, stat) in loaded.stats {
+                world.insert_stats(room, stat);
+            }
         }
-        return Ok(Feed::start(world, move |room, terrain| {
-            cache.store(room, std::sync::Arc::clone(terrain));
-        }));
+        return Ok(Feed::start(
+            world,
+            move |event| cache.store(event),
+            progress,
+        ));
     }
-    Ok(Feed::start(world, |_, _| {}))
+    Ok(Feed::start(world, |_| {}, progress))
 }
 
 /// The world screen of `server`'s shard `shard`, signed in with `overseer`, focused on the
@@ -303,7 +322,7 @@ pub fn WorldScreen(
         let shard = shard_for_load.clone();
         let url = url_for_load.clone();
         spawn_scoped(async move {
-            match open_world(state, &overseer, &url, &shard).await {
+            match open_world(state, map, &overseer, &url, &shard).await {
                 Ok(feed) => {
                     map.bounds.set(Some(feed.bounds()));
                     map.feed.set(Some(feed));

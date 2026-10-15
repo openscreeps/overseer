@@ -1,7 +1,7 @@
 //! Room overviews of the world map: batched `owner0` map statistics with a long lifetime,
 //! paced by the server's rate limit.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -15,13 +15,21 @@ use super::WorldEvent;
 use crate::map::{Map, MapStat, RoomCoord, RoomRect, RoomStat};
 use crate::{Closed, Error};
 
-/// How long a room's overview is used before it is requested again.
+/// How long the overview of a near room (see [`WorldMap`](super::WorldMap)) is used before it
+/// is requested again.
 pub const STATS_TTL: Duration = Duration::from_mins(10);
 
+/// How long the overview of any other room of the world is used before it is requested again.
+pub const STATS_FAR_TTL: Duration = Duration::from_mins(60);
+
+/// Percentage of the endpoint's rate-limit window that requests for far rooms may use: the
+/// rest stays for near rooms, so they always refresh.
+pub const STATS_FAR_SHARE: u32 = 70;
+
 /// Most sectors (10 × 10 rooms, at most 2 500 rooms) per map-stats request. The official
-/// world map asks for every room of the visible sectors at once; a whole shard at the
-/// overview zoom (about 15 000 rooms on screeps.com) is too much for one request, so it is
-/// split into requests of the nearest whole sectors and fills progressively.
+/// world map asks for every room of the visible sectors at once; a whole shard (33 124 rooms
+/// on screeps.com `shard0`) is too much for one request, so it is split into requests of the
+/// nearest whole sectors and fills progressively.
 pub const STATS_BATCH_SECTORS: usize = 25;
 
 /// Shortest pause between two requests, which also gathers rooms entering view meanwhile.
@@ -33,10 +41,24 @@ const RETRY: Duration = Duration::from_secs(30);
 /// Wait after HTTP 429 without the endpoint's limit (the server-wide limit counts per minute).
 const GLOBAL_RETRY: Duration = Duration::from_secs(60);
 
-/// A room's overview and when it was fetched.
+/// A room's overview and when it goes stale.
 struct Known {
     stat: Arc<RoomStat>,
-    fetched: Instant,
+    /// Stale from then on while the room is near.
+    near_until: Instant,
+    /// Stale from then on while the room is far.
+    far_until: Instant,
+}
+
+impl Known {
+    /// An overview `age` old at `now`.
+    fn new(stat: Arc<RoomStat>, now: Instant, age: Duration) -> Self {
+        Self {
+            stat,
+            near_until: now + STATS_TTL.saturating_sub(age),
+            far_until: now + STATS_FAR_TTL.saturating_sub(age),
+        }
+    }
 }
 
 /// The request in flight: its rooms, nearest first, and the request.
@@ -46,11 +68,19 @@ struct Fetch {
 }
 
 /// The overviews known, wanted and being fetched, and the request budget.
-#[derive(Default)]
 pub(super) struct Stats {
     known: HashMap<RoomCoord, Known>,
-    /// The rooms wanted, inside the world.
+    /// Every room of the world: all are wanted while [`Self::rect`] is set.
+    world: RoomRect,
+    /// The rooms in view, inside the world: far rooms nearest its centre are asked for
+    /// first. `None`: no overview is wanted.
     pub(super) rect: Option<RoomRect>,
+    /// The near sectors: those of the rooms wanted as minimaps and the sectors around them.
+    near: HashSet<(i32, i32)>,
+    /// The first minimap room: near rooms nearest it are asked for first.
+    near_center: Option<RoomCoord>,
+    /// Rooms of the world with an overview.
+    known_in_world: usize,
     fetch: Option<Fetch>,
     /// No request before this (pacing, rate limit or failure).
     not_before: Option<Instant>,
@@ -60,13 +90,72 @@ pub(super) struct Stats {
 }
 
 impl Stats {
-    /// The overview of `room`, when fetched.
+    /// No overview of `world` known or wanted yet.
+    pub(super) fn new(world: RoomRect) -> Self {
+        Self {
+            known: HashMap::new(),
+            world,
+            rect: None,
+            near: HashSet::new(),
+            near_center: None,
+            known_in_world: 0,
+            fetch: None,
+            not_before: None,
+            seen: None,
+        }
+    }
+
+    /// The overview of `room`, when fetched or seeded.
     pub(super) fn get(&self, room: RoomCoord) -> Option<Arc<RoomStat>> {
         self.known.get(&room).map(|known| Arc::clone(&known.stat))
     }
 
-    /// Requests the overviews of the nearest stale rooms when the budget allows; returns when
-    /// to plan again (the budget allows the next request or an overview expires).
+    /// Makes the sectors of `minimaps` (nearest first) and the sectors around them the near
+    /// rooms.
+    pub(super) fn set_near(&mut self, minimaps: &[RoomCoord]) {
+        self.near.clear();
+        for room in minimaps {
+            let (x, y) = sector(*room);
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    self.near.insert((x + dx, y + dy));
+                }
+            }
+        }
+        self.near_center = minimaps.first().copied();
+    }
+
+    /// Seeds the overview of `room` from the app's cache; its [`RoomStat::fetched_at`] tells
+    /// how stale it is. Ignored when a newer one is known.
+    pub(super) fn insert(&mut self, room: RoomCoord, stat: Arc<RoomStat>) {
+        if self
+            .known
+            .get(&room)
+            .is_some_and(|known| known.stat.fetched_at >= stat.fetched_at)
+        {
+            return;
+        }
+        let age = Duration::from_millis(epoch_millis().saturating_sub(stat.fetched_at));
+        let known = Known::new(stat, Instant::now(), age);
+        if self.known.insert(room, known).is_none() && self.world.contains(room) {
+            self.known_in_world += 1;
+        }
+    }
+
+    /// The rooms of the world with an overview, and those wanted (every room of the world
+    /// while overviews are wanted).
+    pub(super) fn progress(&self) -> (usize, usize) {
+        let wanted = if self.rect.is_some() {
+            self.world.len()
+        } else {
+            0
+        };
+        (self.known_in_world, wanted)
+    }
+
+    /// Requests the overviews of the stale near rooms, else of the stale far rooms, when the
+    /// budget allows; returns when to plan again (the budget allows the next request or an
+    /// overview goes stale).
     pub(super) fn plan(
         &mut self,
         map: &Map,
@@ -78,25 +167,41 @@ impl Stats {
         if self.fetch.is_some() {
             return None;
         }
-        let mut stale = Vec::new();
+        let (mut near, mut far) = (Vec::new(), Vec::new());
         let mut expires: Option<Instant> = None;
-        for room in rect.iter() {
-            match self.known.get(&room) {
-                Some(known) if known.fetched + STATS_TTL > now => {
-                    let at = known.fetched + STATS_TTL;
-                    expires = Some(expires.map_or(at, |earliest| earliest.min(at)));
+        for room in self.world.iter() {
+            let is_near = self.near.contains(&sector(room));
+            let until = self.known.get(&room).map(|known| {
+                if is_near {
+                    known.near_until
+                } else {
+                    known.far_until
                 }
-                _ => stale.push(room),
+            });
+            match until {
+                Some(until) if until > now => {
+                    expires = Some(expires.map_or(until, |earliest| earliest.min(until)));
+                }
+                _ if is_near => near.push(room),
+                _ => far.push(room),
             }
         }
-        if stale.is_empty() {
-            return expires;
-        }
         let ready = self.ready_at(client, now);
-        if ready > now {
-            return Some(ready);
-        }
-        let batch = nearest_sectors(stale, rect.center());
+        let batch = if near.is_empty() {
+            if far.is_empty() {
+                return expires;
+            }
+            let ready = ready.max(self.far_ready_at(client, now));
+            if ready > now {
+                return Some(expires.map_or(ready, |earliest| earliest.min(ready)));
+            }
+            nearest_sectors(far, rect.center())
+        } else {
+            if ready > now {
+                return Some(ready);
+            }
+            nearest_sectors(near, self.near_center.unwrap_or_else(|| rect.center()))
+        };
         let names = batch.iter().map(ToString::to_string).collect::<Vec<_>>();
         let (map, shard) = (map.clone(), shard.map(str::to_owned));
         let request =
@@ -108,8 +213,8 @@ impl Stats {
         None
     }
 
-    /// Completes the request in flight: queues a [`WorldEvent::Stats`] with the new and changed
-    /// overviews and paces the next request. Returns whether anything changed.
+    /// Completes the request in flight: queues a [`WorldEvent::Stats`] with every overview it
+    /// brought and paces the next request. Returns whether anything changed.
     pub(super) fn poll(
         &mut self,
         cx: &mut Context<'_>,
@@ -144,7 +249,7 @@ impl Stats {
     }
 
     /// Stores the overviews of `rooms` (absent ones are rooms the server does not know) and
-    /// queues those that are new or changed.
+    /// queues them all: each has a new [`RoomStat::fetched_at`].
     fn record(
         &mut self,
         rooms: &[RoomCoord],
@@ -152,31 +257,22 @@ impl Stats {
         now: Instant,
         events: &mut VecDeque<WorldEvent>,
     ) {
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| {
-                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-            });
-        let mut changed = Vec::new();
+        let millis = epoch_millis();
+        let mut fetched = Vec::with_capacity(rooms.len());
         for &room in rooms {
-            let stat = response
-                .stats
-                .get(&room.to_string())
-                .map_or_else(RoomStat::unknown, |stat| {
-                    RoomStat::new(stat, &response.users, millis)
-                });
-            let stat = match self.known.get(&room) {
-                Some(known) if *known.stat == stat => Arc::clone(&known.stat),
-                _ => {
-                    let stat = Arc::new(stat);
-                    changed.push((room, Arc::clone(&stat)));
-                    stat
-                }
-            };
-            self.known.insert(room, Known { stat, fetched: now });
+            let stat = response.stats.get(&room.to_string()).map_or_else(
+                || RoomStat::unknown(millis),
+                |stat| RoomStat::new(stat, &response.users, millis),
+            );
+            let stat = Arc::new(stat);
+            fetched.push((room, Arc::clone(&stat)));
+            let known = Known::new(stat, now, Duration::ZERO);
+            if self.known.insert(room, known).is_none() && self.world.contains(room) {
+                self.known_in_world += 1;
+            }
         }
-        if !changed.is_empty() {
-            events.push_back(WorldEvent::Stats(changed));
+        if !fetched.is_empty() {
+            events.push_back(WorldEvent::Stats(fetched));
         }
     }
 
@@ -210,6 +306,15 @@ impl Stats {
         ready
     }
 
+    /// When a request for far rooms may go out as far as the budget goes: once the window has
+    /// no more than its near share ([`STATS_FAR_SHARE`]) left, after its reset.
+    fn far_ready_at(&mut self, client: &Client, now: Instant) -> Instant {
+        match client.rate_limit::<endpoints::GameMapStats>() {
+            Some(limit) if limit.remaining <= near_share(limit.limit) => self.reset_at(limit, now),
+            _ => now,
+        }
+    }
+
     /// The reset of `limit` (plus a second for clock skew) as an [`Instant`]; converted from
     /// the server's clock once per limit seen, so it does not move afterwards.
     fn reset_at(&mut self, limit: RateLimit, now: Instant) -> Instant {
@@ -228,14 +333,33 @@ impl Stats {
     }
 }
 
+/// Requests of a window of `limit` kept for near rooms: all but [`STATS_FAR_SHARE`] percent.
+fn near_share(limit: u32) -> u32 {
+    let far = u64::from(limit) * u64::from(STATS_FAR_SHARE) / 100;
+    limit.saturating_sub(u32::try_from(far).unwrap_or(limit))
+}
+
+/// The sector of `room`: sectors are named by tens (`W0`..`W9`, `E10`..`E19`), so x -10..=-1
+/// is one sector.
+const fn sector(room: RoomCoord) -> (i32, i32) {
+    (room.x.div_euclid(10), room.y.div_euclid(10))
+}
+
+/// Now, in milliseconds since the Unix epoch.
+fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// The rooms of the [`STATS_BATCH_SECTORS`] sectors nearest `center` among `rooms`, sector by
 /// sector, each sector's rooms nearest first.
 fn nearest_sectors(rooms: Vec<RoomCoord>, center: RoomCoord) -> Vec<RoomCoord> {
     let mut sectors = HashMap::<(i32, i32), Vec<RoomCoord>>::new();
     for room in rooms {
-        // Sectors are named by tens (`W0`..`W9`, `E10`..`E19`): x -10..=-1 is one sector.
-        let sector = (room.x.div_euclid(10), room.y.div_euclid(10));
-        sectors.entry(sector).or_default().push(room);
+        sectors.entry(sector(room)).or_default().push(room);
     }
     // Distances between centres, doubled to stay whole: a room's centre is at 2x + 1, a
     // sector's at 20x + 10.
@@ -256,7 +380,7 @@ fn nearest_sectors(rooms: Vec<RoomCoord>, center: RoomCoord) -> Vec<RoomCoord> {
 
 #[cfg(test)]
 mod tests {
-    use super::{STATS_BATCH_SECTORS, nearest_sectors};
+    use super::{STATS_BATCH_SECTORS, near_share, nearest_sectors};
     use crate::map::{RoomCoord, RoomRect};
 
     fn room(name: &str) -> RoomCoord {
@@ -292,5 +416,13 @@ mod tests {
             nearest_sectors(few, room("W0N0")),
             [room("W0N0"), room("E1S1"), room("E15S15")]
         );
+    }
+
+    #[test]
+    fn far_rooms_leave_thirty_percent_of_the_window_to_near_rooms() {
+        assert_eq!(near_share(60), 18);
+        assert_eq!(near_share(100), 30);
+        assert_eq!(near_share(1), 1);
+        assert_eq!(near_share(0), 0);
     }
 }

@@ -1,7 +1,8 @@
 //! The wgpu side: buffers and textures mirroring the [`World`], and the render pass of a
-//! frame. Layers are drawn in order: overview cells, atlas terrain and minimap points flat on
-//! the ground without depth, then the detail scenes with depth (blended by their opacity) and
-//! the selection frame over everything.
+//! frame. Layers are drawn in order: the rooms (terrain from the overview texture and the
+//! packed terrain texture, status and owner, borders; one instanced draw) and minimap points
+//! flat on the ground without depth, then the detail scenes with depth (blended by their
+//! opacity) and the selection frame over everything.
 
 mod pipelines;
 
@@ -13,22 +14,21 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use crate::MINIMAP_ROOMS;
 use crate::camera::room_origin;
-use crate::mesh::{self, CellInstance, Instance, PointInstance, TerrainInstance};
+use crate::mesh::{self, Instance, PointInstance, RoomInstance};
 use crate::view::{Fades, View};
-use crate::world::{DETAIL_SLOTS, Detail, LEVEL0, LEVEL1, POINTS, World};
+use crate::world::terrain::{LAYER_HEIGHT, LAYER_WIDTH};
+use crate::world::{DETAIL_SLOTS, Detail, POINTS, Upload, World};
 use pipelines::Pipelines;
 
 /// Depth buffer format (supported, with multisampling, by WebGPU and WebGL2).
 pub const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-/// Background colour (linear).
+/// Background colour (linear); also what rooms outside the world look like.
 const CLEAR: wgpu::Color = wgpu::Color {
     r: 0.002,
     g: 0.002,
     b: 0.003,
     a: 1.0,
 };
-/// Mip levels of the terrain atlas: 50 and 25 texels per room.
-const ATLAS_LEVELS: u32 = 2;
 
 /// The per-frame uniform block (`Globals` in `common.wgsl`).
 #[repr(C)]
@@ -40,6 +40,8 @@ struct Globals {
     plain: [f32; 4],
     swamp: [f32; 4],
     wall: [f32; 4],
+    pending: [f32; 4],
+    overview: [f32; 4],
 }
 
 /// The per-room uniform block of detail scenes (`Locals` in `shader.wgsl`).
@@ -98,6 +100,13 @@ struct DetailGpu {
     group: wgpu::BindGroup,
 }
 
+/// A texture created for one generation of its world data.
+#[derive(Debug)]
+struct Generation {
+    generation: u64,
+    texture: wgpu::Texture,
+}
+
 /// GPU resources of the viewer.
 #[derive(Debug)]
 pub struct Gpu {
@@ -109,32 +118,30 @@ pub struct Gpu {
     pipelines: Pipelines,
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
-    atlas: wgpu::Texture,
-    atlas_side: u32,
-    atlas_per_row: u32,
-    atlas_group: wgpu::BindGroup,
+    /// Every room's packed terrain (`R8Uint` array, see `world/terrain.rs`).
+    terrain: Option<Generation>,
+    /// The overview of the bounds (`Rgba8Unorm` with mips, see `world/overview.rs`).
+    overview: Option<Generation>,
+    overview_sampler: wgpu::Sampler,
+    /// Group 1 of the rooms: both textures (`None` until they exist or after either changed).
+    rooms_group: Option<wgpu::BindGroup>,
     shape_vertices: wgpu::Buffer,
     shape_indices: wgpu::Buffer,
     shape_ranges: [Range<u32>; 3],
-    cells: wgpu::Buffer,
-    cell_capacity: usize,
-    cell_count: u32,
-    terrain_instances: wgpu::Buffer,
-    terrain_slots: u32,
+    rooms: wgpu::Buffer,
+    room_capacity: usize,
+    room_count: u32,
     points: wgpu::Buffer,
     details: Vec<DetailGpu>,
     selection: wgpu::Buffer,
     /// Locals of the selection: no offset, opaque.
     world_group: wgpu::BindGroup,
-    /// Texel scratch of atlas uploads.
-    level0: Box<[u8; LEVEL0]>,
-    level1: Box<[u8; LEVEL1]>,
     targets: Option<Targets>,
 }
 
 impl Gpu {
     /// Creates the pipelines and buffers for an output of `format` (sRGB) drawn with
-    /// `samples` samples per pixel and a terrain atlas of `atlas_per_row²` rooms.
+    /// `samples` samples per pixel; textures follow the world ([`Self::sync`]).
     #[cfg_attr(
         not(any(target_arch = "wasm32", test)),
         expect(
@@ -147,7 +154,6 @@ impl Gpu {
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
         samples: u32,
-        atlas_per_row: u32,
     ) -> Self {
         let pipelines = Pipelines::new(&device, format, samples);
         let globals = buffer(
@@ -164,42 +170,12 @@ impl Gpu {
                 resource: globals.as_entire_binding(),
             }],
         });
-        let atlas_side = atlas_per_row * 50;
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("terrain atlas"),
-            size: wgpu::Extent3d {
-                width: atlas_side,
-                height: atlas_side,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: ATLAS_LEVELS,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let filter = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("terrain atlas"),
+        let overview_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("overview"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..wgpu::SamplerDescriptor::default()
-        });
-        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
-        let atlas_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("terrain atlas"),
-            layout: &pipelines.atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&filter),
-                },
-            ],
         });
         let (shapes, shape_ranges) = mesh::shapes();
         let shape_vertices = device.create_buffer_init(&BufferInitDescriptor {
@@ -212,22 +188,15 @@ impl Gpu {
             contents: bytemuck::cast_slice(&shapes.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let terrain_slots = atlas_per_row * atlas_per_row;
         let vertex = wgpu::BufferUsages::VERTEX;
-        let terrain_instances = buffer(
-            &device,
-            "terrain instances",
-            terrain_slots as usize * size_of::<TerrainInstance>(),
-            vertex,
-        );
         let points = buffer(
             &device,
             "minimap points",
             MINIMAP_ROOMS * POINTS * size_of::<PointInstance>(),
             vertex,
         );
-        let cell_capacity = 1;
-        let cells = buffer(&device, "cells", size_of::<CellInstance>(), vertex);
+        let room_capacity = 1;
+        let rooms = buffer(&device, "rooms", size_of::<RoomInstance>(), vertex);
         let details = (0..DETAIL_SLOTS)
             .map(|_| detail_gpu(&device, &pipelines, 64))
             .collect();
@@ -249,24 +218,20 @@ impl Gpu {
             pipelines,
             globals,
             globals_group,
-            atlas,
-            atlas_side,
-            atlas_per_row,
-            atlas_group,
+            terrain: None,
+            overview: None,
+            overview_sampler,
+            rooms_group: None,
             shape_vertices,
             shape_indices,
             shape_ranges,
-            cells,
-            cell_capacity,
-            cell_count: 0,
-            terrain_instances,
-            terrain_slots,
+            rooms,
+            room_capacity,
+            room_count: 0,
             points,
             details,
             selection,
             world_group,
-            level0: Box::new([0; LEVEL0]),
-            level1: Box::new([0; LEVEL1]),
             targets: None,
         }
     }
@@ -276,11 +241,11 @@ impl Gpu {
         self.queue.present(texture);
     }
 
-    /// Uploads what changed in the world: cells, atlas texels and instances, minimap slots
-    /// and detail terrain; grows buffers to the world's needs.
+    /// Uploads what changed in the world: room instances, terrain and overview texels,
+    /// minimap slots and detail terrain; grows buffers and textures to the world's needs.
     pub fn sync(&mut self, world: &mut World) {
-        self.sync_cells(world);
-        self.sync_atlas(world);
+        self.sync_rooms(world);
+        self.sync_textures(world);
         let stride = size_of::<PointInstance>();
         let (queue, points) = (&self.queue, &self.points);
         let minimaps = &mut world.minimaps;
@@ -305,22 +270,22 @@ impl Gpu {
         }
     }
 
-    fn sync_cells(&mut self, world: &mut World) {
+    fn sync_rooms(&mut self, world: &mut World) {
         let cells = &mut world.cells;
         let len = cells.instances().len();
-        if len > self.cell_capacity {
-            self.cell_capacity = len.next_power_of_two();
-            self.cells = buffer(
+        if len > self.room_capacity {
+            self.room_capacity = len;
+            self.rooms = buffer(
                 &self.device,
-                "cells",
-                self.cell_capacity * size_of::<CellInstance>(),
+                "rooms",
+                self.room_capacity * size_of::<RoomInstance>(),
                 wgpu::BufferUsages::VERTEX,
             );
             cells.dirty.mark_all();
         }
-        self.cell_count = u32::try_from(len).unwrap_or(u32::MAX);
-        let stride = size_of::<CellInstance>();
-        let (queue, buffer) = (&self.queue, &self.cells);
+        self.room_count = u32::try_from(len).unwrap_or(u32::MAX);
+        let stride = size_of::<RoomInstance>();
+        let (queue, buffer) = (&self.queue, &self.rooms);
         let mut dirty = std::mem::take(&mut cells.dirty);
         dirty.drain(len, |range| {
             let offset = (range.start * stride) as u64;
@@ -333,56 +298,101 @@ impl Gpu {
         cells.dirty = dirty;
     }
 
-    fn sync_atlas(&mut self, world: &mut World) {
-        let atlas = &mut world.atlas;
-        let mut uploads = std::mem::take(&mut atlas.uploads);
-        uploads.sort_unstable();
-        uploads.dedup();
-        for &slot in &uploads {
-            if !atlas.texels(slot, &mut self.level0, &mut self.level1) {
-                continue;
-            }
-            let (column, row) = (slot % self.atlas_per_row, slot / self.atlas_per_row);
-            for (level, data, side) in [(0, &self.level0[..], 50), (1, &self.level1[..], 25)] {
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.atlas,
-                        mip_level: level,
-                        origin: wgpu::Origin3d {
-                            x: column * side,
-                            y: row * side,
-                            z: 0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(side * 2),
-                        rows_per_image: Some(side),
-                    },
-                    wgpu::Extent3d {
-                        width: side,
-                        height: side,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
+    /// (Re)creates the terrain and overview textures when their world data asks for it,
+    /// then uploads the texels that changed.
+    fn sync_textures(&mut self, world: &mut World) {
+        let generation = world.terrain.generation();
+        if self
+            .terrain
+            .as_ref()
+            .is_none_or(|terrain| terrain.generation != generation)
+        {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("terrain"),
+                size: wgpu::Extent3d {
+                    width: LAYER_WIDTH,
+                    height: LAYER_HEIGHT,
+                    depth_or_array_layers: world.terrain.layers(),
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.terrain = Some(Generation {
+                generation,
+                texture,
+            });
+            self.rooms_group = None;
+            world.terrain.mark_all();
         }
-        uploads.clear();
-        atlas.uploads = uploads;
-        let stride = size_of::<TerrainInstance>();
-        let (queue, buffer) = (&self.queue, &self.terrain_instances);
-        let mut dirty = std::mem::take(&mut atlas.dirty);
-        dirty.drain(atlas.instances().len(), |range| {
-            let offset = (range.start * stride) as u64;
-            queue.write_buffer(
-                buffer,
-                offset,
-                bytemuck::cast_slice(&atlas.instances()[range]),
-            );
-        });
-        atlas.dirty = dirty;
+        let generation = world.overview.generation();
+        if self
+            .overview
+            .as_ref()
+            .is_none_or(|overview| overview.generation != generation)
+        {
+            let (width, height) = world.overview.size();
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("overview"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: world.overview.level_count(),
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.overview = Some(Generation {
+                generation,
+                texture,
+            });
+            self.rooms_group = None;
+            world.overview.mark_all();
+        }
+        let (Some(terrain), Some(overview)) = (&self.terrain, &self.overview) else {
+            return;
+        };
+        let queue = &self.queue;
+        world
+            .terrain
+            .flush(|upload| write(queue, &terrain.texture, upload));
+        world
+            .overview
+            .flush(|upload| write(queue, &overview.texture, upload));
+        if self.rooms_group.is_none() {
+            let terrain = terrain.texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..wgpu::TextureViewDescriptor::default()
+            });
+            let overview = overview
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            self.rooms_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rooms"),
+                layout: &self.pipelines.rooms_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&terrain),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&overview),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.overview_sampler),
+                    },
+                ],
+            }));
+        }
     }
 
     /// Sizes the depth and multisample targets to the output (recreated only on change).
@@ -428,11 +438,13 @@ impl Gpu {
                 draw.fades.terrain,
                 draw.fades.minimap,
                 draw.fades.borders,
-                1.0 / f32::from(u16::try_from(self.atlas_side).unwrap_or(u16::MAX)),
+                0.0,
             ],
             plain: terrain(mesh::PLAIN),
             swamp: terrain(mesh::SWAMP),
             wall: terrain(mesh::WALL_TOP),
+            pending: terrain(mesh::PENDING),
+            overview: world.overview.placement(),
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -519,18 +531,15 @@ impl Gpu {
         self.queue.submit([encoder.finish()]);
     }
 
-    /// Cells, atlas terrain and minimap points.
+    /// The rooms and minimap points.
     fn draw_flat(&self, pass: &mut wgpu::RenderPass<'_>, draw: &Draw, world: &World) {
-        if self.cell_count > 0 {
-            pass.set_pipeline(&self.pipelines.cells);
-            pass.set_vertex_buffer(0, self.cells.slice(..));
-            pass.draw(0..6, 0..self.cell_count);
-        }
-        if draw.fades.terrain > 0.0 {
-            pass.set_pipeline(&self.pipelines.atlas);
-            pass.set_bind_group(1, &self.atlas_group, &[]);
-            pass.set_vertex_buffer(0, self.terrain_instances.slice(..));
-            pass.draw(0..6, 0..self.terrain_slots);
+        if self.room_count > 0
+            && let Some(group) = &self.rooms_group
+        {
+            pass.set_pipeline(&self.pipelines.rooms);
+            pass.set_bind_group(1, group, &[]);
+            pass.set_vertex_buffer(0, self.rooms.slice(..));
+            pass.draw(0..6, 0..self.room_count);
         }
         if draw.fades.minimap > 0.0 {
             pass.set_pipeline(&self.pipelines.points);
@@ -665,6 +674,33 @@ fn locals_group(
             resource: locals.as_entire_binding(),
         }],
     })
+}
+
+/// Writes an upload of the world's texels into `texture`.
+fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, upload: Upload<'_>) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: upload.level,
+            origin: wgpu::Origin3d {
+                x: upload.origin.0,
+                y: upload.origin.1,
+                z: upload.layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        upload.data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(upload.bytes_per_row),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: upload.size.0,
+            height: upload.size.1,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 /// A buffer of `size` bytes, writable from the queue.

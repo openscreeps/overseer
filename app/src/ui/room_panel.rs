@@ -206,7 +206,10 @@ fn deliver(surface: Surface, data: RoomData, map: MapState, room: RoomCoord, eve
                 data.stat.try_set(Some(Arc::clone(stat)));
             }
         }
-        WorldEvent::Terrain(at, _) | WorldEvent::Minimap(at, _) | WorldEvent::MinimapGone(at)
+        WorldEvent::Terrain(at, _)
+        | WorldEvent::NoTerrain(at)
+        | WorldEvent::Minimap(at, _)
+        | WorldEvent::MinimapGone(at)
             if *at == room =>
         {
             surface.apply(event);

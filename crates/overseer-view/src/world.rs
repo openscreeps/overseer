@@ -1,10 +1,11 @@
-//! The world as drawn, without the GPU: overview cells, terrain atlas, minimaps and detail
-//! scenes, each recording which of its GPU data changed so that updates only touch the
-//! rooms that changed.
+//! The world as drawn, without the GPU: room instances, resident terrain, the overview layer,
+//! minimaps and detail scenes, each recording which of its GPU data changed so that updates
+//! only touch the rooms that changed.
 
-mod atlas;
 mod cells;
 mod minimap;
+mod overview;
+pub mod terrain;
 
 use std::ops::Range;
 
@@ -13,9 +14,10 @@ use overseer::RoomSnapshot;
 use overseer::core::api::Terrain;
 use overseer::map::{RoomCoord, RoomMap, RoomRect, RoomStat};
 
-pub use atlas::{Atlas, LEVEL0, LEVEL1};
 pub use cells::Cells;
 pub use minimap::{Minimaps, POINTS};
+pub use overview::Overview;
+pub use terrain::TerrainStore;
 
 use crate::camera::{room_centre, room_origin};
 use crate::scene::{Frame, Scene};
@@ -26,13 +28,62 @@ pub const DETAIL_SLOTS: usize = 4;
 /// How long a detail scene fades in after its first snapshot, in milliseconds.
 const ARRIVAL_MS: f64 = 300.0;
 
+/// The device's texture limits that size the terrain texture and the overview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Largest side of a 2D texture, in texels.
+    pub texture_side: u32,
+    /// Most layers of a 2D array texture.
+    pub array_layers: u32,
+}
+
+impl Limits {
+    /// The limits every WebGL2 device has (wgpu's downlevel WebGL2 defaults).
+    #[cfg(test)]
+    pub const WEBGL2: Self = Self {
+        texture_side: 2048,
+        array_layers: 256,
+    };
+
+    /// The limits of a device.
+    #[cfg_attr(
+        not(any(target_arch = "wasm32", test)),
+        expect(
+            dead_code,
+            reason = "only the wasm canvas constructor and the tests create a renderer"
+        )
+    )]
+    pub const fn of(limits: &wgpu::Limits) -> Self {
+        Self {
+            texture_side: limits.max_texture_dimension_2d,
+            array_layers: limits.max_texture_array_layers,
+        }
+    }
+}
+
+/// Texels for a texture: a rectangle of one mip level and array layer, and its bytes
+/// (`data` starts at the first texel; rows are `bytes_per_row` apart).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Upload<'a> {
+    /// Mip level.
+    pub level: u32,
+    /// Array layer.
+    pub layer: u32,
+    /// Texel of the north-west corner.
+    pub origin: (u32, u32),
+    /// Width and height in texels.
+    pub size: (u32, u32),
+    /// Bytes from one row to the next in `data`.
+    pub bytes_per_row: u32,
+    /// The texels.
+    pub data: &'a [u8],
+}
+
 /// Where the camera is, for the nearest-first policies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Focus {
     /// The scope's rooms.
     pub bounds: RoomRect,
-    /// The rooms in view (inside the bounds).
-    pub visible: RoomRect,
     /// The ground point looked at (world X, Z).
     pub centre: Vec2,
 }
@@ -141,35 +192,38 @@ impl Detail {
 #[derive(Debug)]
 pub struct World {
     me: Option<String>,
+    limits: Limits,
     focus: Focus,
-    /// Overview cells.
+    /// Room instances of the bounds.
     pub cells: Cells,
-    /// Terrain store and atlas.
-    pub atlas: Atlas,
+    /// Every room's terrain (resident).
+    pub terrain: TerrainStore,
+    /// The overview layer of the bounds.
+    pub overview: Overview,
     /// Minimaps.
     pub minimaps: Minimaps,
     details: Vec<Option<Detail>>,
     next_id: u64,
-    /// The focus or bounds changed, or the previous refresh left rooms to place.
-    refresh: bool,
 }
 
 impl World {
-    /// An empty world over `bounds` with an atlas of `atlas_per_row²` slots.
-    pub fn new(bounds: RoomRect, atlas_per_row: u32) -> Self {
+    /// An empty world over `bounds` for a device with `limits`.
+    pub fn new(bounds: RoomRect, limits: Limits) -> Self {
+        let mut terrain = TerrainStore::new(limits.array_layers);
+        terrain.reserve(bounds.len());
         Self {
             me: None,
+            limits,
             focus: Focus {
                 bounds,
-                visible: bounds,
                 centre: room_centre(bounds.min),
             },
             cells: Cells::new(bounds),
-            atlas: Atlas::new(atlas_per_row),
+            terrain,
+            overview: Overview::new(bounds, limits.texture_side),
             minimaps: Minimaps::default(),
             details: (0..DETAIL_SLOTS).map(|_| None).collect(),
             next_id: 1,
-            refresh: true,
         }
     }
 
@@ -178,39 +232,28 @@ impl World {
         self.focus.bounds
     }
 
-    /// Lays the world over new bounds.
+    /// Lays the world over new bounds; reserves terrain room for all of them.
     pub fn set_bounds(&mut self, bounds: RoomRect) {
         if bounds == self.focus.bounds {
             return;
         }
         self.focus.bounds = bounds;
-        let me = self.me.as_deref();
-        self.cells.set_bounds(bounds, me);
-        let cells = &self.cells;
-        self.atlas
-            .set_bounds(&self.focus, |room| cells.tint(room, me));
-        self.refresh = true;
+        let store = &mut self.terrain;
+        let missing = bounds
+            .iter()
+            .filter(|room| !store.has_terrain(*room))
+            .count();
+        store.reserve(missing);
+        let store = &self.terrain;
+        self.cells
+            .set_bounds(bounds, self.me.as_deref(), |room| store.state(room));
+        self.overview
+            .set_bounds(bounds, self.limits.texture_side, store);
     }
 
-    /// Sets what is in view and where the camera looks.
-    pub fn set_focus(&mut self, visible: RoomRect, centre: Vec2) {
-        if visible != self.focus.visible || centre != self.focus.centre {
-            self.focus.visible = visible;
-            self.focus.centre = centre;
-            self.refresh = true;
-        }
-    }
-
-    /// Brings the terrain of the rooms in view into the atlas (after the focus changed).
-    /// Returns whether rooms remain (call again next frame).
-    pub fn refresh(&mut self) -> bool {
-        if !std::mem::take(&mut self.refresh) {
-            return false;
-        }
-        let me = self.me.as_deref();
-        let cells = &self.cells;
-        self.refresh = self.atlas.refresh(&self.focus, |room| cells.tint(room, me));
-        self.refresh
+    /// Sets where the camera looks.
+    pub fn set_focus(&mut self, centre: Vec2) {
+        self.focus.centre = centre;
     }
 
     /// Sets the signed-in user: recolours cells, tints, minimaps and scenes.
@@ -221,27 +264,31 @@ impl World {
         self.me = user;
         let me = self.me.as_deref();
         self.cells.recolor(me);
-        let cells = &self.cells;
-        self.atlas
-            .set_bounds(&self.focus, |room| cells.tint(room, me));
         self.minimaps.recolor(me);
         for detail in self.details.iter_mut().flatten() {
             detail.scene.set_user(self.me.clone());
         }
     }
 
-    /// Stores a room's terrain.
+    /// Stores a room's terrain (kept for the world's life) and draws it.
     pub fn set_terrain(&mut self, room: RoomCoord, terrain: &Terrain) {
-        let tint = self.cells.tint(room, self.me.as_deref());
-        self.atlas.set_terrain(room, terrain, &self.focus, tint);
+        if let Some(slot) = self.terrain.set(room, terrain) {
+            self.cells.set_terrain(room, slot);
+            self.overview.set_room(room, slot, &self.terrain);
+        }
+    }
+
+    /// Records that the server has no terrain for a room: it is drawn as outside the world
+    /// (unless its terrain is known).
+    pub fn mark_no_terrain(&mut self, room: RoomCoord) {
+        if self.terrain.mark_absent(room) {
+            self.cells.set_terrain(room, terrain::state::ABSENT);
+        }
     }
 
     /// Sets (`None`: forgets) a room's overview.
     pub fn set_stat(&mut self, room: RoomCoord, stat: Option<&RoomStat>) {
-        let me = self.me.as_deref();
-        if self.cells.set_stat(room, stat, me) {
-            self.atlas.set_tint(room, self.cells.tint(room, me));
-        }
+        self.cells.set_stat(room, stat, self.me.as_deref());
     }
 
     /// Shows (`Some`) or removes (`None`) a room's minimap.
@@ -256,7 +303,7 @@ impl World {
         let Ok(room) = snapshot.room.parse::<RoomCoord>() else {
             return false;
         };
-        if !self.atlas.has_terrain(room) {
+        if !self.terrain.has_terrain(room) {
             self.set_terrain(room, &snapshot.terrain);
         }
         let index = self
@@ -350,12 +397,6 @@ impl World {
     /// The terrain tint of a room.
     pub fn tint(&self, room: RoomCoord) -> [u8; 4] {
         self.cells.tint(room, self.me.as_deref())
-    }
-
-    /// The current focus.
-    #[cfg(test)]
-    pub const fn focus(&self) -> &Focus {
-        &self.focus
     }
 }
 

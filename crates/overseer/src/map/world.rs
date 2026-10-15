@@ -5,7 +5,8 @@ mod detail;
 mod stats;
 mod terrain;
 
-pub use stats::{STATS_BATCH_SECTORS, STATS_TTL};
+pub use stats::{STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_TTL};
+pub use terrain::{TERRAIN_BATCH, TERRAIN_IN_FLIGHT};
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -69,7 +70,11 @@ pub enum WorldEvent {
     /// A newly fetched terrain (not one seeded with [`WorldMap::insert_terrain`]): the app
     /// persists it.
     Terrain(RoomCoord, Arc<Terrain>),
-    /// New or changed overviews, nearest the centre of [`Interest::stats`] first.
+    /// The server has no terrain for a room (it is outside its world), reported once (not for
+    /// rooms seeded with [`WorldMap::insert_no_terrain`]): the app persists it.
+    NoTerrain(RoomCoord),
+    /// The overviews one request brought, each with a new [`RoomStat::fetched_at`] (changed
+    /// or not): the app persists them. Nearest first.
     Stats(Vec<(RoomCoord, Arc<RoomStat>)>),
     /// The latest minimap of a room.
     Minimap(RoomCoord, Arc<RoomMap>),
@@ -79,6 +84,31 @@ pub enum WorldEvent {
     Detail(RoomCoord, DetailState),
     /// A room left [`Interest::detail`] and was released.
     DetailGone(RoomCoord),
+}
+
+/// How much of what is wanted is known, from [`WorldMap::progress`]: for a loading indicator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct WorldProgress {
+    /// Rooms of [`Interest::terrain`] (and [`Interest::detail`]) whose terrain is known.
+    pub terrain_known: usize,
+    /// Rooms of [`Interest::terrain`] (and [`Interest::detail`]) the server has no terrain for.
+    pub terrain_absent: usize,
+    /// Rooms of [`Interest::terrain`] (and [`Interest::detail`]), without repetitions.
+    pub terrain_wanted: usize,
+    /// Rooms of the world with an overview (possibly stale; it is refreshed meanwhile).
+    pub stats_known: usize,
+    /// Rooms whose overview is wanted: every room of the world while [`Interest::stats`] is
+    /// set and a user is signed in, else none.
+    pub stats_wanted: usize,
+}
+
+impl WorldProgress {
+    /// Whether every wanted terrain and overview is known (or known not to exist).
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.terrain_known + self.terrain_absent >= self.terrain_wanted
+            && self.stats_known >= self.stats_wanted
+    }
 }
 
 /// The world of one shard as one continuous map: the overview, terrain, live minimap and live
@@ -92,23 +122,35 @@ pub enum WorldEvent {
 ///
 /// # Policies
 ///
-/// - **Terrain** (`POST /api/game/rooms`): the wanted rooms neither known nor in flight are
-///   requested nearest first, one request at a time, in batches of at least 600 rooms and at
-///   most 3 requests per interest (the official world map's batching). Terrain never changes:
-///   it is kept for the session and [`Self::insert_terrain`] seeds it from the app's cache
-///   (those rooms are never requested). Rooms the server does not know are not asked again.
-///   A failed request is retried after 10 s.
-/// - **Overviews** (`POST /api/game/map-stats`, `owner0`): like the official world map, the
-///   stale rooms of [`Interest::stats`] inside the world are asked for by whole sectors
-///   (10 × 10 rooms), the sectors nearest its centre first, at most [`STATS_BATCH_SECTORS`]
-///   (2 500 rooms) per request, one request at a time: a whole screeps.com shard fills in
-///   about 6 requests. An overview is used for [`STATS_TTL`] (10 minutes) before it is asked
-///   again. The requests
-///   follow the endpoint's rate limit ([`net::Client::rate_limit`](crate::net::Client::rate_limit),
+/// - **Terrain** (`POST /api/game/rooms`): [`Interest::terrain`] may list every room of the
+///   world. The wanted rooms neither known, absent nor in flight are requested nearest first
+///   in batches of [`TERRAIN_BATCH`] rooms (measured on screeps.com: a whole 182 × 182 shard
+///   takes 17 requests), at most [`TERRAIN_IN_FLIGHT`] requests at a time. A room is
+///   requested at most once per session, whatever the interest changes: terrain never
+///   changes, so it is kept, and [`Self::insert_terrain`] seeds it from the app's cache (those
+///   rooms are never requested). Rooms the server has no terrain for are reported once
+///   ([`WorldEvent::NoTerrain`]) and never asked again; [`Self::insert_no_terrain`] seeds
+///   them. The endpoint has only the server-wide rate limit on screeps.com (120 requests per
+///   minute): once a limit reports no request left, requests wait for its reset; after HTTP
+///   429 they wait for the endpoint's reset (60 s when the server-wide limit refused it),
+///   after other failures 10 s.
+/// - **Overviews** (`POST /api/game/map-stats`, `owner0`): while [`Interest::stats`] is set,
+///   every room of the world is wanted and arrives progressively within the budget. Near
+///   rooms (the sectors of [`Interest::minimaps`] and the sectors around them) are used for
+///   [`STATS_TTL`] (10 minutes), all others for [`STATS_FAR_TTL`] (60 minutes), before they
+///   are asked again; [`Self::insert_stats`] seeds overviews from the app's cache, stale
+///   after the same time since their [`RoomStat::fetched_at`]. Stale near rooms go first, by
+///   whole sectors (10 × 10 rooms, like the official world map) nearest the first minimap
+///   room; then stale far rooms, by whole sectors nearest the centre of [`Interest::stats`].
+///   At most [`STATS_BATCH_SECTORS`] sectors (2 500 rooms) per request, one request at a
+///   time: a whole screeps.com shard takes 14 requests per hour. The requests follow the
+///   endpoint's rate limit ([`net::Client::rate_limit`](crate::net::Client::rate_limit),
 ///   screeps.com allows 60 per hour per token): at least 1 s apart; once fewer than half of
-///   the window's requests are left, the rest are spread evenly until the reset; none goes
-///   out while none is left, and after HTTP 429 the next waits for the reset (60 s when the
-///   server-wide limit refused it). Other failures are retried after 30 s.
+///   the window's requests are left, the rest are spread evenly until the reset; far rooms
+///   may use only [`STATS_FAR_SHARE`] percent of the window (42 of 60), so near rooms always
+///   refresh; none goes out while none is left, and after HTTP 429 the next waits for the
+///   reset (60 s when the server-wide limit refused it). Other failures are retried after
+///   30 s.
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
 /// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order.
@@ -140,7 +182,6 @@ pub struct WorldMap {
 }
 
 /// The requests and subscriptions [`WorldMap::next`] drives.
-#[derive(Default)]
 struct Work {
     events: VecDeque<WorldEvent>,
     terrain: Terrains,
@@ -153,6 +194,18 @@ struct Work {
 }
 
 impl Work {
+    /// Nothing known or wanted yet of the world `bounds`.
+    fn new(bounds: RoomRect) -> Self {
+        Self {
+            events: VecDeque::new(),
+            terrain: Terrains::default(),
+            stats: Stats::new(bounds),
+            details: Details::default(),
+            dirty: false,
+            timer: None,
+        }
+    }
+
     /// Polls every request, subscription and the timer; ready once something changed.
     fn poll(
         &mut self,
@@ -190,7 +243,7 @@ impl WorldMap {
             interest: Interest::default(),
             minimaps,
             shown: HashSet::new(),
-            work: Work::default(),
+            work: Work::new(bounds),
         }
     }
 
@@ -223,13 +276,16 @@ impl WorldMap {
             .and_then(|rect| rect.intersection(&self.bounds));
         let detail = unique(&interest.detail);
         if user {
-            let rooms = detail.iter().chain(&interest.terrain).copied();
-            work.terrain.want(&rooms.collect::<Vec<_>>());
+            work.terrain
+                .want(detail.iter().chain(&interest.terrain).copied());
         } else {
-            work.terrain.want(&interest.terrain);
+            work.terrain.want(interest.terrain.iter().copied());
         }
+        let minimaps = unique(&interest.minimaps);
+        work.stats
+            .set_near(&minimaps[..minimaps.len().min(MINIMAP_CAP)]);
         if let Some(view) = &mut self.minimaps {
-            let rooms = unique(&interest.minimaps);
+            let rooms = minimaps;
             let change = view.set_rooms(rooms.iter().take(MINIMAP_CAP).map(ToString::to_string));
             for room in change.removed {
                 if let Ok(room) = room.parse()
@@ -254,6 +310,36 @@ impl WorldMap {
     /// no [`WorldEvent::Terrain`] reports it.
     pub fn insert_terrain(&mut self, room: RoomCoord, terrain: Arc<Terrain>) {
         self.work.terrain.insert(room, terrain);
+    }
+
+    /// Seeds from the app's persistent cache that the server has no terrain for `room` (an
+    /// earlier [`WorldEvent::NoTerrain`]): it is never requested and not reported again.
+    /// Ignored when its terrain is known.
+    pub fn insert_no_terrain(&mut self, room: RoomCoord) {
+        self.work.terrain.insert_absent(room);
+    }
+
+    /// Seeds the overview of `room` from the app's persistent cache: no [`WorldEvent::Stats`]
+    /// reports it, and it is requested again once stale (its [`RoomStat::fetched_at`] older
+    /// than [`STATS_TTL`] for a near room, [`STATS_FAR_TTL`] for the others). Ignored when a
+    /// newer overview is known.
+    pub fn insert_stats(&mut self, room: RoomCoord, stat: Arc<RoomStat>) {
+        self.work.stats.insert(room, stat);
+        self.work.dirty = true;
+    }
+
+    /// How much of what is wanted is known.
+    #[must_use]
+    pub fn progress(&self) -> WorldProgress {
+        let (terrain_known, terrain_absent, terrain_wanted) = self.work.terrain.progress();
+        let (stats_known, stats_wanted) = self.work.stats.progress();
+        WorldProgress {
+            terrain_known,
+            terrain_absent,
+            terrain_wanted,
+            stats_known,
+            stats_wanted,
+        }
     }
 
     /// The next change. Cancel-safe: requests and subscriptions live in the `WorldMap`, so
@@ -309,10 +395,9 @@ impl WorldMap {
         work.dirty = false;
         let now = Instant::now();
         let shard = self.shard.as_deref();
-        let terrain = work.terrain.plan(&self.map, shard, now);
-        let stats = work
-            .stats
-            .plan(&self.map, self.overseer.client(), shard, now);
+        let client = self.overseer.client();
+        let terrain = work.terrain.plan(&self.map, client, shard, now);
+        let stats = work.stats.plan(&self.map, client, shard, now);
         let due = match (terrain, stats) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (due, None) | (None, due) => due,
@@ -332,15 +417,26 @@ impl WorldMap {
         self.work.terrain.known.get(&room).cloned()
     }
 
-    /// The overview of `room`, when fetched.
+    /// Whether the server has no terrain for `room` (reported by [`WorldEvent::NoTerrain`] or
+    /// seeded with [`Self::insert_no_terrain`]).
+    #[must_use]
+    pub fn has_no_terrain(&self, room: RoomCoord) -> bool {
+        self.work.terrain.is_absent(room)
+    }
+
+    /// The overview of `room`, when fetched or seeded.
     #[must_use]
     pub fn stat(&self, room: RoomCoord) -> Option<Arc<RoomStat>> {
         self.work.stats.get(room)
     }
 
-    /// The latest minimap of `room`, while it is live.
+    /// The latest minimap of `room`, from its first [`WorldEvent::Minimap`] until its
+    /// [`WorldEvent::MinimapGone`].
     #[must_use]
     pub fn minimap(&self, room: RoomCoord) -> Option<Arc<RoomMap>> {
+        if !self.shown.contains(&room) {
+            return None;
+        }
         self.minimaps.as_ref()?.latest(&room.to_string())
     }
 

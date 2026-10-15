@@ -14,7 +14,8 @@ pub use rect::RoomRect;
 pub use stat::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
 pub use view::{MapView, ViewChange};
 pub use world::{
-    DetailState, Interest, MINIMAP_CAP, STATS_BATCH_SECTORS, STATS_TTL, WorldEvent, WorldMap,
+    DetailState, Interest, MINIMAP_CAP, STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL,
+    STATS_TTL, TERRAIN_BATCH, TERRAIN_IN_FLIGHT, WorldEvent, WorldMap, WorldProgress,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

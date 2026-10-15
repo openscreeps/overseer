@@ -1,9 +1,20 @@
-// Flat world layers (appended to common.wgsl), drawn on the ground in world tiles: overview
-// cells, atlas terrain and minimap points, each an instanced quad built from the vertex
-// index.
+// Flat world layers (appended to common.wgsl), drawn on the ground in world tiles: the rooms
+// (terrain, status and owner, borders) and minimap points, each an instanced quad built
+// from the vertex index.
 
-@group(1) @binding(0) var atlas: texture_2d<f32>;
-@group(1) @binding(1) var atlas_sampler: sampler;
+// Every room's terrain, packed 2 bits per tile: slot `s` is the 25×25 block at column
+// `s % 1640 % 40`, row `s % 1640 / 40` of layer `s / 1640` (see `world/terrain.rs`).
+@group(1) @binding(0) var terrain: texture_2d_array<u32>;
+// The overview of the bounds: shares of walls (r), swamps (g) and plains (b) per texel.
+@group(1) @binding(1) var overview: texture_2d<f32>;
+@group(1) @binding(2) var overview_sampler: sampler;
+
+// Terrain states of a room instance besides a slot.
+const PENDING: u32 = 0xffffffffu;
+const ABSENT: u32 = 0xfffffffeu;
+const SLOT_SIDE: u32 = 25u;
+const SLOT_COLUMNS: u32 = 40u;
+const SLOTS_PER_LAYER: u32 = 1640u;
 
 // Corner `index` (0..6) of a unit quad, as two triangles.
 fn quad_corner(index: u32) -> vec2<f32> {
@@ -22,57 +33,38 @@ fn ground(position: vec2<f32>) -> vec4<f32> {
     return globals.view_projection * vec4<f32>(position.x, 0.0, position.y, 1.0);
 }
 
-// Darkening of a room border (about one pixel on each side) at room-local tile `local`.
-fn border(local: vec2<f32>) -> f32 {
-    let width = max(fwidth(local), vec2<f32>(1e-4));
-    let edge = min(local, vec2<f32>(50.0) - local) / width;
+// Darkening of a room border (about one pixel on each side) at room-local tile `local`,
+// `width` tiles per pixel.
+fn border(local: vec2<f32>, width: vec2<f32>) -> f32 {
+    let edge = min(local, vec2<f32>(50.0) - local) / max(width, vec2<f32>(1e-4));
     return (1.0 - clamp(min(edge.x, edge.y), 0.0, 1.0)) * globals.params.z;
 }
 
-struct CellOut {
+struct RoomOut {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) local: vec2<f32>,
+    @location(0) overlay: vec4<f32>,
+    @location(1) tint: vec4<f32>,
+    @location(2) local: vec2<f32>,
+    @location(3) overview_uv: vec2<f32>,
+    @location(4) @interpolate(flat) slot: u32,
 }
 
 @vertex
-fn cell_vertex(
+fn room_vertex(
     @builtin(vertex_index) index: u32,
     @location(0) origin: vec2<f32>,
-    @location(1) color: vec4<f32>,
-) -> CellOut {
-    var out: CellOut;
+    @location(1) slot: u32,
+    @location(2) overlay: vec4<f32>,
+    @location(3) tint: vec4<f32>,
+) -> RoomOut {
+    var out: RoomOut;
     out.local = quad_corner(index) * 50.0;
-    out.position = ground(origin + out.local);
-    out.color = vec4<f32>(srgb_to_linear(color.rgb), 1.0);
-    return out;
-}
-
-@fragment
-fn cell_fragment(in: CellOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color.rgb * (1.0 - 0.55 * border(in.local)), 1.0);
-}
-
-struct TerrainOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) tint: vec4<f32>,
-    @location(1) local: vec2<f32>,
-    @location(2) cell: vec2<f32>,
-}
-
-@vertex
-fn atlas_vertex(
-    @builtin(vertex_index) index: u32,
-    @location(0) origin: vec2<f32>,
-    @location(1) cell: vec2<f32>,
-    @location(2) tint: vec4<f32>,
-) -> TerrainOut {
-    var out: TerrainOut;
-    out.local = quad_corner(index) * 50.0;
-    out.cell = cell;
+    out.overview_uv = (origin + out.local - globals.overview.xy) / globals.overview.zw;
+    out.slot = slot;
+    out.overlay = vec4<f32>(srgb_to_linear(overlay.rgb), overlay.a);
     out.tint = vec4<f32>(srgb_to_linear(tint.rgb), tint.a);
-    if cell.x < 0.0 {
-        // An empty slot: outside the clip volume.
+    if slot == ABSENT {
+        // Outside the world: outside the clip volume.
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     } else {
         out.position = ground(origin + out.local);
@@ -80,18 +72,62 @@ fn atlas_vertex(
     return out;
 }
 
+// The code (0 plain, 1 wall, 2 swamp) of room-local tile `tile` in `slot`.
+fn tile_code(slot: u32, tile: vec2<f32>) -> u32 {
+    let t = vec2<u32>(clamp(tile, vec2<f32>(0.0), vec2<f32>(49.0)));
+    let index = t.y * 50u + t.x;
+    let byte = index >> 2u;
+    let block = slot % SLOTS_PER_LAYER;
+    let layer = slot / SLOTS_PER_LAYER;
+    let texel = vec2<u32>(
+        (block % SLOT_COLUMNS) * SLOT_SIDE + byte % SLOT_SIDE,
+        (block / SLOT_COLUMNS) * SLOT_SIDE + byte / SLOT_SIDE,
+    );
+    let value = textureLoad(terrain, vec2<i32>(texel), i32(layer), 0).r;
+    return (value >> ((index & 3u) * 2u)) & 3u;
+}
+
+fn tile_color(code: u32) -> vec3<f32> {
+    if code == 1u {
+        return globals.wall.rgb;
+    }
+    if code == 2u {
+        return globals.swamp.rgb;
+    }
+    return globals.plain.rgb;
+}
+
 @fragment
-fn atlas_fragment(in: TerrainOut) -> @location(0) vec4<f32> {
-    // Inset by one texel so that filtering never reads the neighbouring slot.
-    let texel = clamp(in.local, vec2<f32>(1.0), vec2<f32>(49.0));
-    let coverage = textureSample(atlas, atlas_sampler, (in.cell * 50.0 + texel) * globals.params.w).rg;
-    let plain = max(1.0 - coverage.r - coverage.g, 0.0);
-    var color = globals.plain.rgb * plain + globals.wall.rgb * coverage.r + globals.swamp.rgb * coverage.g;
+fn room_fragment(in: RoomOut) -> @location(0) vec4<f32> {
+    // Tiles per pixel (derivatives and sampling in uniform control flow, before branches).
+    let footprint = fwidth(in.local);
     // Lit like the flat tops of the detail terrain.
-    color = color * (0.6 + 0.4 * max(globals.light.y, 0.0));
-    color = mix(color, in.tint.rgb, in.tint.a);
-    color = color * (1.0 - 0.55 * border(in.local));
-    return vec4<f32>(color, globals.params.x);
+    let light = 0.6 + 0.4 * max(globals.light.y, 0.0);
+    // The overview: area-averaged shares, filtered across rooms and mip levels; what no
+    // terrain covers is the placeholder.
+    let shares = textureSample(overview, overview_sampler, in.overview_uv).rgb;
+    let missing = max(1.0 - shares.r - shares.g - shares.b, 0.0);
+    var color = (globals.wall.rgb * shares.r + globals.swamp.rgb * shares.g
+        + globals.plain.rgb * shares.b) * light + globals.pending.rgb * missing;
+    let near = globals.params.x;
+    if near > 0.0 {
+        // Full resolution, decoded from the packed terrain: four taps a quarter pixel apart
+        // (rotated grid) antialias tile edges and average tiles smaller than a pixel.
+        var tiles = globals.pending.rgb;
+        if in.slot != PENDING {
+            let a = tile_color(tile_code(in.slot, in.local + vec2<f32>(-0.125, -0.375) * footprint));
+            let b = tile_color(tile_code(in.slot, in.local + vec2<f32>(0.375, -0.125) * footprint));
+            let c = tile_color(tile_code(in.slot, in.local + vec2<f32>(0.125, 0.375) * footprint));
+            let d = tile_color(tile_code(in.slot, in.local + vec2<f32>(-0.375, 0.125) * footprint));
+            tiles = (a + b + c + d) * 0.25 * light;
+        }
+        color = mix(color, tiles, near);
+    }
+    // Status and owner: a strong overlay zoomed out, a light tint over full resolution.
+    let over = mix(in.overlay, in.tint, near);
+    color = mix(color, over.rgb, over.a);
+    color = color * (1.0 - 0.55 * border(in.local, footprint));
+    return vec4<f32>(color, 1.0);
 }
 
 struct PointOut {

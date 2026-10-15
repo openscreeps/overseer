@@ -1,44 +1,69 @@
-//! Room terrain kept across restarts in `IndexedDB`: terrain never changes, so a room fetched
-//! once is never fetched again.
+//! What the world map learned, kept across restarts in `IndexedDB`: room terrain (it never
+//! changes, so a room fetched once is never fetched again), rooms without terrain, and room
+//! overviews (owner, level, status) with when they were fetched, so a reopened world shows
+//! them at once and asks again only for the stale ones.
 //!
 //! # Storage
 //!
-//! Database `overseer-terrain` (schema version 1) with two object stores:
+//! Database `overseer-terrain` (schema version 2) with three object stores, all
+//! keyed per room by `<FORMAT>|<server URL>|<shard>|<room>` ([`room_key`]; `<shard>` is `-` on
+//! single-world servers):
 //!
-//! - `terrain`: one record per room under the key `<FORMAT>|<server URL>|<shard>|<room>`
-//!   ([`room_key`]; `<shard>` is `-` on single-world servers), its value the terrain packed
-//!   2 bits per tile ([`pack`], [`PACKED_LEN`] = 625 bytes).
+//! - `terrain`: the terrain packed 2 bits per tile ([`Terrain::packed`],
+//!   [`Terrain::PACKED_LEN`] = 625 bytes), or no bytes when the server has no terrain for the
+//!   room ([`Cached::NoTerrain`]); see [`terrain_record`].
+//! - `stats`: the overview as a JSON string ([`stat_json`], read by [`parse_stat`]), with its
+//!   own version (`"v"`, [`STAT_VERSION`]); overviews older than [`STAT_MAX_AGE_MS`] are not
+//!   used.
 //! - `worlds`: per `<FORMAT>|<server URL>|<shard>|` prefix ([`world_key`]) when it was last
 //!   opened, in milliseconds since the epoch.
 //!
-//! The record format is versioned by [`FORMAT`] in the key: records of another format are
-//! deleted when the cache opens.
+//! Schema version 1 had `terrain` and `worlds` only: upgrading adds the missing stores and
+//! keeps the records ([`missing_stores`]). The record format is versioned by [`FORMAT`] in the
+//! key: records of another format are deleted when the cache opens.
 //!
 //! # Bound
 //!
-//! At most [`MAX_ROOMS`] rooms (about 31 MB of terrain) are kept. Past the bound, whole
-//! worlds are evicted, least recently opened first and never the open one, down to
-//! [`TARGET_ROOMS`] ([`plan_eviction`]); when the open world alone fills the bound, its
-//! further rooms are not stored ([`writable`]).
+//! At most [`MAX_ROOMS`] terrain records (150 000: four full screeps.com shards of 182 × 182
+//! rooms) are kept: about 670 bytes each with the key, so 100 MB of terrain, plus about
+//! 150 bytes per overview (at most one per room, 22 MB). Past the bound, whole worlds
+//! (terrain and overviews) are evicted, least recently opened first and never the open one,
+//! down to [`TARGET_ROOMS`] ([`plan_eviction`]); when the open world alone fills the bound,
+//! its further terrain is not stored ([`writable`]).
 //!
-//! On a world's start the app loads all its cached rooms and hands them to
-//! `WorldMap::insert_terrain` and `Viewer::set_terrain`; rooms the library fetches later
-//! (`WorldEvent::Terrain`) are written in batches (`TerrainCache::store`, browsers only).
+//! On a world's start the app loads all its cached rooms and hands them to the `WorldMap`
+//! (`insert_terrain`, `insert_no_terrain`, `insert_stats`), which the viewers get them from;
+//! what the library fetches later (`WorldEvent::Terrain`, `NoTerrain`, `Stats`) is written in
+//! batches (`TerrainCache::store`, browsers only).
 
-use overseer::core::api::{Terrain, Tile};
-use overseer::map::RoomCoord;
+use overseer::core::api::Terrain;
+use overseer::map::{RoomCoord, RoomOwner, RoomReservation, RoomStat, RoomStatus};
+use serde_json::{Map, Value, json};
 
 /// Record format, the first part of every key.
 pub const FORMAT: u32 = 1;
-/// Most rooms kept.
-pub const MAX_ROOMS: u32 = 50_000;
-/// Rooms kept after an eviction.
-pub const TARGET_ROOMS: u32 = 45_000;
-/// Bytes of a packed terrain: 2500 tiles, 2 bits each.
-pub const PACKED_LEN: usize = 625;
+/// Most terrain records kept.
+pub const MAX_ROOMS: u32 = 150_000;
+/// Terrain records kept after an eviction.
+pub const TARGET_ROOMS: u32 = 135_000;
 
-/// Tiles per room side.
-const SIZE: u8 = 50;
+/// Rooms of a screeps.com shard (182 × 182).
+const SHARD_ROOMS: u32 = 182 * 182;
+// Four full shards fit, and an eviction frees room.
+const _: () = assert!(MAX_ROOMS >= 4 * SHARD_ROOMS && TARGET_ROOMS < MAX_ROOMS);
+/// Version of the overview records ([`stat_json`]).
+pub const STAT_VERSION: u64 = 1;
+/// Overviews older than this (a week, in milliseconds) are not used: owners change.
+pub const STAT_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Store of the terrain records.
+pub const TERRAIN: &str = "terrain";
+/// Store of the overview records.
+pub const STATS: &str = "stats";
+/// Store of the worlds' last-opened times.
+pub const WORLDS: &str = "worlds";
+/// Every store of the current schema.
+pub const STORES: [&str; 3] = [TERRAIN, STATS, WORLDS];
 
 /// The key prefix of the world `shard` (`None` on single-world servers) of the server with
 /// base URL `server`.
@@ -56,41 +81,123 @@ pub fn key_room(world: &str, key: &str) -> Option<RoomCoord> {
     key.strip_prefix(world)?.parse().ok()
 }
 
-/// Packs `terrain` row by row, 4 tiles per byte from the low bits: 0 plain, 1 wall, 2 swamp.
-pub fn pack(terrain: &Terrain) -> [u8; PACKED_LEN] {
-    let mut packed = [0; PACKED_LEN];
-    let mut index = 0;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let bits = match terrain.get(x, y) {
-                Some(Tile::Wall) => 1,
-                Some(Tile::Swamp) => 2,
-                Some(Tile::Plain) | None => 0,
-            };
-            packed[index / 4] |= bits << ((index % 4) * 2);
-            index += 1;
-        }
-    }
-    packed
+/// The stores of [`STORES`] a database with the stores `existing` lacks: created on upgrade,
+/// while the existing ones keep their records.
+pub fn missing_stores(existing: &[String]) -> Vec<&'static str> {
+    STORES
+        .into_iter()
+        .filter(|store| !existing.iter().any(|name| name == store))
+        .collect()
 }
 
-/// Unpacks [`pack`]'s form; `None` unless `packed` is [`PACKED_LEN`] bytes of valid tiles.
-pub fn unpack(packed: &[u8]) -> Option<Terrain> {
-    if packed.len() != PACKED_LEN {
+/// A room's terrain record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cached {
+    /// Its terrain.
+    Terrain(Terrain),
+    /// The server has no terrain for it.
+    NoTerrain,
+}
+
+/// Reads a terrain record: [`Terrain::PACKED_LEN`] packed bytes, or none for a room without
+/// terrain; `None` for anything else.
+pub fn terrain_record(bytes: &[u8]) -> Option<Cached> {
+    if bytes.is_empty() {
+        return Some(Cached::NoTerrain);
+    }
+    let packed = <&[u8; Terrain::PACKED_LEN]>::try_from(bytes).ok()?;
+    Terrain::from_packed(packed).ok().map(Cached::Terrain)
+}
+
+/// The overview record of `stat` (see [`parse_stat`]).
+pub fn stat_json(stat: &RoomStat) -> String {
+    let status = match stat.status {
+        RoomStatus::Normal => "normal",
+        RoomStatus::Novice => "novice",
+        RoomStatus::Respawn => "respawn",
+        RoomStatus::Closed => "closed",
+        RoomStatus::OutOfBorders => "out of borders",
+    };
+    let mut record = Map::new();
+    record.insert("v".to_owned(), json!(STAT_VERSION));
+    record.insert("at".to_owned(), json!(stat.fetched_at));
+    record.insert("status".to_owned(), json!(status));
+    if let Some(until) = stat.status_until {
+        record.insert("until".to_owned(), json!(until));
+    }
+    if let Some(owner) = &stat.owner {
+        record.insert(
+            "owner".to_owned(),
+            json!({"id": owner.id, "name": owner.username, "level": owner.level}),
+        );
+    }
+    if let Some(reservation) = &stat.reservation {
+        record.insert(
+            "reservation".to_owned(),
+            json!({"id": reservation.id, "name": reservation.username}),
+        );
+    }
+    if stat.safe_mode {
+        record.insert("safe".to_owned(), json!(true));
+    }
+    if let Some(mineral) = &stat.mineral {
+        record.insert("mineral".to_owned(), json!(mineral));
+    }
+    if let Some(density) = stat.mineral_density {
+        record.insert("density".to_owned(), json!(density));
+    }
+    Value::Object(record).to_string()
+}
+
+/// Reads an overview record of [`stat_json`] at `now` (milliseconds since the epoch): `None`
+/// when it is malformed, of another [`STAT_VERSION`], or older than [`STAT_MAX_AGE_MS`]. Its
+/// `fetched_at` comes back as stored, so the `WorldMap` knows how stale it is.
+pub fn parse_stat(record: &str, now: u64) -> Option<RoomStat> {
+    let value: Value = serde_json::from_str(record).ok()?;
+    if value.get("v")?.as_u64()? != STAT_VERSION {
         return None;
     }
-    let mut digits = String::with_capacity(PACKED_LEN * 4);
-    for byte in packed {
-        for shift in [0, 2, 4, 6] {
-            digits.push(match (byte >> shift) & 3 {
-                0 => '0',
-                1 => '1',
-                2 => '2',
-                _ => return None,
-            });
-        }
+    let fetched_at = value.get("at")?.as_u64()?;
+    if now.saturating_sub(fetched_at) > STAT_MAX_AGE_MS {
+        return None;
     }
-    Terrain::decode(&digits).ok()
+    let status = match value.get("status")?.as_str()? {
+        "normal" => RoomStatus::Normal,
+        "novice" => RoomStatus::Novice,
+        "respawn" => RoomStatus::Respawn,
+        "closed" => RoomStatus::Closed,
+        "out of borders" => RoomStatus::OutOfBorders,
+        _ => return None,
+    };
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let owner = match value.get("owner") {
+        None => None,
+        Some(owner) => Some(RoomOwner {
+            id: text(owner, "id")?,
+            username: text(owner, "name"),
+            level: u8::try_from(owner.get("level")?.as_u64()?).ok()?,
+        }),
+    };
+    let reservation = match value.get("reservation") {
+        None => None,
+        Some(reservation) => Some(RoomReservation {
+            id: text(reservation, "id")?,
+            username: text(reservation, "name"),
+        }),
+    };
+    Some(RoomStat {
+        status,
+        status_until: value.get("until").and_then(Value::as_u64),
+        owner,
+        reservation,
+        safe_mode: value.get("safe").and_then(Value::as_bool) == Some(true),
+        mineral: text(&value, "mineral"),
+        mineral_density: value
+            .get("density")
+            .and_then(Value::as_u64)
+            .and_then(|density| u8::try_from(density).ok()),
+        fetched_at,
+    })
 }
 
 /// A cached world: its key, when it was last opened and how many rooms it has.
@@ -144,41 +251,56 @@ mod idb {
 
     use js_sys::{Array, Function, Promise, Uint8Array};
     use overseer::core::api::Terrain;
-    use overseer::map::RoomCoord;
+    use overseer::map::{RoomCoord, RoomStat, WorldEvent};
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
-        IdbDatabase, IdbKeyRange, IdbOpenDbRequest, IdbRequest, IdbTransaction, IdbTransactionMode,
+        IdbDatabase, IdbKeyRange, IdbObjectStore, IdbOpenDbRequest, IdbRequest, IdbTransaction,
+        IdbTransactionMode,
     };
 
     use super::{
-        FORMAT, WorldEntry, key_room, pack, plan_eviction, room_key, unpack, world_key, writable,
+        Cached, FORMAT, STATS, STORES, TERRAIN, WORLDS, WorldEntry, key_room, missing_stores,
+        parse_stat, plan_eviction, room_key, stat_json, terrain_record, world_key, writable,
     };
 
     /// `IndexedDB` database name.
     const DB_NAME: &str = "overseer-terrain";
-    /// `IndexedDB` schema version (object stores and indexes).
-    const DB_VERSION: u32 = 1;
-    /// Store of the terrain records.
-    const TERRAIN: &str = "terrain";
-    /// Store of the worlds' last-opened times.
-    const WORLDS: &str = "worlds";
-    /// How long terrain waits to be written with the rooms arriving after it.
+    /// `IndexedDB` schema version (object stores): 1 had `terrain` and `worlds`, 2 adds
+    /// `stats`.
+    const DB_VERSION: u32 = 2;
+    /// How long records wait to be written with those arriving after them.
     const FLUSH_DELAY: Duration = Duration::from_secs(1);
 
-    /// Rooms and their terrain.
-    type Rooms = Vec<(RoomCoord, Arc<Terrain>)>;
+    /// What a world's cache holds.
+    #[derive(Default)]
+    pub struct Loaded {
+        /// Rooms and their terrain.
+        pub terrain: Vec<(RoomCoord, Arc<Terrain>)>,
+        /// Rooms the server has no terrain for.
+        pub no_terrain: Vec<RoomCoord>,
+        /// Rooms and their overview, with when it was fetched.
+        pub stats: Vec<(RoomCoord, Arc<RoomStat>)>,
+    }
 
-    /// The terrain cache of one world; cheap to clone.
+    /// A record waiting to be written.
+    enum Write {
+        /// A terrain record: the terrain, or `None` for a room without one.
+        Terrain(RoomCoord, Option<Arc<Terrain>>),
+        /// An overview record.
+        Stat(RoomCoord, Arc<RoomStat>),
+    }
+
+    /// The cache of one world; cheap to clone.
     #[derive(Clone)]
     pub struct TerrainCache {
         db: IdbDatabase,
         world: Rc<str>,
-        /// Rooms stored across all worlds, as last counted plus writes since.
+        /// Terrain records stored across all worlds, as last counted plus writes since.
         stored: Rc<Cell<u32>>,
-        /// Rooms waiting to be written.
-        pending: Rc<RefCell<Rooms>>,
+        /// Records waiting to be written.
+        pending: Rc<RefCell<Vec<Write>>>,
     }
 
     impl TerrainCache {
@@ -203,41 +325,91 @@ mod idb {
             Ok(cache)
         }
 
-        /// Every cached room of the world.
+        /// Everything cached of the world; overviews older than
+        /// [`STAT_MAX_AGE_MS`](super::STAT_MAX_AGE_MS) are left out.
         ///
         /// # Errors
         ///
         /// Returns a message when `IndexedDB` fails.
-        pub async fn load(&self) -> Result<Rooms, String> {
-            let transaction = self.transaction(&[TERRAIN], IdbTransactionMode::Readonly)?;
-            let store = transaction.object_store(TERRAIN).map_err(js_message)?;
+        pub async fn load(&self) -> Result<Loaded, String> {
+            let transaction = self.transaction(&[TERRAIN, STATS], IdbTransactionMode::Readonly)?;
+            let mut loaded = Loaded::default();
+            let mut buffer = [0; Terrain::PACKED_LEN];
+            for (room, value) in self.records(&transaction, TERRAIN).await? {
+                let Some(bytes) = value.dyn_ref::<Uint8Array>() else {
+                    continue;
+                };
+                let record = match bytes.length() as usize {
+                    0 => terrain_record(&[]),
+                    Terrain::PACKED_LEN => {
+                        bytes.copy_to(&mut buffer);
+                        terrain_record(&buffer)
+                    }
+                    _ => None,
+                };
+                match record {
+                    Some(Cached::Terrain(terrain)) => {
+                        loaded.terrain.push((room, Arc::new(terrain)));
+                    }
+                    Some(Cached::NoTerrain) => loaded.no_terrain.push(room),
+                    None => {}
+                }
+            }
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the epoch time in milliseconds is a non-negative integer far below u64::MAX"
+            )]
+            let now = js_sys::Date::now() as u64;
+            for (room, value) in self.records(&transaction, STATS).await? {
+                if let Some(stat) = value.as_string().and_then(|json| parse_stat(&json, now)) {
+                    loaded.stats.push((room, Arc::new(stat)));
+                }
+            }
+            Ok(loaded)
+        }
+
+        /// The world's records of `store` in `transaction`, by room.
+        async fn records(
+            &self,
+            transaction: &IdbTransaction,
+            store: &str,
+        ) -> Result<Vec<(RoomCoord, JsValue)>, String> {
+            let store = transaction.object_store(store).map_err(js_message)?;
             let range = prefix_range(&self.world)?;
             let keys = request(&store.get_all_keys_with_key(&range).map_err(js_message)?).await?;
             let values = request(&store.get_all_with_key(&range).map_err(js_message)?).await?;
             let (keys, values) = (Array::from(&keys), Array::from(&values));
-            let mut rooms = Vec::with_capacity(keys.length() as usize);
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let Some(room) = key.as_string().and_then(|key| key_room(&self.world, &key)) else {
-                    continue;
-                };
-                let Some(bytes) = value.dyn_ref::<Uint8Array>() else {
-                    continue;
-                };
-                if let Some(terrain) = unpack(&bytes.to_vec()) {
-                    rooms.push((room, Arc::new(terrain)));
-                }
-            }
-            Ok(rooms)
+            Ok(keys
+                .iter()
+                .zip(values.iter())
+                .filter_map(|(key, value)| {
+                    let room = key_room(&self.world, &key.as_string()?)?;
+                    Some((room, value))
+                })
+                .collect())
         }
 
-        /// Stores `terrain` of `room`: rooms arriving within [`FLUSH_DELAY`] are written in
-        /// one transaction. Best effort: a room that fails to be written is fetched again
-        /// next time.
-        pub fn store(&self, room: RoomCoord, terrain: Arc<Terrain>) {
+        /// Stores what `event` brought: a terrain, a room without terrain, or overviews.
+        /// Records arriving within [`FLUSH_DELAY`] are written in one transaction. Best
+        /// effort: a record that fails to be written is fetched again next time.
+        pub fn store(&self, event: &WorldEvent) {
             let first = {
                 let mut pending = self.pending.borrow_mut();
-                pending.push((room, terrain));
-                pending.len() == 1
+                let before = pending.len();
+                match event {
+                    WorldEvent::Terrain(room, terrain) => {
+                        pending.push(Write::Terrain(*room, Some(Arc::clone(terrain))));
+                    }
+                    WorldEvent::NoTerrain(room) => pending.push(Write::Terrain(*room, None)),
+                    WorldEvent::Stats(stats) => pending.extend(
+                        stats
+                            .iter()
+                            .map(|(room, stat)| Write::Stat(*room, Arc::clone(stat))),
+                    ),
+                    _ => {}
+                }
+                before == 0 && !pending.is_empty()
             };
             if first {
                 let cache = self.clone();
@@ -249,25 +421,52 @@ mod idb {
             }
         }
 
-        /// Writes the queued rooms in one transaction, as many as the bound allows.
+        /// Writes the queued records in one transaction, terrain as far as the bound allows.
         async fn flush(&self) -> Result<(), String> {
-            let rooms = std::mem::take(&mut *self.pending.borrow_mut());
-            let wanted = u32::try_from(rooms.len()).unwrap_or(u32::MAX);
-            let allowed = writable(self.stored.get(), wanted);
-            if allowed == 0 {
-                return Ok(());
-            }
-            let transaction = self.transaction(&[TERRAIN], IdbTransactionMode::Readwrite)?;
-            let store = transaction.object_store(TERRAIN).map_err(js_message)?;
-            for (room, terrain) in rooms.iter().take(allowed as usize) {
-                let value = Uint8Array::from(pack(terrain).as_slice());
-                store
-                    .put_with_key(&value, &JsValue::from_str(&room_key(&self.world, *room)))
-                    .map_err(js_message)?;
+            let writes = std::mem::take(&mut *self.pending.borrow_mut());
+            let terrain_count = writes
+                .iter()
+                .filter(|write| matches!(write, Write::Terrain(..)))
+                .count();
+            let mut allowed = writable(
+                self.stored.get(),
+                u32::try_from(terrain_count).unwrap_or(u32::MAX),
+            );
+            let written = allowed;
+            let transaction = self.transaction(&[TERRAIN, STATS], IdbTransactionMode::Readwrite)?;
+            let terrain = transaction.object_store(TERRAIN).map_err(js_message)?;
+            let stats = transaction.object_store(STATS).map_err(js_message)?;
+            for write in &writes {
+                match write {
+                    Write::Terrain(room, record) => {
+                        if allowed == 0 {
+                            continue;
+                        }
+                        allowed -= 1;
+                        let bytes = record.as_ref().map_or(&[][..], |terrain| terrain.packed());
+                        self.put(&terrain, *room, &Uint8Array::from(bytes))?;
+                    }
+                    Write::Stat(room, stat) => {
+                        self.put(&stats, *room, &JsValue::from_str(&stat_json(stat)))?;
+                    }
+                }
             }
             done(&transaction).await?;
-            self.stored.set(self.stored.get().saturating_add(allowed));
+            self.stored.set(self.stored.get().saturating_add(written));
             Ok(())
+        }
+
+        /// Puts `value` under the key of `room` into `store`.
+        fn put(
+            &self,
+            store: &IdbObjectStore,
+            room: RoomCoord,
+            value: &JsValue,
+        ) -> Result<(), String> {
+            store
+                .put_with_key(value, &JsValue::from_str(&room_key(&self.world, room)))
+                .map(drop)
+                .map_err(js_message)
         }
 
         /// Records that the world was opened now.
@@ -286,9 +485,8 @@ mod idb {
         /// Deletes the records of other formats (keys outside `<FORMAT>|…`).
         async fn drop_other_formats(&self) -> Result<(), String> {
             let prefix = format!("{FORMAT}|");
-            let transaction =
-                self.transaction(&[TERRAIN, WORLDS], IdbTransactionMode::Readwrite)?;
-            for name in [TERRAIN, WORLDS] {
+            let transaction = self.transaction(&STORES, IdbTransactionMode::Readwrite)?;
+            for name in STORES {
                 let store = transaction.object_store(name).map_err(js_message)?;
                 let below = IdbKeyRange::upper_bound_with_open(&JsValue::from_str(&prefix), true)
                     .map_err(js_message)?;
@@ -303,11 +501,12 @@ mod idb {
             done(&transaction).await
         }
 
-        /// Counts the rooms of every world and deletes the worlds [`plan_eviction`] picks.
+        /// Counts the terrain records of every world and deletes the worlds [`plan_eviction`]
+        /// picks (their terrain and overviews).
         async fn evict(&self) -> Result<(), String> {
-            let transaction =
-                self.transaction(&[TERRAIN, WORLDS], IdbTransactionMode::Readwrite)?;
+            let transaction = self.transaction(&STORES, IdbTransactionMode::Readwrite)?;
             let terrain = transaction.object_store(TERRAIN).map_err(js_message)?;
+            let stats = transaction.object_store(STATS).map_err(js_message)?;
             let worlds = transaction.object_store(WORLDS).map_err(js_message)?;
             let keys = Array::from(&request(&worlds.get_all_keys().map_err(js_message)?).await?);
             let opened = Array::from(&request(&worlds.get_all().map_err(js_message)?).await?);
@@ -338,6 +537,7 @@ mod idb {
             let mut stored: u32 = entries.iter().map(|entry| entry.rooms).sum();
             for key in &evicted {
                 terrain.delete(&prefix_range(key)?).map_err(js_message)?;
+                stats.delete(&prefix_range(key)?).map_err(js_message)?;
                 worlds.delete(&JsValue::from_str(key)).map_err(js_message)?;
                 if let Some(entry) = entries.iter().find(|entry| &entry.key == key) {
                     stored -= entry.rooms;
@@ -361,7 +561,7 @@ mod idb {
         }
     }
 
-    /// Deletes every cached room of the server with base URL `server` (all its worlds).
+    /// Deletes everything cached of the server with base URL `server` (all its worlds).
     ///
     /// # Errors
     ///
@@ -369,14 +569,11 @@ mod idb {
     pub async fn forget_server(server: &str) -> Result<(), String> {
         let db = open_db().await?;
         let prefix = format!("{FORMAT}|{server}|");
-        let names: Array = [TERRAIN, WORLDS]
-            .iter()
-            .map(|name| JsValue::from_str(name))
-            .collect();
+        let names: Array = STORES.iter().map(|name| JsValue::from_str(name)).collect();
         let transaction = db
             .transaction_with_str_sequence_and_mode(&names, IdbTransactionMode::Readwrite)
             .map_err(js_message)?;
-        for name in [TERRAIN, WORLDS] {
+        for name in STORES {
             transaction
                 .object_store(name)
                 .map_err(js_message)?
@@ -403,11 +600,11 @@ mod idb {
             if let Ok(result) = upgrade_request.result()
                 && let Ok(db) = result.dyn_into::<IdbDatabase>()
             {
-                // Schema 1: recreate both stores (no earlier schema exists).
-                for name in [TERRAIN, WORLDS] {
-                    if db.object_store_names().contains(name) {
-                        let _ = db.delete_object_store(name);
-                    }
+                let names = db.object_store_names();
+                let existing = (0..names.length())
+                    .filter_map(|index| names.item(index))
+                    .collect::<Vec<_>>();
+                for name in missing_stores(&existing) {
                     let _ = db.create_object_store(name);
                 }
             }
@@ -481,10 +678,11 @@ pub use idb::forget_server;
 #[cfg(test)]
 mod tests {
     use overseer::core::api::{Terrain, Tile};
+    use overseer::map::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
 
     use super::{
-        MAX_ROOMS, PACKED_LEN, WorldEntry, key_room, pack, plan_eviction, room_key, unpack,
-        world_key, writable,
+        Cached, MAX_ROOMS, STAT_MAX_AGE_MS, STORES, WorldEntry, key_room, missing_stores,
+        parse_stat, plan_eviction, room_key, stat_json, terrain_record, world_key, writable,
     };
 
     fn terrain() -> Terrain {
@@ -518,17 +716,97 @@ mod tests {
     }
 
     #[test]
-    fn packs_losslessly() {
+    fn terrain_records_are_packed_or_empty() {
         let terrain = terrain();
-        let packed = pack(&terrain);
-        assert_eq!(packed.len(), PACKED_LEN);
-        let unpacked = unpack(&packed).unwrap();
-        assert_eq!(unpacked, terrain);
-        assert_eq!(unpacked.get(5, 0), Some(Tile::Wall), "wall bit wins");
-        assert_eq!(unpack(&packed[1..]), None);
-        let mut invalid = packed;
+        let packed = terrain.packed();
+        let Some(Cached::Terrain(read)) = terrain_record(packed) else {
+            panic!("a terrain expected");
+        };
+        assert_eq!(read, terrain);
+        assert_eq!(read.get(5, 0), Some(Tile::Wall), "wall bit wins");
+        assert_eq!(terrain_record(&[]), Some(Cached::NoTerrain));
+        assert_eq!(terrain_record(&packed[1..]), None);
+        let mut invalid = *packed;
         invalid[0] = 0b11;
-        assert_eq!(unpack(&invalid), None);
+        assert_eq!(terrain_record(&invalid), None);
+    }
+
+    #[test]
+    fn upgrades_add_the_missing_stores_only() {
+        assert_eq!(missing_stores(&[]), STORES);
+        let schema_1 = ["terrain".to_owned(), "worlds".to_owned()];
+        assert_eq!(missing_stores(&schema_1), ["stats"]);
+        let current = STORES.map(str::to_owned);
+        assert_eq!(missing_stores(&current), Vec::<&str>::new());
+    }
+
+    const NOW: u64 = 1_800_000_000_000;
+
+    fn stat(fetched_at: u64) -> RoomStat {
+        RoomStat {
+            status: RoomStatus::Novice,
+            status_until: Some(NOW + 5_000),
+            owner: Some(RoomOwner {
+                id: "u1".to_owned(),
+                username: Some("Alice".to_owned()),
+                level: 8,
+            }),
+            reservation: Some(RoomReservation {
+                id: "u2".to_owned(),
+                username: None,
+            }),
+            safe_mode: true,
+            mineral: Some("H".to_owned()),
+            mineral_density: Some(3),
+            fetched_at,
+        }
+    }
+
+    #[test]
+    fn overviews_round_trip_with_their_fetch_time() {
+        let fetched = stat(NOW - 60_000);
+        let record = stat_json(&fetched);
+        assert_eq!(parse_stat(&record, NOW), Some(fetched));
+        let plain = RoomStat {
+            status: RoomStatus::OutOfBorders,
+            status_until: None,
+            owner: None,
+            reservation: None,
+            safe_mode: false,
+            mineral: None,
+            mineral_density: None,
+            fetched_at: NOW,
+        };
+        let record = stat_json(&plain);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&record).unwrap(),
+            serde_json::json!({"v": 1, "at": 1_800_000_000_000_u64, "status": "out of borders"})
+        );
+        assert_eq!(parse_stat(&record, NOW), Some(plain));
+    }
+
+    #[test]
+    fn stale_malformed_and_other_versions_are_not_used() {
+        // A week old is still used (the world map refreshes it), older is not.
+        let week = stat(NOW - STAT_MAX_AGE_MS);
+        assert_eq!(parse_stat(&stat_json(&week), NOW), Some(week));
+        assert_eq!(
+            parse_stat(&stat_json(&stat(NOW - STAT_MAX_AGE_MS - 1)), NOW),
+            None
+        );
+        // A clock running behind keeps the record (the world map treats it as fresh).
+        assert!(parse_stat(&stat_json(&stat(NOW + 1_000)), NOW).is_some());
+        for record in [
+            r#"{"v":2,"at":1800000000000,"status":"normal"}"#,
+            r#"{"at":1800000000000,"status":"normal"}"#,
+            r#"{"v":1,"status":"normal"}"#,
+            r#"{"v":1,"at":1800000000000,"status":"lost"}"#,
+            r#"{"v":1,"at":1800000000000,"status":"normal","owner":{"name":"Alice","level":3}}"#,
+            r#"{"v":1,"at":1800000000000,"status":"normal","owner":{"id":"u1","level":300}}"#,
+            "not json",
+        ] {
+            assert_eq!(parse_stat(record, NOW), None, "{record}");
+        }
     }
 
     fn world(key: &str, opened: f64, rooms: u32) -> WorldEntry {
@@ -545,12 +823,12 @@ mod tests {
         assert_eq!(plan_eviction(&within, "b"), Vec::<String>::new());
 
         let over = [
-            world("old", 1.0, 20_000),
-            world("open", 0.5, 20_000),
-            world("older", 0.0, 3_000),
-            world("recent", 3.0, 10_000),
+            world("old", 1.0, 60_000),
+            world("open", 0.5, 60_000),
+            world("older", 0.0, 5_000),
+            world("recent", 3.0, 33_124),
         ];
-        // 53 000 rooms: drop "older" (50 000 left, above the target), then "old".
+        // 158 124 rooms: drop "older" (153 124 left, above the target), then "old".
         assert_eq!(plan_eviction(&over, "open"), ["older", "old"]);
 
         let alone = [world("open", 1.0, MAX_ROOMS + 1)];

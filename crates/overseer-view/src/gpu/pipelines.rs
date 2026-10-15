@@ -1,8 +1,6 @@
 //! Bind group layouts and render pipelines.
 
-use crate::mesh::{
-    CellInstance, Instance, PointInstance, ShapeVertex, TerrainInstance, TerrainVertex,
-};
+use crate::mesh::{Instance, PointInstance, RoomInstance, ShapeVertex, TerrainVertex};
 
 use super::DEPTH;
 
@@ -11,14 +9,12 @@ use super::DEPTH;
 pub struct Pipelines {
     /// Group 0: the per-frame uniforms.
     pub globals_layout: wgpu::BindGroupLayout,
-    /// Group 1 of the atlas terrain: texture and sampler.
-    pub atlas_layout: wgpu::BindGroupLayout,
+    /// Group 1 of the rooms: packed terrain, overview texture and its sampler.
+    pub rooms_layout: wgpu::BindGroupLayout,
     /// Group 1 of detail scenes: the per-room uniforms.
     pub locals_layout: wgpu::BindGroupLayout,
-    /// Overview cells.
-    pub cells: wgpu::RenderPipeline,
-    /// Atlas terrain.
-    pub atlas: wgpu::RenderPipeline,
+    /// The rooms: terrain (overview and full resolution), status, owner and borders.
+    pub rooms: wgpu::RenderPipeline,
     /// Minimap points.
     pub points: wgpu::RenderPipeline,
     /// Detail terrain meshes.
@@ -150,11 +146,19 @@ impl Pipelines {
             })
         };
         let globals_layout = bind_layout("globals", &[layout_entry(0, UNIFORM)]);
-        let atlas_layout = bind_layout(
-            "terrain atlas",
+        let rooms_layout = bind_layout(
+            "rooms",
             &[
                 layout_entry(
                     0,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(
+                    1,
                     wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -162,7 +166,7 @@ impl Pipelines {
                     },
                 ),
                 layout_entry(
-                    1,
+                    2,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 ),
             ],
@@ -176,8 +180,8 @@ impl Pipelines {
             })
         };
         let flat = pipeline_layout("flat", &[Some(&globals_layout)]);
-        let atlas_pipeline_layout =
-            pipeline_layout("atlas", &[Some(&globals_layout), Some(&atlas_layout)]);
+        let rooms_pipeline_layout =
+            pipeline_layout("rooms", &[Some(&globals_layout), Some(&rooms_layout)]);
         let detail = pipeline_layout("detail", &[Some(&globals_layout), Some(&locals_layout)]);
         let builder = Builder {
             device,
@@ -185,30 +189,17 @@ impl Pipelines {
             samples,
         };
         let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
-        let cell_attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Unorm8x4];
-        let cells = builder.build(
-            "cells",
-            &flat,
+        let room_attributes = wgpu::vertex_attr_array![
+            0 => Float32x2, 1 => Uint32, 2 => Unorm8x4, 3 => Unorm8x4
+        ];
+        let rooms = builder.build(
+            "rooms",
+            &rooms_pipeline_layout,
             &world_shader,
-            ("cell_vertex", "cell_fragment"),
-            &[Some(instances(size_of::<CellInstance>(), &cell_attributes))],
+            ("room_vertex", "room_fragment"),
+            &[Some(instances(size_of::<RoomInstance>(), &room_attributes))],
             Depth::Ignore,
             None,
-            None,
-        );
-        let terrain_attributes =
-            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4];
-        let atlas = builder.build(
-            "atlas terrain",
-            &atlas_pipeline_layout,
-            &world_shader,
-            ("atlas_vertex", "atlas_fragment"),
-            &[Some(instances(
-                size_of::<TerrainInstance>(),
-                &terrain_attributes,
-            ))],
-            Depth::Ignore,
-            blend,
             None,
         );
         let point_attributes =
@@ -274,10 +265,9 @@ impl Pipelines {
         );
         Self {
             globals_layout,
-            atlas_layout,
+            rooms_layout,
             locals_layout,
-            cells,
-            atlas,
+            rooms,
             points,
             detail_terrain,
             objects,

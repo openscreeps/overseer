@@ -46,7 +46,7 @@ pub fn WindowScreen(
         let url = url.clone();
         let shard = shard_for_load.clone();
         spawn_scoped(async move {
-            match open_world(state, &overseer, &url, &shard).await {
+            match open_world(state, map, &overseer, &url, &shard).await {
                 Ok(feed) if feed.bounds().contains(room) => {
                     map.feed.set(Some(feed));
                     map.phase.set(Phase::Ready);

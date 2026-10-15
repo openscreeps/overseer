@@ -13,24 +13,52 @@
 //! # Levels of detail
 //!
 //! In a world scope the [`Lod`] follows the size of a room on the canvas in CSS pixels
-//! ([`Viewer::lod`]); each layer fades in above its threshold so that zooming is continuous:
+//! ([`Viewer::lod`]); each layer fades in above its threshold so that zooming is continuous.
+//! Every room is one instance of a single draw, at every level:
 //!
 //! | [`Lod`] | room size | drawn |
 //! |---|---|---|
-//! | [`Lod::Overview`] | below [`TERRAIN_PX_PER_ROOM`] (24) | every room as one cell coloured by status and owner (one instanced draw) |
-//! | [`Lod::Terrain`] | from [`TERRAIN_PX_PER_ROOM`] | + each room's terrain from a texture atlas, tinted by its owner or status; room borders |
+//! | [`Lod::Overview`] | below [`TERRAIN_PX_PER_ROOM`] (24) | every room's terrain from the overview layer (10 texels per room, filtered), under a strong status and owner overlay |
+//! | [`Lod::Terrain`] | from [`TERRAIN_PX_PER_ROOM`] | full-resolution terrain (one texel per tile, decoded from the packed terrain), cross-faded from the overview, under a light status and owner tint; room borders |
 //! | [`Lod::Minimap`] | from [`MINIMAP_PX_PER_ROOM`] (100) | + live minimap points per kind and owner |
 //! | [`Lod::Detail`] | from [`DETAIL_PX_PER_ROOM`] (300) | + the live room scene of rooms with a snapshot, over their minimap |
 //!
-//! Terrain fades in between 24 and 36 pixels per room, minimaps between 100 and 150, detail
-//! scenes between 300 and 375 (and over 300 ms after their first snapshot); room borders
-//! between 4 and 10. A room scope is always [`Lod::Detail`] with every layer shown.
+//! Full-resolution terrain (and the light tint) cross-fades over the overview layer (and its
+//! strong overlay) between 24 and 36 pixels per room, minimaps fade in between 100 and 150,
+//! detail scenes between 300 and 375 (and over 300 ms after their first snapshot); room
+//! borders between 4 and 10. A room scope is always [`Lod::Detail`] with every layer shown.
 //!
-//! Overview colours ([`Viewer::set_stat`]): normal rooms grey, novice areas green, respawn
-//! areas blue, closed rooms near black, unknown rooms dark; owned rooms take their owner's
-//! colour (stronger with the controller level) and reserved rooms a lighter share of it.
-//! Owner colours are those of objects: the signed-in user ([`Viewer::set_user`]) green, other
-//! players red, the Invader NPC (user `2`) orange, the Source Keeper NPC (user `3`) purple.
+//! Rooms whose terrain has not arrived yet are drawn in a neutral grey placeholder (lighter
+//! than terrain, so loading shows); rooms the server has no terrain for
+//! ([`Viewer::mark_no_terrain`]) are not drawn, like the outside of the world.
+//!
+//! Status and owner colours ([`Viewer::set_stat`]): normal rooms and rooms without an overview
+//! show their terrain only, novice areas green, respawn areas blue, closed rooms near black;
+//! owned rooms take their owner's colour (stronger with the controller level) and reserved
+//! rooms a lighter share of it. Owner colours are those of objects: the signed-in user
+//! ([`Viewer::set_user`]) green, other players red, the Invader NPC (user `2`) orange, the
+//! Source Keeper NPC (user `3`) purple.
+//!
+//! # Terrain on the GPU
+//!
+//! Every room's terrain given to [`Viewer::set_terrain`] stays resident for the viewer's life,
+//! nothing is evicted. It is kept as packed (`Terrain::packed`: 2 bits per tile, 625 bytes)
+//! in an `R8Uint` 2D array texture, one 25×25-texel block per room in arrival order (1640
+//! rooms per 1000×1025 layer), and decoded in the fragment shader with integer loads and bit
+//! operations, which WebGL2 has. Four taps a quarter pixel apart antialias tile edges. The
+//! texture is sized for the whole scope when the scope is set; rooms beyond it (other
+//! scopes) double its layers, uploading everything again once.
+//!
+//! The overview layer is an `Rgba8Unorm` texture over the scope (10 texels per room side, 5,
+//! 2 or 1 when the scope is wider than the device's texture size), each texel the share of
+//! walls, swamps and plains of the 5×5 tiles it covers, with every mip level, filtered across
+//! rooms. A room's arrival rewrites its 10×10 texels and what covers them in the smaller
+//! levels.
+//!
+//! Memory for screeps.com's shard0 (182 × 182 = 33 124 rooms), on the GPU and again in the
+//! viewer (which keeps a copy to fill new textures): terrain 21 layers, 21.5 MB; overview
+//! 1820 × 1820 texels and mips, 17.7 MB; room instances (20 bytes each) 0.7 MB; about 40 MB
+//! in all, plus the fixed minimap buffer (2.6 MB) and the canvas' render targets.
 //!
 //! # Detail scenes
 //!
@@ -50,24 +78,24 @@
 //!
 //! [`Viewer::interest`] says what the camera needs; hand it to
 //! `overseer::map::WorldMap::set_interest` (throttled) and feed the world's events back
-//! (`Terrain` → [`Viewer::set_terrain`], `Stats` → [`Viewer::set_stat`], `Minimap` /
-//! `MinimapGone` → [`Viewer::set_minimap`], `Detail(Live)` → [`Viewer::set_room`],
-//! `DetailGone` → [`Viewer::clear_room`]). Rooms are listed nearest to the camera's centre
-//! first. In a world scope:
+//! (`Terrain` → [`Viewer::set_terrain`], `NoTerrain` → [`Viewer::mark_no_terrain`],
+//! `Stats` → [`Viewer::set_stat`], `Minimap` / `MinimapGone` → [`Viewer::set_minimap`],
+//! `Detail(Live)` → [`Viewer::set_room`], `DetailGone` → [`Viewer::clear_room`]). Rooms are
+//! listed nearest to the camera's centre first. In a world scope:
 //!
 //! - `stats`: the rooms in view, at every level of detail;
-//! - `terrain`: from [`Lod::Terrain`], the rooms in view, at most one atlas of rooms (the
-//!   atlas holds `⌊min(3200, max texture size) / 50⌋²` rooms: 4096 on most GPUs);
+//! - `terrain`: the rooms in view, at every level of detail (the whole shard when zoomed
+//!   out; terrain already given is listed too, the world map does not fetch it again);
 //! - `minimaps`: from [`Lod::Minimap`], at most [`MINIMAP_ROOMS`];
 //! - `detail`: at [`Lod::Detail`], the room under the centre ([`Viewer::focused_room`]) then
 //!   the nearest other, at most [`DETAIL_ROOMS`] (the server's per-user limit).
 //!
 //! A room scope wants its room's terrain, minimap and detail, and no stats.
 //!
-//! The viewer stores what it is given (terrain of every room seen, packed at 2 bits per tile)
-//! and uploads only what changed: one cell per changed overview, one atlas slot per new
-//! terrain, one minimap slot per changed minimap. Rooms that come back into view after their
-//! atlas slot was reused are uploaded again from that store. Drawing allocates nothing.
+//! The viewer uploads only what changed: one room instance per changed overview or terrain
+//! state, one terrain block and the overview texels of each new terrain (merged into one
+//! rectangle per slot row and per mip level and room row), one minimap slot per changed
+//! minimap. Drawing allocates nothing.
 //!
 //! # Wiring a canvas
 //!
@@ -150,8 +178,6 @@ pub const DETAIL_PX_PER_ROOM: f32 = 300.0;
 pub const MINIMAP_ROOMS: usize = 64;
 /// Most detail rooms wanted at once: the server's per-user limit of room subscriptions.
 pub const DETAIL_ROOMS: usize = 2;
-/// Largest terrain atlas side in texels (64 × 64 rooms).
-const ATLAS_MAX_TEXELS: u32 = 3200;
 
 /// The camera projection.
 #[derive(
@@ -357,10 +383,16 @@ impl Viewer {
         self.view.world.set_user(user);
     }
 
-    /// Stores a room's terrain (and draws it when in view). Terrain is kept for the
-    /// viewer's life.
+    /// Stores a room's terrain and draws it at every level of detail. Terrain is kept (on
+    /// the GPU too) for the viewer's life; the same terrain again changes nothing.
     pub fn set_terrain(&mut self, room: RoomCoord, terrain: &Terrain) {
         self.view.world.set_terrain(room, terrain);
+    }
+
+    /// Records that the server has no terrain for a room (`WorldEvent::NoTerrain`): it is
+    /// drawn as outside the world, unless its terrain is known or arrives later.
+    pub fn mark_no_terrain(&mut self, room: RoomCoord) {
+        self.view.world.mark_no_terrain(room);
     }
 
     /// Sets (`None`: forgets) a room's overview: status, owner and reservation.
@@ -478,11 +510,8 @@ impl Viewer {
     pub fn render(&mut self) -> Result<FrameStats, ViewError> {
         let start = clock::now();
         let flying = self.view.advance(start);
-        let fades = self.view.fades();
-        // The atlas follows the camera only while terrain shows (the overview would scan
-        // every room of the shard for nothing); detail scenes advance only while shown.
-        let placing = fades.terrain > 0.0 && self.view.world.refresh();
-        let (objects, moving) = if fades.detail > 0.0 {
+        // Detail scenes advance only while shown.
+        let (objects, moving) = if self.view.fades().detail > 0.0 {
             self.view.world.frame(start)
         } else {
             (0, false)
@@ -516,7 +545,7 @@ impl Viewer {
         if suboptimal {
             self.surface.configure(&self.gpu.device, &self.config);
         }
-        Ok(stats(flying || placing || moving))
+        Ok(stats(flying || moving))
     }
 }
 
@@ -541,28 +570,10 @@ fn physical(length: f32, max: u32) -> u32 {
     length.round().clamp(1.0, max as f32) as u32
 }
 
-/// Atlas slots per row for a device whose textures are at most `max_texture` texels wide.
-#[cfg_attr(
-    not(any(target_arch = "wasm32", test)),
-    expect(
-        dead_code,
-        reason = "only the wasm canvas constructor and the tests create a renderer"
-    )
-)]
-const fn atlas_per_row(max_texture: u32) -> u32 {
-    let texels = if max_texture < ATLAS_MAX_TEXELS {
-        max_texture
-    } else {
-        ATLAS_MAX_TEXELS
-    };
-    let per_row = texels / 50;
-    if per_row == 0 { 1 } else { per_row }
-}
-
 /// Browser setup: adapter, device and canvas surface.
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use super::{Gpu, View, Viewer, atlas_per_row, gpu::DEPTH};
+    use super::{Gpu, View, Viewer, gpu::DEPTH, world::Limits};
 
     /// A viewer on `canvas` through `backends` (WebGPU or WebGL2), or why it failed.
     pub async fn connect(
@@ -648,11 +659,11 @@ mod web {
         } else {
             1
         };
-        let per_row = atlas_per_row(device.limits().max_texture_dimension_2d);
-        let mut gpu = Gpu::new(device, queue, view_format, samples, per_row);
+        let limits = Limits::of(&device.limits());
+        let mut gpu = Gpu::new(device, queue, view_format, samples);
         gpu.resize(width, height);
         Ok(Viewer {
-            view: View::new(per_row),
+            view: View::new(limits),
             gpu,
             surface,
             config,

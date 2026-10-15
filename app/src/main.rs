@@ -8,8 +8,8 @@
 //! Navigation is server → shard → world → room: [`route`] keeps it in the URL hash, the world
 //! map ([`feed`]) zooms continuously from the whole shard into live rooms, and a room also
 //! shows alone as a room control (in the drawer, or popped out into its own window).
-//! [`saved`] and [`terrain_cache`] remember where the user was and every room terrain
-//! across restarts.
+//! [`saved`] and [`terrain_cache`] remember where the user was, every room terrain and the
+//! rooms' overviews across restarts.
 //! [`platform`] hides where it runs: the Tauri shell (proxy, OS keychain, external links) or a
 //! plain browser (direct connections or the page's own `overseer-proxy`, `localStorage`).
 //!

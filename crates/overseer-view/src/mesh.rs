@@ -6,10 +6,13 @@ use overseer::core::api::{Terrain, Tile};
 
 /// Height of a raised natural wall.
 pub const WALL_HEIGHT: f32 = 0.6;
-/// Terrain colours (sRGB); the atlas shader uses the same.
+/// Terrain colours (sRGB); the flat world shader uses the same.
 pub const PLAIN: u32 = 0x2b_2b_2b;
 pub const SWAMP: u32 = 0x2f_3a_1c;
 pub const WALL_TOP: u32 = 0x11_11_11;
+/// A room whose terrain has not arrived yet (sRGB): neutral, lighter than any terrain so
+/// that loading shows.
+pub const PENDING: u32 = 0x33_35_39;
 const WALL_SIDE: u32 = 0x26_26_26;
 
 /// A terrain vertex: position, normal and linear colour.
@@ -47,26 +50,18 @@ pub struct Instance {
     pub color: [f32; 4],
 }
 
-/// A room cell of the overview: the room's north-west corner (world X, Z) and its sRGB
-/// colour.
+/// A room of the flat world layer: its corner, its terrain and the overlays of its overview.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
-pub struct CellInstance {
+pub struct RoomInstance {
     /// World X and Z of the room's north-west corner.
     pub origin: [f32; 2],
-    /// sRGB colour; alpha unused.
-    pub color: [u8; 4],
-}
-
-/// A room drawn from the terrain atlas: its corner, its atlas slot and a tint.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
-pub struct TerrainInstance {
-    /// World X and Z of the room's north-west corner.
-    pub origin: [f32; 2],
-    /// Atlas slot column and row; negative for an empty slot (drawn as nothing).
-    pub cell: [f32; 2],
-    /// sRGB tint and its strength (alpha).
+    /// The terrain slot, or `PENDING` / `ABSENT` (`world::terrain::state`).
+    pub terrain: u32,
+    /// sRGB colour and strength (alpha) of the status and owner over the overview terrain.
+    pub overlay: [u8; 4],
+    /// sRGB colour and strength (alpha) of the status and owner over full-resolution
+    /// terrain.
     pub tint: [u8; 4],
 }
 
@@ -86,21 +81,6 @@ pub struct PointInstance {
 pub const fn rgba(rgb: u32, alpha: u8) -> [u8; 4] {
     let [_, r, g, b] = rgb.to_be_bytes();
     [r, g, b, alpha]
-}
-
-/// `a` blended towards `b` by `amount` (`0..=1`), per sRGB channel.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "a blend of two bytes stays in 0..=255"
-)]
-pub fn mix(a: u32, b: u32, amount: f32) -> u32 {
-    let (a, b) = (a.to_be_bytes(), b.to_be_bytes());
-    let channel = |index: usize| {
-        let (a, b) = (f32::from(a[index]), f32::from(b[index]));
-        (a + (b - a) * amount.clamp(0.0, 1.0)).round() as u8
-    };
-    u32::from_be_bytes([0, channel(1), channel(2), channel(3)])
 }
 
 /// The shapes objects are drawn with, in instance-buffer order.

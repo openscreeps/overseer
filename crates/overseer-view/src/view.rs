@@ -6,7 +6,7 @@ use overseer::map::{Interest, RoomCoord, RoomRect};
 
 use crate::camera::{self, Camera, room_at, room_centre};
 use crate::mesh::{Instance, WALL_HEIGHT, linear};
-use crate::world::{self, World, tile_origin};
+use crate::world::{self, Limits, World, tile_origin};
 use crate::{
     CameraState, DETAIL_PX_PER_ROOM, DETAIL_ROOMS, FLIGHT_MS, Lod, MINIMAP_PX_PER_ROOM,
     MINIMAP_ROOMS, Pick, PointerButton, Scope, TERRAIN_PX_PER_ROOM, ViewMode,
@@ -139,7 +139,7 @@ pub struct View {
 }
 
 impl View {
-    /// A view of the room `E0S0` with a terrain atlas of `atlas_per_row²` slots.
+    /// A view of the room `E0S0` for a device with texture `limits`.
     #[cfg_attr(
         not(any(target_arch = "wasm32", test)),
         expect(
@@ -147,7 +147,7 @@ impl View {
             reason = "only the wasm canvas constructor and the tests create a view"
         )
     )]
-    pub fn new(atlas_per_row: u32) -> Self {
+    pub fn new(limits: Limits) -> Self {
         let room = RoomCoord { x: 0, y: 0 };
         let bounds = RoomRect {
             min: room,
@@ -155,7 +155,7 @@ impl View {
         };
         let mut view = Self {
             camera: Camera::default(),
-            world: World::new(bounds, atlas_per_row),
+            world: World::new(bounds, limits),
             scope: Scope::Room(room),
             pointers: Vec::new(),
             dragged: false,
@@ -184,10 +184,9 @@ impl View {
         self.changed();
     }
 
-    /// The camera moved: tells the world what is in view.
+    /// The camera moved: tells the world where it looks.
     fn changed(&mut self) {
-        let visible = self.visible_rooms();
-        self.world.set_focus(visible, self.camera.target());
+        self.world.set_focus(self.camera.target());
     }
 
     /// Sets the canvas size in CSS pixels; frames the scope until the camera is placed.
@@ -417,17 +416,16 @@ impl View {
             stats: Some(visible),
             ..Interest::default()
         };
-        if lod < Lod::Terrain {
-            return interest;
-        }
+        // Terrain for every room in view at every level of detail: rooms stay resident once
+        // they arrive, so nothing caps the list but the view.
         let centre = self.camera.target();
         let mut rooms: Vec<(f32, RoomCoord)> = visible
             .iter()
             .map(|room| (room_centre(room).distance_squared(centre), room))
             .collect();
         rooms.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        let nearest = |count: usize| rooms.iter().take(count).map(|(_, room)| *room);
-        interest.terrain = nearest(self.world.atlas.capacity()).collect();
+        interest.terrain = rooms.iter().map(|(_, room)| *room).collect();
+        let nearest = |count: usize| interest.terrain.iter().take(count).copied();
         if lod >= Lod::Minimap {
             interest.minimaps = nearest(MINIMAP_ROOMS).collect();
         }

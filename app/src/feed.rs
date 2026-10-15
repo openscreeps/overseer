@@ -8,18 +8,20 @@
 //! subscriber ([`merge`]) into the world's. A new subscriber first gets what the world already
 //! has for its reach (terrain, overviews, minimaps, live rooms), then every event.
 //!
+//! The task also hands what the world fetched (terrain, rooms without terrain, overviews) to
+//! the app's cache and reports the world's loading progress ([`progress_label`] for the
+//! status bar).
+//!
 //! The task ends when the feed and every subscription are dropped or the session closes;
 //! dropping the `WorldMap` then ends its subscriptions.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use futures_util::future::{Either, select};
-use overseer::core::api::Terrain;
-use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent, WorldMap};
+use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent, WorldMap, WorldProgress};
 use tokio::sync::mpsc;
 
 /// What a subscriber shows.
@@ -50,12 +52,16 @@ pub struct Feed {
 }
 
 impl Feed {
-    /// Runs `world` on the browser's event loop; `on_terrain` sees every newly fetched room
-    /// terrain (to cache it).
-    pub fn start(world: WorldMap, on_terrain: impl Fn(RoomCoord, &Arc<Terrain>) + 'static) -> Self {
+    /// Runs `world` on the browser's event loop; `on_event` sees every event first (to cache
+    /// what was fetched), `on_progress` every change of the world's loading progress.
+    pub fn start(
+        world: WorldMap,
+        on_event: impl Fn(&WorldEvent) + 'static,
+        on_progress: impl Fn(WorldProgress) + 'static,
+    ) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let bounds = world.bounds();
-        wasm_bindgen_futures::spawn_local(run(world, receiver, on_terrain));
+        wasm_bindgen_futures::spawn_local(run(world, receiver, on_event, on_progress));
         Self {
             commands,
             next_id: Rc::new(Cell::new(0)),
@@ -115,9 +121,12 @@ struct Sink {
 async fn run(
     mut world: WorldMap,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    on_terrain: impl Fn(RoomCoord, &Arc<Terrain>),
+    on_event: impl Fn(&WorldEvent),
+    on_progress: impl Fn(WorldProgress),
 ) {
     let mut sinks: BTreeMap<u64, Sink> = BTreeMap::new();
+    let mut progress = world.progress();
+    on_progress(progress);
     loop {
         let step = {
             let event = pin!(world.next());
@@ -129,9 +138,7 @@ async fn run(
         };
         match step {
             Either::Left(Ok(event)) => {
-                if let WorldEvent::Terrain(room, terrain) = &event {
-                    on_terrain(*room, terrain);
-                }
+                on_event(&event);
                 let delivers: Vec<Deliver> =
                     sinks.values().map(|sink| sink.deliver.clone()).collect();
                 for deliver in delivers {
@@ -169,6 +176,11 @@ async fn run(
                 world.set_interest(&merge(&interests));
             }
         }
+        let now = world.progress();
+        if now != progress {
+            progress = now;
+            on_progress(progress);
+        }
     }
 }
 
@@ -185,6 +197,8 @@ fn replay(world: &WorldMap, reach: Reach, deliver: &Deliver) {
     for room in rect.iter() {
         if let Some(terrain) = world.terrain(room) {
             deliver(&WorldEvent::Terrain(room, terrain));
+        } else if world.has_no_terrain(room) {
+            deliver(&WorldEvent::NoTerrain(room));
         }
         if let Some(stat) = world.stat(room) {
             stats.push((room, stat));
@@ -243,18 +257,20 @@ pub fn merge(interests: &[(Reach, &Interest)]) -> Interest {
         stats,
         ..Interest::default()
     };
+    let (mut terrain, mut minimaps, mut detail) =
+        (Unique::default(), Unique::default(), Unique::default());
     for interest in world().chain(rooms()) {
-        extend(&mut merged.terrain, &interest.terrain);
-        extend(&mut merged.minimaps, &interest.minimaps);
+        terrain.extend(&mut merged.terrain, &interest.terrain);
+        minimaps.extend(&mut merged.minimaps, &interest.minimaps);
     }
     for interest in world() {
-        extend(
+        detail.extend(
             &mut merged.detail,
             interest.detail.get(..1).unwrap_or_default(),
         );
     }
     for interest in rooms() {
-        extend(&mut merged.detail, &interest.detail);
+        detail.extend(&mut merged.detail, &interest.detail);
     }
     merged
 }
@@ -273,20 +289,65 @@ fn union(a: RoomRect, b: RoomRect) -> RoomRect {
     }
 }
 
-/// Appends the rooms of `more` that `rooms` lacks.
-fn extend(rooms: &mut Vec<RoomCoord>, more: &[RoomCoord]) {
-    for room in more {
-        if !rooms.contains(room) {
-            rooms.push(*room);
-        }
+/// The rooms already in a list: [`Interest::terrain`] may list every room of a shard.
+#[derive(Default)]
+struct Unique(HashSet<RoomCoord>);
+
+impl Unique {
+    /// Appends the rooms of `more` that `rooms` lacks.
+    fn extend(&mut self, rooms: &mut Vec<RoomCoord>, more: &[RoomCoord]) {
+        rooms.extend(more.iter().filter(|room| self.0.insert(**room)));
     }
+}
+
+/// The status bar's loading progress, such as `Terrain 12 345 / 25 000 · Owners 2 500 / 25 000`;
+/// `None` once everything wanted is known.
+pub fn progress_label(progress: &WorldProgress) -> Option<String> {
+    if progress.is_complete() {
+        return None;
+    }
+    let terrain = (progress.terrain_wanted > 0).then(|| {
+        let done = progress.terrain_known + progress.terrain_absent;
+        format!(
+            "Terrain {} / {}",
+            grouped(done.min(progress.terrain_wanted)),
+            grouped(progress.terrain_wanted)
+        )
+    });
+    let owners = (progress.stats_wanted > 0).then(|| {
+        format!(
+            "Owners {} / {}",
+            grouped(progress.stats_known.min(progress.stats_wanted)),
+            grouped(progress.stats_wanted)
+        )
+    });
+    Some(
+        [terrain, owners]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
+}
+
+/// `count` with its thousands separated by narrow no-break spaces (`12 345`).
+fn grouped(count: usize) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::with_capacity(digits.len() * 2);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push('\u{202f}');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 #[cfg(test)]
 mod tests {
-    use overseer::map::{Interest, RoomCoord, RoomRect};
+    use overseer::map::{Interest, RoomCoord, RoomRect, WorldProgress};
 
-    use super::{Reach, merge};
+    use super::{Reach, merge, progress_label};
 
     fn room(name: &str) -> RoomCoord {
         name.parse().unwrap()
@@ -349,5 +410,68 @@ mod tests {
         assert_eq!(merged.stats, Some(rect("W1N1", "E1S1")));
         assert_eq!(merged.detail, rooms(&["W1N1", "E1S1"]));
         assert_eq!(merge(&[]), Interest::default());
+    }
+
+    #[test]
+    fn whole_shards_merge_once_per_room() {
+        let shard = rect("W90N90", "E90S90");
+        let all = shard.iter().collect::<Vec<_>>();
+        let map = Interest {
+            stats: Some(shard),
+            terrain: all.clone(),
+            ..Interest::default()
+        };
+        let control = Interest {
+            terrain: rooms(&["W1N1", "W200N1"]),
+            ..Interest::default()
+        };
+        let merged = merge(&[(Reach::World, &map), (Reach::Room(room("W1N1")), &control)]);
+        assert_eq!(merged.terrain.len(), all.len() + 1);
+        assert_eq!(merged.terrain[..all.len()], all[..]);
+        assert_eq!(merged.terrain[all.len()], room("W200N1"));
+    }
+
+    #[test]
+    fn progress_shows_until_everything_is_known() {
+        let loading = WorldProgress {
+            terrain_known: 12_000,
+            terrain_absent: 345,
+            terrain_wanted: 25_000,
+            stats_known: 2_500,
+            stats_wanted: 25_000,
+        };
+        assert_eq!(
+            progress_label(&loading).as_deref(),
+            Some("Terrain 12\u{202f}345 / 25\u{202f}000 · Owners 2\u{202f}500 / 25\u{202f}000")
+        );
+        let terrain_only = WorldProgress {
+            stats_known: 0,
+            stats_wanted: 0,
+            ..loading
+        };
+        assert_eq!(
+            progress_label(&terrain_only).as_deref(),
+            Some("Terrain 12\u{202f}345 / 25\u{202f}000")
+        );
+        let owners_left = WorldProgress {
+            terrain_known: 24_655,
+            ..loading
+        };
+        assert_eq!(
+            progress_label(&owners_left).as_deref(),
+            Some("Terrain 25\u{202f}000 / 25\u{202f}000 · Owners 2\u{202f}500 / 25\u{202f}000")
+        );
+        let done = WorldProgress {
+            stats_known: 25_000,
+            ..owners_left
+        };
+        assert_eq!(progress_label(&done), None);
+        assert_eq!(progress_label(&WorldProgress::default()), None);
+        let small = WorldProgress {
+            terrain_known: 7,
+            terrain_wanted: 999,
+            ..WorldProgress::default()
+        };
+        assert_eq!(progress_label(&small).as_deref(), Some("Terrain 7 / 999"));
     }
 }

@@ -233,6 +233,7 @@ impl Surface {
 pub fn apply(viewer: &mut Viewer, event: &WorldEvent) {
     match event {
         WorldEvent::Terrain(room, terrain) => viewer.set_terrain(*room, terrain),
+        WorldEvent::NoTerrain(room) => viewer.mark_no_terrain(*room),
         WorldEvent::Stats(stats) => {
             for (room, stat) in stats {
                 viewer.set_stat(*room, Some(stat));

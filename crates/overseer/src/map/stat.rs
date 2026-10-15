@@ -56,11 +56,18 @@ pub struct RoomStat {
     pub mineral: Option<String>,
     /// The mineral's density (1 to 4).
     pub mineral_density: Option<u8>,
+    /// When the server sent it, in milliseconds since the Unix epoch
+    /// ([`SystemTime`](overseer_net::rt::SystemTime)): [`WorldMap::insert_stats`] uses it to
+    /// tell how stale a cached overview is.
+    ///
+    /// [`WorldMap::insert_stats`]: super::WorldMap::insert_stats
+    pub fetched_at: u64,
 }
 
 impl RoomStat {
-    /// A room the server does not know.
-    pub(crate) const fn unknown() -> Self {
+    /// A room the server does not know, as of `fetched_at` (milliseconds since the Unix
+    /// epoch).
+    pub(crate) const fn unknown(fetched_at: u64) -> Self {
         Self {
             status: RoomStatus::OutOfBorders,
             status_until: None,
@@ -69,11 +76,12 @@ impl RoomStat {
             safe_mode: false,
             mineral: None,
             mineral_density: None,
+            fetched_at,
         }
     }
 
-    /// The overview of `room` at `now` (milliseconds since the Unix epoch), naming users from
-    /// the response's `users`.
+    /// The overview of `room` at `now` (milliseconds since the Unix epoch, also its
+    /// [`Self::fetched_at`]), naming users from the response's `users`.
     pub(crate) fn new(room: &GameMapStatsRoom, users: &GamePublicUsers, now: u64) -> Self {
         let (status, status_until) = status(room, now);
         let username = |id: &str| users.get(id).and_then(|user| user.username.clone());
@@ -109,6 +117,7 @@ impl RoomStat {
             mineral_density: mineral
                 .and_then(|mineral| mineral.density)
                 .and_then(|density| u8::try_from(density).ok()),
+            fetched_at: now,
         }
     }
 }
@@ -204,6 +213,11 @@ mod tests {
         assert_eq!(status("C"), (RoomStatus::Closed, Some(2_500_000)));
         assert_eq!(status("D"), (RoomStatus::OutOfBorders, None));
         assert_eq!(status("E"), (RoomStatus::Normal, None));
-        assert_eq!(RoomStat::unknown().status, RoomStatus::OutOfBorders);
+        assert_eq!(stat("A", response).fetched_at, NOW);
+        let unknown = RoomStat::unknown(NOW);
+        assert_eq!(
+            (unknown.status, unknown.fetched_at),
+            (RoomStatus::OutOfBorders, NOW)
+        );
     }
 }
