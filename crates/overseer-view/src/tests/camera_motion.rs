@@ -4,7 +4,7 @@ use glam::Vec2;
 
 use super::{place, view, world_view};
 use crate::view::View;
-use crate::{PointerButton, ViewMode};
+use crate::{MAX_PX_PER_TILE, PointerButton, ViewMode};
 
 /// A world view zoomed in to rooms of 300 pixels, smoothing on.
 fn smooth_view() -> View {
@@ -18,7 +18,7 @@ fn smooth_view() -> View {
 /// `release`.
 fn fling(view: &mut View, distance: f32, ms: f64, release: f64) {
     let from = Vec2::new(300.0, 300.0);
-    view.pointer_down(1, from, PointerButton::Primary);
+    view.pointer_down(1, from, PointerButton::Primary, true);
     for step in 1..=6_u8 {
         let share = f32::from(step) / 6.0;
         view.pointer_move(
@@ -82,7 +82,7 @@ fn slow_or_stopped_drags_and_new_presses_do_not_glide() {
     assert!(!view.advance(616.0), "too slow");
     let mut view = smooth_view();
     fling(&mut view, 120.0, 60.0, 64.0);
-    view.pointer_down(2, Vec2::new(10.0, 10.0), PointerButton::Primary);
+    view.pointer_down(2, Vec2::new(10.0, 10.0), PointerButton::Primary, true);
     assert!(!view.advance(80.0), "a press catches the view");
     let mut view = world_view();
     place(&mut view, Vec2::ZERO, 300.0);
@@ -124,4 +124,58 @@ fn the_wheel_zoom_eases_in_around_the_pointer() {
         grabbed.distance(under) < 1e-2,
         "the anchor stays under the pointer"
     );
+}
+
+#[test]
+fn zoom_stops_at_readable_tiles_and_eases_into_the_limit() {
+    for mode in [ViewMode::TopDown, ViewMode::Perspective] {
+        let mut view = smooth_view();
+        view.set_mode(mode);
+        let px_per_tile = |view: &View| view.camera.px_per_room() / 50.0;
+        let (closest, _) = view.camera.half_height_range();
+        assert_eq!(
+            closest,
+            view.camera.size().y / (2.0 * MAX_PX_PER_TILE),
+            "{mode:?}: the cap follows the canvas"
+        );
+        // Buttons and an instant wheel stop at the cap.
+        view.zoom_by(1000.0);
+        assert!(
+            (px_per_tile(&view) - MAX_PX_PER_TILE).abs() < 1e-3,
+            "{mode:?}"
+        );
+        // Scrolling on at the limit queues nothing: scrolling back acts on the next frame.
+        let anchor = Vec2::new(200.0, 150.0);
+        for notch in 0..20_u8 {
+            view.wheel(anchor, -400.0, f64::from(notch));
+        }
+        settle(&mut view, 30.0);
+        assert!(
+            (px_per_tile(&view) - MAX_PX_PER_TILE).abs() < 1e-3,
+            "{mode:?}"
+        );
+        view.wheel(anchor, 100.0, 1000.0);
+        assert!(view.advance(1016.0));
+        assert!(
+            px_per_tile(&view) < MAX_PX_PER_TILE - 1.0,
+            "{mode:?}: zooms out at once"
+        );
+        // From further out, a big scroll eases into the cap: every frame nearer, no jump
+        // past it and no stop short of it.
+        view.zoom_by(0.1);
+        view.wheel(anchor, -4000.0, 2000.0);
+        let mut now = 2000.0;
+        let mut last = px_per_tile(&view);
+        while view.advance(now) {
+            let px = px_per_tile(&view);
+            assert!(
+                px >= last && px <= MAX_PX_PER_TILE + 1e-3,
+                "{mode:?}: {last} → {px}"
+            );
+            last = px;
+            now += 16.0;
+            assert!(now < 4000.0, "never settles");
+        }
+        assert!((last - MAX_PX_PER_TILE).abs() < 1e-2, "{mode:?}: {last}");
+    }
 }

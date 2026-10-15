@@ -6,10 +6,11 @@
 //! the map viewer and the world (which writes what the world fetches back to the cache and
 //! reports its loading progress to the status bar).
 //! The camera comes back from the saved state (per server and shard), the route's room is
-//! looked at when the camera does not already show it; on a first visit (neither) the world
+//! framed whole when the camera does not already show it; on a first visit (neither) the world
 //! opens on the account's start room (one of its rooms, else the server's default). The room
-//! in focus follows clicks, the room search and, once zoomed into the live level, the room
-//! under the centre; it is kept in the route and the saved state.
+//! in focus follows clicks, the room search (which frames the whole room and hands the
+//! keyboard back to the map) and, once zoomed into the live level, the room under the centre;
+//! it is kept in the route and the saved state.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -27,6 +28,7 @@ use crate::saved::{BOUNDS_MAX_AGE_MS, Bounds};
 use crate::session;
 use crate::state::AppState;
 use crate::ui::drawer::Drawer;
+use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
 use crate::ui::surface::{Hooks, Surface, SurfaceCanvas};
 
@@ -122,10 +124,17 @@ impl MapState {
         }
     }
 
-    /// Flies to `room` and focuses it.
+    /// Flies to `room`, framing the whole room, and focuses it.
     pub fn go_to(self, room: RoomCoord) {
         self.room.set(Some(room));
-        self.with_viewer(|viewer| viewer.look_at(room, None, true));
+        self.with_viewer(|viewer| viewer.frame_room(room, true));
+    }
+
+    /// Hands the keyboard to the map (without a focus ring: see [`Surface::focus`]).
+    pub fn focus_map(self) {
+        if let Some(surface) = self.surface.try_get_value().flatten() {
+            surface.focus();
+        }
     }
 
     /// Shows the whole world and leaves the room.
@@ -323,7 +332,11 @@ pub fn WorldScreen(
             camera_saver.changed(viewer.camera());
         }),
         pick: Rc::new(move |viewer: &mut Viewer, pick| {
-            map.room.set(Some(pick.room));
+            // Setting the same room again would restart everything that follows the room
+            // (the drawer's live state among them).
+            if map.room.get_untracked() != Some(pick.room) {
+                map.room.set(Some(pick.room));
+            }
             let tile = if viewer.lod() == Lod::Detail {
                 Some((pick.room, pick.x, pick.y))
             } else {
@@ -391,7 +404,7 @@ pub fn WorldScreen(
                 && feed.bounds().contains(room)
                 && viewer.focused_room() != Some(room)
             {
-                viewer.look_at(room, None, false);
+                viewer.frame_room(room, false);
             }
         });
         let subscription = feed.subscribe(Reach::World, move |event| {
@@ -452,11 +465,18 @@ pub fn WorldScreen(
 
     let label = Signal::derive(move || {
         let shard = map.shard.get().map(|shard| shard.to_string());
-        match (shard.as_deref(), map.room.get()) {
+        let room = map.room.get();
+        let place = match (shard.as_deref(), room) {
             (Some("-") | None, Some(room)) => format!("World map, at {room}"),
             (Some("-") | None, None) => "World map".to_owned(),
             (Some(shard), Some(room)) => format!("Map of {shard}, at {room}"),
             (Some(shard), None) => format!("Map of {shard}"),
+        };
+        match map.tile.get() {
+            Some((tile_room, x, y)) if Some(tile_room) == room => {
+                format!("{place}, tile {x},{y} selected")
+            }
+            _ => place,
         }
     });
     view! {
@@ -469,23 +489,51 @@ pub fn WorldScreen(
                     description="Drag to pan (or orbit in 3D), scroll or pinch to zoom, click a room or tile to select it. Arrow keys or WASD pan, plus and minus zoom, Escape zooms out, slash searches a room."
                 />
                 <WorldOverlay surface attempt />
-                <div class="map-controls" role="group" aria-label="Zoom">
-                    <button type="button" aria-label="Zoom in" on:click=move |_| map.zoom(ZOOM_STEP)>
-                        "+"
-                    </button>
-                    <button
-                        type="button"
-                        aria-label="Zoom out"
-                        on:click=move |_| map.zoom(1.0 / ZOOM_STEP)
-                    >
-                        "−"
-                    </button>
-                    <button type="button" aria-label="Show the whole world" on:click=move |_| map.show_world()>
-                        "⤢"
-                    </button>
-                </div>
+                <MapControls />
             </div>
             <Drawer server=server.clone() />
+        </div>
+    }
+}
+
+/// Zoom in, zoom out and the whole world, over the map's bottom right corner.
+#[component]
+fn MapControls() -> impl IntoView {
+    let map = MapState::expect();
+    view! {
+        <div class="map-controls" role="group" aria-label="Zoom">
+            <button
+                type="button"
+                class="icon-button"
+                aria-label="Zoom in"
+                aria-keyshortcuts="+"
+                data-tip="Zoom in (+)"
+                data-tip-pos="left"
+                on:click=move |_| map.zoom(ZOOM_STEP)
+            >
+                <Icon kind=IconKind::Plus />
+            </button>
+            <button
+                type="button"
+                class="icon-button"
+                aria-label="Zoom out"
+                aria-keyshortcuts="-"
+                data-tip="Zoom out (−)"
+                data-tip-pos="left"
+                on:click=move |_| map.zoom(1.0 / ZOOM_STEP)
+            >
+                <Icon kind=IconKind::Minus />
+            </button>
+            <button
+                type="button"
+                class="icon-button"
+                aria-label="Show the whole world"
+                data-tip="Show the whole world"
+                data-tip-pos="left"
+                on:click=move |_| map.show_world()
+            >
+                <Icon kind=IconKind::Fit />
+            </button>
         </div>
     }
 }
@@ -498,6 +546,7 @@ fn WorldOverlay(surface: Surface, attempt: RwSignal<u32>) -> impl IntoView {
         if let Some(error) = surface.error.get() {
             return view! {
                 <div class="overlay" role="alert">
+                    <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
                     <p>{format!("The map cannot be drawn: {error}")}</p>
                 </div>
             }
@@ -513,8 +562,10 @@ fn WorldOverlay(surface: Surface, attempt: RwSignal<u32>) -> impl IntoView {
             .into_any(),
             Phase::Failed(error) => view! {
                 <div class="overlay" role="alert">
+                    <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
                     <p>{format!("The world could not be opened: {error}")}</p>
                     <button type="button" class="primary" on:click=move |_| attempt.update(|n| *n += 1)>
+                        <Icon kind=IconKind::Refresh />
                         "Try again"
                     </button>
                 </div>
@@ -522,6 +573,7 @@ fn WorldOverlay(surface: Surface, attempt: RwSignal<u32>) -> impl IntoView {
             .into_any(),
             Phase::Ready if map.bounds.get().is_some_and(|bounds| bounds.is_empty()) => view! {
                 <div class="overlay" role="status">
+                    <span class="state-icon"><Icon kind=IconKind::Globe /></span>
                     <p>"This world has no rooms yet."</p>
                 </div>
             }

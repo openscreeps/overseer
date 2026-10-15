@@ -94,26 +94,32 @@ pub struct Fades {
     pub detail: f32,
     /// Room borders.
     pub borders: f32,
+    /// The status and owner accent over full-resolution terrain: shown until detail
+    /// scenes fade in, then out with them, so that terrain and objects read clearly.
+    pub accent: f32,
 }
 
 impl Fades {
     /// The fades of a world view whose rooms are `px_per_room` CSS pixels wide.
     pub fn at(px_per_room: f32) -> Self {
         let ramp = |threshold: f32, span: f32| smoothstep(threshold, threshold * span, px_per_room);
+        let detail = ramp(DETAIL_PX_PER_ROOM, DETAIL_FADE_SPAN);
         Self {
             terrain: ramp(TERRAIN_PX_PER_ROOM, FADE_SPAN),
             minimap: ramp(MINIMAP_PX_PER_ROOM, FADE_SPAN),
-            detail: ramp(DETAIL_PX_PER_ROOM, DETAIL_FADE_SPAN),
+            detail,
             borders: smoothstep(BORDERS_PX.0, BORDERS_PX.1, px_per_room),
+            accent: 1.0 - detail,
         }
     }
 
-    /// Everything shown (room scope).
+    /// Everything shown but the accent (room scope).
     const FULL: Self = Self {
         terrain: 1.0,
         minimap: 1.0,
         detail: 1.0,
         borders: 1.0,
+        accent: 0.0,
     };
 }
 
@@ -303,6 +309,12 @@ impl View {
         self.go(target, half_height, animate, now);
     }
 
+    /// Centres a room and frames all of it (whatever the current zoom).
+    pub fn frame_room(&mut self, room: RoomCoord, animate: bool, now: f64) {
+        let half_height = self.camera.room_half_height();
+        self.go(room_centre(room), half_height, animate, now);
+    }
+
     /// Frames the whole scope.
     pub fn fit(&mut self, animate: bool, now: f64) {
         let (target, half_height) = self.camera.fit_view();
@@ -406,9 +418,14 @@ impl View {
         self.moved = true;
     }
 
-    /// A pointer was pressed at a CSS point (it stops pan inertia).
-    pub fn pointer_down(&mut self, id: i32, point: Vec2, button: PointerButton) {
-        self.pointers.retain(|pointer| pointer.id != id);
+    /// A pointer was pressed at a CSS point (it stops pan inertia). A `primary` press
+    /// (`PointerEvent.isPrimary`: the first pointer of a gesture, every mouse press) or a
+    /// press of a pointer still listed as pressed starts a new gesture: the pointers listed
+    /// lost their releases and are forgotten, so they cannot turn later clicks into pinches.
+    pub fn pointer_down(&mut self, id: i32, point: Vec2, button: PointerButton, primary: bool) {
+        if primary || self.pointers.iter().any(|pointer| pointer.id == id) {
+            self.pointers.clear();
+        }
         self.glide = None;
         self.trail = [(f64::NEG_INFINITY, Vec2::ZERO); TRAIL];
         // A second pointer: pinch, never a click.
@@ -419,6 +436,12 @@ impl View {
             start: point,
             last: point,
         });
+    }
+
+    /// A pointer's gesture ended without a release (`pointercancel`, a lost pointer
+    /// capture): it is forgotten, without a click or a glide.
+    pub fn pointer_cancel(&mut self, id: i32) {
+        self.pointers.retain(|pointer| pointer.id != id);
     }
 
     /// A pointer moved at `now` (ms); pans, orbits or pinches when pressed.
@@ -489,16 +512,19 @@ impl View {
     }
 
     /// Zooms around a CSS point at `now` (ms); positive `delta_y` (scrolling down) zooms
-    /// out. With smoothing the zoom eases in over a few frames (wheel steps add up).
+    /// out. With smoothing the zoom eases in over a few frames (wheel steps add up, up to
+    /// the zoom limits: the view eases into a limit and scrolling back acts at once).
     pub fn wheel(&mut self, point: Vec2, delta_y: f32, now: f64) {
         self.interrupt();
         let log = delta_y * WHEEL_ZOOM;
         if self.smooth {
             let remaining = self.zoom.map_or(0.0, |zoom| zoom.remaining);
             let last = self.zoom.map_or(now, |zoom| zoom.last);
+            let (min, max) = self.camera.half_height_range();
+            let current = self.camera.half_height().ln();
             self.zoom = Some(ZoomEase {
                 anchor: point,
-                remaining: remaining + log,
+                remaining: (remaining + log).clamp(min.ln() - current, max.ln() - current),
                 last,
             });
         } else {
@@ -630,17 +656,28 @@ impl View {
         if !self.scope.bounds().contains(room) || x >= 50 || y >= 50 {
             return None;
         }
-        let corner = tile_origin(room, x, y);
-        let base = self
-            .world
-            .detail(room)
-            .map_or(0.0, |detail| detail.scene.tile_height(x, y));
         let side = (SELECTION_MIN_PX * self.camera.tiles_per_px()).max(1.08);
-        let centre = Vec3::new(corner.x + 0.5, base, corner.y + 0.5);
+        let centre = self.tile_top(room, x, y);
         Some(Instance {
             offset: centre.to_array(),
             scale: [side, 0.12, side],
             color: linear(SELECTION),
         })
+    }
+
+    /// The CSS point where the top centre of a room's tile is drawn (`None` behind the
+    /// camera); a click there picks the tile.
+    pub fn tile_point(&self, room: RoomCoord, x: u8, y: u8) -> Option<Vec2> {
+        self.camera.project(self.tile_top(room, x, y))
+    }
+
+    /// The world point at the centre of a tile's top (its terrain in a detail scene).
+    fn tile_top(&self, room: RoomCoord, x: u8, y: u8) -> Vec3 {
+        let corner = tile_origin(room, x, y);
+        let height = self
+            .world
+            .detail(room)
+            .map_or(0.0, |detail| detail.scene.tile_height(x, y));
+        Vec3::new(corner.x + 0.5, height, corner.y + 0.5)
     }
 }

@@ -9,9 +9,11 @@ use overseer::core::api::{endpoints, types};
 use overseer::net::Client;
 
 use crate::register::{Registration, confirm_error, email_error, password_error, username_error};
+use crate::route::Route;
 use crate::session::{self, Failure};
 use crate::state::{AppState, Screen, Start};
 use crate::ui::form::{Field, FormError};
+use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
 
 /// Pause after typing before a value is checked with the server.
@@ -215,10 +217,17 @@ pub fn Register(
         });
     };
     let sign_in_url = server;
+    let shown_url = sign_in_url.clone();
     view! {
-        <section class="panel narrow" aria-labelledby="register-title">
-            <h1 id="register-title">{format!("Register on {name}")}</h1>
-            <div class="segmented" role="group" aria-label="Account">
+        <section class="panel narrow card" aria-labelledby="register-title">
+            <header class="card-head">
+                <img src="icon.svg" alt="" width="40" height="40" />
+                <div>
+                    <h1 id="register-title">{format!("Register on {name}")}</h1>
+                    <p class="muted">{shown_url}</p>
+                </div>
+            </header>
+            <div class="segmented tabs" role="group" aria-label="Account">
                 <button
                     type="button"
                     aria-pressed="false"
@@ -276,6 +285,10 @@ pub fn Register(
                     {move || if busy.get() { "Registering…" } else { "Register" }}
                 </button>
             </form>
+            <button type="button" class="link back" on:click=move |_| state.navigate(Route::Servers)>
+                <Icon kind=IconKind::ArrowLeft />
+                "Choose another server"
+            </button>
         </section>
     }
 }
@@ -358,9 +371,12 @@ pub fn SetUsername() -> impl IntoView {
         });
     };
     view! {
-        <section class="panel narrow" aria-labelledby="username-title">
-            <h1 id="username-title">"Choose your username"</h1>
-            <p>"Your account has no username yet. Choose one to start playing; it cannot be changed later."</p>
+        <section class="panel narrow card" aria-labelledby="username-title">
+            <header class="card-head">
+                <img src="icon.svg" alt="" width="40" height="40" />
+                <h1 id="username-title">"Choose your username"</h1>
+            </header>
+            <p class="lead">"Your account has no username yet. Choose one to start playing; it cannot be changed later."</p>
             <form on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
                 <Field
                     id="set-username"

@@ -12,6 +12,7 @@ use crate::route::Route;
 use crate::session::{self, Failure};
 use crate::state::{AppState, Screen, Start};
 use crate::ui::form::FormError;
+use crate::ui::icon::{Icon, IconKind};
 use crate::ui::open_external;
 
 /// screeps.com registration page (linked by the official client, `app2/main.js`).
@@ -36,7 +37,8 @@ pub fn SignIn(
     let state = AppState::expect();
     let Some(server) = state.server(&server) else {
         return view! {
-            <section class="panel narrow">
+            <section class="panel narrow state-card">
+                <span class="state-icon warn"><Icon kind=IconKind::Alert /></span>
                 <p role="alert">"This server is no longer in the list."</p>
                 <button type="button" on:click=move |_| state.navigate(Route::Servers)>
                     "Back to the servers"
@@ -63,7 +65,8 @@ pub fn SignIn(
             {message.map(|message| view! { <p class="notice" role="alert">{message}</p> })}
             {form}
             <button type="button" class="link back" on:click=move |_| state.navigate(Route::Servers)>
-                "← Choose another server"
+                <Icon kind=IconKind::ArrowLeft />
+                "Choose another server"
             </button>
         </section>
     }
@@ -125,7 +128,7 @@ fn ScreepsSignIn(server: Server) -> impl IntoView {
         }
     };
     view! {
-        <div class="segmented" role="group" aria-label="Sign-in method">
+        <div class="segmented tabs" role="group" aria-label="Sign-in method">
             <button type="button" aria-pressed=move || use_token.get().to_string() on:click=move |_| use_token.set(true)>
                 "API token"
             </button>
@@ -227,7 +230,7 @@ fn PrivateSignIn(server: Server) -> impl IntoView {
     };
     let register_url = server.url.clone();
     view! {
-        <div class="segmented" role="group" aria-label="Account">
+        <div class="segmented tabs" role="group" aria-label="Account">
             <button type="button" aria-pressed="true">"Sign in"</button>
             <button
                 type="button"

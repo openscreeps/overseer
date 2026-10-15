@@ -242,6 +242,24 @@ pub fn save_saved(saved: &Saved) -> Result<(), String> {
         .map_err(|error| js_message(&error))
 }
 
+/// The `localStorage` item `key` (documents of their own, such as the console's command
+/// history).
+pub fn load_item(key: &str) -> Option<String> {
+    local_storage().and_then(|storage| storage.get_item(key).ok().flatten())
+}
+
+/// Saves the `localStorage` item `key`.
+///
+/// # Errors
+///
+/// Returns a message when `localStorage` is unavailable or full.
+pub fn save_item(key: &str, value: &str) -> Result<(), String> {
+    local_storage()
+        .ok_or_else(|| "localStorage is unavailable".to_owned())?
+        .set_item(key, value)
+        .map_err(|error| js_message(&error))
+}
+
 /// The page's URL hash (`#…`, or empty).
 pub fn location_hash() -> String {
     web_sys::window()

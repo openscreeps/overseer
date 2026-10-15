@@ -7,12 +7,13 @@
 //! | `#/<server>/<shard>/` | [`Route::World`] of a shard |
 //! | `#/<server>/<shard>/<room>` | [`Route::World`] focused on a room |
 //! | `#/<server>/<shard>/<room>/window` | [`Route::Window`]: the room control alone (pop-out) |
+//! | `#/<server>/<shard>/console/window` | [`Route::Window`]: the console alone (pop-out) |
 //! | `#/<server>/@profile` | [`Route::Profile`]: the signed-in account |
 //!
 //! `<server>` is the stable slug of a saved server ([`crate::profiles::Profiles::slug`]),
 //! `<shard>` a shard name or `-` on single-world servers ([`Shard::Single`]), `<room>` a world
-//! room name (any case; written upper-case). `@` starts the server's own pages, so it never
-//! begins a shard name.
+//! room name (any case; written upper-case; `console` is none). `@` starts the server's own
+//! pages, so it never begins a shard name.
 
 use std::fmt;
 
@@ -79,15 +80,24 @@ pub enum Route {
         /// The room in focus; only with a shard.
         room: Option<RoomCoord>,
     },
-    /// One room alone (a popped-out room control).
+    /// A popped-out window.
     Window {
         /// Server slug.
         server: String,
         /// The shard.
         shard: Shard,
-        /// The room.
-        room: RoomCoord,
+        /// What the window shows.
+        view: WindowView,
     },
+}
+
+/// What a popped-out window shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowView {
+    /// A room control.
+    Room(RoomCoord),
+    /// The console.
+    Console,
 }
 
 impl Route {
@@ -121,10 +131,15 @@ impl Route {
                 shard: Some(Shard::parse(shard)?),
                 room: Some(parse_room(room)?),
             }),
+            [shard, "console", "window"] => Some(Self::Window {
+                server,
+                shard: Shard::parse(shard)?,
+                view: WindowView::Console,
+            }),
             [shard, room, "window"] => Some(Self::Window {
                 server,
                 shard: Shard::parse(shard)?,
-                room: parse_room(room)?,
+                view: WindowView::Room(parse_room(room)?),
             }),
             _ => None,
         }
@@ -169,8 +184,13 @@ impl fmt::Display for Route {
             Self::Window {
                 server,
                 shard,
-                room,
+                view: WindowView::Room(room),
             } => write!(f, "#/{server}/{shard}/{room}/window"),
+            Self::Window {
+                server,
+                shard,
+                view: WindowView::Console,
+            } => write!(f, "#/{server}/{shard}/console/window"),
         }
     }
 }
@@ -192,7 +212,7 @@ pub fn parse_room(name: &str) -> Option<RoomCoord> {
 mod tests {
     use overseer::map::RoomCoord;
 
-    use super::{Route, Shard};
+    use super::{Route, Shard, WindowView};
 
     fn room(name: &str) -> RoomCoord {
         name.parse().unwrap()
@@ -245,7 +265,7 @@ mod tests {
                 Route::Window {
                     server: "screeps.com".to_owned(),
                     shard: Shard::Named("shard3".to_owned()),
-                    room: room("E12S0"),
+                    view: WindowView::Room(room("E12S0")),
                 },
             ),
             (
@@ -253,7 +273,23 @@ mod tests {
                 Route::Window {
                     server: "127.0.0.1-21025".to_owned(),
                     shard: Shard::Single,
-                    room: room("W0N0"),
+                    view: WindowView::Room(room("W0N0")),
+                },
+            ),
+            (
+                "#/screeps.com/shard3/console/window",
+                Route::Window {
+                    server: "screeps.com".to_owned(),
+                    shard: Shard::Named("shard3".to_owned()),
+                    view: WindowView::Console,
+                },
+            ),
+            (
+                "#/127.0.0.1-21025/-/console/window",
+                Route::Window {
+                    server: "127.0.0.1-21025".to_owned(),
+                    shard: Shard::Single,
+                    view: WindowView::Console,
                 },
             ),
         ];

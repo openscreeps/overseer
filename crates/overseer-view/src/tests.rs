@@ -23,8 +23,10 @@ use crate::{
     PointerButton, Scope, TERRAIN_PX_PER_ROOM, ViewMode,
 };
 
+mod accent;
 mod camera_motion;
 mod effects;
+mod kinds;
 mod look;
 mod motion;
 mod terrain_shape;
@@ -171,7 +173,7 @@ fn tile_centre(view: &View, room: RoomCoord, x: u8, y: u8) -> Vec3 {
 
 /// A primary-button drag from `from` to `to` in a few steps.
 fn drag(view: &mut View, button: PointerButton, from: Vec2, to: Vec2) {
-    view.pointer_down(1, from, button);
+    view.pointer_down(1, from, button, true);
     for step in 1..=4 {
         #[expect(clippy::cast_precision_loss, reason = "small numbers")]
         view.pointer_move(1, from.lerp(to, step as f32 / 4.0), 0.0);
@@ -337,8 +339,8 @@ fn wheel_and_pinch_zoom_around_the_pointer() {
         );
 
         let narrow = span(&view);
-        view.pointer_down(1, Vec2::new(380.0, 300.0), PointerButton::Primary);
-        view.pointer_down(2, Vec2::new(420.0, 300.0), PointerButton::Primary);
+        view.pointer_down(1, Vec2::new(380.0, 300.0), PointerButton::Primary, true);
+        view.pointer_down(2, Vec2::new(420.0, 300.0), PointerButton::Primary, false);
         view.pointer_move(1, Vec2::new(300.0, 300.0), 0.0);
         view.pointer_move(2, Vec2::new(500.0, 300.0), 0.0);
         assert!(
@@ -372,7 +374,7 @@ fn a_click_returns_the_room_tile_and_its_objects_topmost_first() {
         .camera
         .project(tile_centre(&view, w1n1, 20, 20))
         .unwrap();
-    view.pointer_down(7, point, PointerButton::Primary);
+    view.pointer_down(7, point, PointerButton::Primary, true);
     view.pointer_move(7, point + Vec2::new(2.0, -2.0), 0.0);
     let pick = view
         .pointer_up(7, point + Vec2::new(2.0, -2.0), 0.0)
@@ -387,6 +389,54 @@ fn a_click_returns_the_room_tile_and_its_objects_topmost_first() {
         None,
         "released pointers are forgotten"
     );
+}
+
+/// Presses and releases pointer `id` at `point` (`primary` as `isPrimary`); the tile picked.
+fn click(view: &mut View, id: i32, point: Vec2, primary: bool) -> Option<(RoomCoord, u8, u8)> {
+    view.pointer_down(id, point, PointerButton::Primary, primary);
+    view.pointer_up(id, point, 0.0)
+        .map(|pick| (pick.room, pick.x, pick.y))
+}
+
+#[test]
+fn lost_releases_do_not_turn_later_clicks_into_pinches() {
+    let w1n1 = room("W1N1");
+    for mode in [ViewMode::TopDown, ViewMode::Perspective] {
+        let mut view = view(mode);
+        let at = |view: &View, x: u8, y: u8| view.tile_point(w1n1, x, y).unwrap();
+
+        // A touch whose release never arrived: every later mouse press is primary.
+        view.pointer_down(3, at(&view, 10, 10), PointerButton::Primary, true);
+        for (x, y) in [(20, 20), (30, 25), (12, 40)] {
+            let point = at(&view, x, y);
+            assert_eq!(
+                click(&mut view, 1, point, true),
+                Some((w1n1, x, y)),
+                "{mode:?}"
+            );
+        }
+
+        // Two pointers lost, then one of them pressed again: a gesture of its own.
+        view.pointer_down(1, at(&view, 5, 5), PointerButton::Primary, true);
+        view.pointer_down(2, at(&view, 6, 6), PointerButton::Primary, false);
+        let point = at(&view, 33, 17);
+        assert_eq!(
+            click(&mut view, 1, point, false),
+            Some((w1n1, 33, 17)),
+            "{mode:?}"
+        );
+
+        // A cancelled pointer is forgotten without a click.
+        view.pointer_down(5, at(&view, 8, 8), PointerButton::Primary, true);
+        view.pointer_cancel(5);
+        assert_eq!(view.pointer_up(5, at(&view, 8, 8), 0.0), None, "{mode:?}");
+        let point = at(&view, 40, 9);
+        assert_eq!(
+            click(&mut view, 6, point, false),
+            Some((w1n1, 40, 9)),
+            "{mode:?}"
+        );
+    }
 }
 
 /// A scene showing `snapshot` at `now` (no text rasterizer).
@@ -699,7 +749,7 @@ fn zoom_is_continuous_across_the_lod_thresholds() {
                 break;
             }
             let now = view.camera.px_per_room();
-            if view.camera.half_height() > 2.0 {
+            if view.camera.half_height() > view.camera.half_height_range().0 {
                 assert!(
                     (size / now - step).abs() < 1e-3,
                     "{mode:?}: a wheel step zooms by its factor ({size} → {now})"
@@ -992,6 +1042,41 @@ fn look_at_flies_and_fit_frames_the_scope() {
     view.look_at(e3s5, None, true, 0.0);
     view.pan_by(Vec2::new(10.0, 0.0));
     assert!(!view.advance(100.0));
+}
+
+#[test]
+fn frame_room_shows_the_whole_room_from_any_zoom() {
+    for mode in [ViewMode::TopDown, ViewMode::Perspective] {
+        let mut view = world_view();
+        view.set_mode(mode);
+        let e3s5 = room("E3S5");
+        // Zoomed in on a corner tile, then out to the whole shard: both land on the room.
+        view.look_at(e3s5, Some((2, 3)), false, 0.0);
+        view.zoom_by(100.0);
+        for start in ["close", "far"] {
+            view.frame_room(e3s5, false, 0.0);
+            assert_eq!(view.camera.target(), room_centre(e3s5), "{mode:?} {start}");
+            assert_eq!(view.camera.half_height(), view.camera.room_half_height());
+            assert_eq!(view.focused_room(), Some(e3s5));
+            let origin = tile_origin(e3s5, 0, 0);
+            for corner in [(0.0, 0.0), (50.0, 0.0), (0.0, 50.0), (50.0, 50.0)] {
+                let point = origin + Vec2::new(corner.0, corner.1);
+                let pixel = view
+                    .camera
+                    .project(Vec3::new(point.x, 0.0, point.y))
+                    .unwrap();
+                assert!(
+                    pixel.cmpge(Vec2::ZERO).all() && pixel.cmple(view.camera.size()).all(),
+                    "{mode:?} {start}: corner {corner:?} at {pixel} off the canvas"
+                );
+            }
+            view.fit(false, 0.0);
+        }
+        // Animated: lands on the same framing.
+        view.frame_room(e3s5, true, 0.0);
+        assert!(!view.advance(crate::FLIGHT_MS));
+        assert_eq!(view.camera.half_height(), view.camera.room_half_height());
+    }
 }
 
 /// What a flush hands out: `(level, layer, origin, size)` per rectangle.

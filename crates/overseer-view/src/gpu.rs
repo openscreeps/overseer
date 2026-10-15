@@ -1,10 +1,10 @@
 //! The wgpu side: buffers and textures mirroring the [`World`], and the render pass of a
 //! frame. Layers are drawn in order: the rooms (terrain from the overview texture and the
 //! packed terrain texture, status and owner, borders; one instanced draw) and minimap points
-//! flat on the ground without depth; then each detail scene: raised walls and object prisms
-//! (perspective only) with depth, shadows and object tokens (blended, far to near), action
-//! effects (added), bot visuals (polygon fills, shapes, text); the selection frame over
-//! everything.
+//! (faded out under their room's detail scene) flat on the ground without depth; then each
+//! detail scene: raised walls and object prisms (perspective only) with depth, shadows and
+//! object tokens (blended, far to near), action effects (added), bot visuals (polygon fills,
+//! shapes, text); the selection frame over everything.
 
 mod pipelines;
 
@@ -215,6 +215,8 @@ pub struct Gpu {
     selection: wgpu::Buffer,
     /// Locals of the selection: no offset, opaque.
     world_group: wgpu::BindGroup,
+    /// Locals of minimaps without a detail scene: nothing covers them.
+    no_detail_group: wgpu::BindGroup,
     targets: Option<Targets>,
 }
 
@@ -313,15 +315,18 @@ impl Gpu {
             .map(|_| detail_gpu(&device, &pipelines))
             .collect();
         let selection = buffer(&device, "selection", size_of::<Instance>(), vertex);
-        let world_locals = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("world locals"),
-            contents: bytemuck::bytes_of(&Locals {
-                offset: [0.0, 0.0, 0.0, 1.0],
-                tint: [0.0; 4],
-            }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let world_group = locals_group(&device, &pipelines, &world_locals);
+        let locals = |label, opacity| {
+            device.create_buffer_init(&BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::bytes_of(&Locals {
+                    offset: [0.0, 0.0, 0.0, opacity],
+                    tint: [0.0; 4],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        };
+        let world_group = locals_group(&device, &pipelines, &locals("world locals", 1.0));
+        let no_detail_group = locals_group(&device, &pipelines, &locals("no detail", 0.0));
         Self {
             device,
             queue,
@@ -346,6 +351,7 @@ impl Gpu {
             details,
             selection,
             world_group,
+            no_detail_group,
             targets: None,
         }
     }
@@ -583,7 +589,7 @@ impl Gpu {
                 draw.fades.terrain,
                 draw.fades.minimap,
                 draw.fades.borders,
-                0.0,
+                draw.fades.accent,
             ],
             plain: terrain(mesh::PLAIN),
             swamp: terrain(mesh::SWAMP),
@@ -609,9 +615,9 @@ impl Gpu {
                     origin.x,
                     0.0,
                     origin.y,
-                    draw.fades.detail * detail.arrival(draw.now),
+                    detail.opacity(draw.fades.detail, draw.now),
                 ],
-                tint: [r, g, b, f32::from(tint[3]) / 255.0],
+                tint: [r, g, b, f32::from(tint[3]) / 255.0 * draw.fades.accent],
             };
             self.queue
                 .write_buffer(&gpu.locals, 0, bytemuck::bytes_of(&locals));
@@ -696,6 +702,16 @@ impl Gpu {
                 if count == 0 || !bounds.contains(room) {
                     continue;
                 }
+                // Under the room's detail scene (as uploaded), the points fade out with it.
+                let group = world
+                    .detail_slot(room)
+                    .and_then(|index| {
+                        let detail = world.details().get(index)?.as_ref()?;
+                        Some((self.details.get(index)?, detail))
+                    })
+                    .filter(|(gpu, detail)| gpu.id == detail.id)
+                    .map_or(&self.no_detail_group, |(gpu, _)| &gpu.group);
+                pass.set_bind_group(1, group, &[]);
                 let start = (slot * POINTS) as u64 * stride;
                 pass.set_vertex_buffer(
                     0,
@@ -715,7 +731,7 @@ impl Gpu {
             };
             if gpu.id != detail.id
                 || !bounds.contains(detail.room)
-                || draw.fades.detail * detail.arrival(draw.now) <= 0.0
+                || detail.opacity(draw.fades.detail, draw.now) <= 0.0
             {
                 continue;
             }

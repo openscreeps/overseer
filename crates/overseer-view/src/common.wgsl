@@ -6,7 +6,8 @@ struct Globals {
     // xyz: unit direction towards the light.
     light: vec4<f32>,
     // x: full-resolution terrain opacity over the overview, y: minimap opacity, z: room
-    // border opacity, w: 0.
+    // border opacity, w: strength of the status and owner accent over full-resolution
+    // terrain (fades out with the detail layer).
     params: vec4<f32>,
     // Terrain colours (linear) of plains, swamps and wall tops.
     plain: vec4<f32>,
@@ -33,4 +34,19 @@ fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
     let low = color / 12.92;
     let high = pow((color + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(high, low, color <= vec3<f32>(0.04045));
+}
+
+fn luminance(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// The status and owner accent over full-resolution terrain (linear `color`): the tint's
+// hue at the terrain's own brightness, so walls, swamps and plains keep their contrast;
+// dark tints (closed rooms) dim instead. `tint.a` is the strength. `world/cells.rs`
+// (`accent`) mirrors it for the tests.
+fn accent(color: vec3<f32>, tint: vec4<f32>) -> vec3<f32> {
+    let brightness = luminance(tint.rgb);
+    let hued = color * tint.rgb;
+    let kept = hued * (luminance(color) / max(luminance(hued), 1e-8));
+    return mix(color, kept * smoothstep(0.0, 0.05, brightness), tint.a);
 }

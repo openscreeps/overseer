@@ -17,6 +17,7 @@ use crate::route::{Route, Shard, parse_room};
 use crate::session;
 use crate::state::AppState;
 use crate::ui::form::{Field, FormError, FormStatus};
+use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
 
 /// Choices of the notification interval, in minutes (as the official client offers them).
@@ -55,7 +56,8 @@ pub fn Profile() -> impl IntoView {
     let state = AppState::expect();
     let Some(session) = state.session.get_untracked() else {
         return view! {
-            <section class="panel narrow">
+            <section class="panel narrow state-card">
+                <span class="state-icon"><Icon kind=IconKind::User /></span>
                 <p>"You are not signed in."</p>
                 <button type="button" on:click=move |_| state.navigate(Route::Servers)>
                     "Servers"
@@ -162,9 +164,28 @@ fn Summary(
         signing_out.set(true);
         spawn_local(async move { state.sign_out().await });
     };
-    let body = move || match me.get() {
-        None => view! { <p role="status">"Loading the profile…"</p> }.into_any(),
-        Some(Err(error)) => view! { <p class="error" role="alert">{error}</p> }.into_any(),
+    let body = move || {
+        match me.get() {
+        None => view! {
+            <div class="profile-head" role="status">
+                <span class="badge skeleton" aria-hidden="true"></span>
+                <span class="skeleton line wide" aria-hidden="true"></span>
+                <span class="visually-hidden">"Loading the profile…"</span>
+            </div>
+            <div class="stats skeleton-stats" aria-hidden="true">
+                {(0..7)
+                    .map(|_| view! { <span class="skeleton line"></span> <span class="skeleton line wide"></span> })
+                    .collect_view()}
+            </div>
+        }
+        .into_any(),
+        Some(Err(error)) => view! {
+            <div class="state-card inline" role="alert">
+                <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
+                <p class="error">{error}</p>
+            </div>
+        }
+        .into_any(),
         Some(Ok(me)) => {
             let username = me
                 .username
@@ -177,18 +198,26 @@ fn Summary(
                 .cpu
                 .map_or_else(|| "unknown".to_owned(), |cpu| format!("{cpu} CPU"));
             let credits = format!("{:.3}", me.money);
+            let server = state.session_server().map(|server| server.name);
             view! {
                 <div class="profile-head">
                     {move || {
                         badge
                             .get()
-                            .map(|src| {
-                                view! {
-                                    <img class="badge" src=src alt=alt.clone() width="64" height="64" />
-                                }
-                            })
+                            .map_or_else(
+                                || view! { <span class="badge skeleton" aria-hidden="true"></span> }.into_any(),
+                                |src| {
+                                    view! {
+                                        <img class="badge" src=src alt=alt.clone() width="64" height="64" />
+                                    }
+                                        .into_any()
+                                },
+                            )
                     }}
-                    <h1 id="profile-title">{username}</h1>
+                    <div>
+                        <h1 id="profile-title">{username}</h1>
+                        {server.map(|server| view! { <p class="muted">{server}</p> })}
+                    </div>
                 </div>
                 <dl class="stats">
                     <dt>"Global Control Level"</dt>
@@ -206,10 +235,10 @@ fn Summary(
                     <dt>"Credits"</dt>
                     <dd>{credits}</dd>
                     <dt>"World status"</dt>
-                    <dd>{move || world_status.get().unwrap_or_else(|| "…".to_owned())}</dd>
+                    <dd>{move || pending_text(world_status.get())}</dd>
                     <dt>"Start room"</dt>
                     <dd>
-                        {move || start_room.get().unwrap_or_else(|| "…".to_owned())}
+                        {move || pending_text(start_room.get())}
                         {move || {
                             start_route
                                 .get()
@@ -230,20 +259,34 @@ fn Summary(
             }
             .into_any()
         }
+    }
     };
     view! {
-        <section class="panel" aria-labelledby="profile-title">
+        <section class="panel profile" aria-labelledby="profile-title">
             {body}
             <div class="actions">
                 <button type="button" class="primary" on:click=move |_| open_map(state)>
+                    <Icon kind=IconKind::Globe />
                     "Open the map"
                 </button>
                 <button type="button" class="danger" on:click=sign_out disabled=move || signing_out.get()>
+                    <Icon kind=IconKind::SignOut />
                     "Sign out"
                 </button>
             </div>
         </section>
     }
+}
+
+/// A value still being fetched shows as a placeholder bar of the text's height.
+fn pending_text(value: Option<String>) -> AnyView {
+    value.map_or_else(
+        || {
+            view! { <span class="skeleton line" role="status" aria-label="Loading"></span> }
+                .into_any()
+        },
+        IntoAny::into_any,
+    )
 }
 
 /// Opens the world of the signed-in server.

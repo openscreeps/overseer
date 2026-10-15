@@ -1,18 +1,25 @@
-//! The components: the shell (top bar, banner, status bar) around the page of the route.
+//! The components: the shell (top bar, banner, status bar, toasts) around the page of the
+//! route.
 //!
 //! The world canvas fills the window under the top bar; the server list, sign-in, register
-//! and profile pages show over the same backdrop. A popped-out window shows the room control
-//! alone.
+//! and profile pages show over the same backdrop. A popped-out window shows a room control or
+//! the console alone.
 
+mod console;
 mod drawer;
 mod form;
+mod icon;
+mod inspector;
+mod objects;
 mod profile;
 mod rate_limits;
 mod register;
 mod room_panel;
 mod servers;
 mod sign_in;
+mod status_bar;
 mod surface;
+mod toast;
 mod topbar;
 mod window;
 mod world;
@@ -20,13 +27,13 @@ mod world;
 use futures_util::future::abortable;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::ConnectionStatus;
-use overseer::map::RoomCoord;
-use overseer_view::Lod;
 
 use crate::platform::Platform;
-use crate::route::{Route, Shard};
+use crate::route::{Route, Shard, WindowView};
 use crate::state::{AppState, Screen};
+use crate::ui::icon::{Icon, IconKind};
+use crate::ui::status_bar::StatusBar;
+use crate::ui::toast::{ToastRegion, Toasts};
 use crate::ui::world::MapState;
 
 /// What the main area shows; changes of the room alone keep the page.
@@ -50,11 +57,11 @@ enum Page {
         shard: Shard,
         epoch: u64,
     },
-    /// A popped-out room.
+    /// A popped-out window.
     Window {
         url: String,
         shard: Shard,
-        room: RoomCoord,
+        view: WindowView,
         epoch: u64,
     },
 }
@@ -72,6 +79,7 @@ pub fn App(
     let limits = rate_limits::RateLimitsUi::new();
     provide_context(limits);
     limits.listen(map);
+    provide_context(Toasts::new());
     state.start();
     follow_shards(state, map);
     resolve_shard(state);
@@ -82,22 +90,28 @@ pub fn App(
         match page.get() {
         Page::Servers => view! { <servers::Servers /> }.into_any(),
         Page::UnknownServer(slug) => view! {
-            <section class="panel narrow" role="alert">
+            <section class="panel narrow state-card" role="alert">
+                <span class="state-icon warn"><Icon kind=IconKind::Alert /></span>
                 <h1>"Unknown server"</h1>
                 <p>{format!("No saved server is called “{slug}” here. Add it, then open the link again.")}</p>
-                <button type="button" class="primary" on:click=move |_| state.navigate(Route::Servers)>
-                    "Servers"
-                </button>
+                <div class="actions">
+                    <button type="button" class="primary" on:click=move |_| state.navigate(Route::Servers)>
+                        "Servers"
+                    </button>
+                </div>
             </section>
         }
         .into_any(),
         Page::UnknownShard(message) => view! {
-            <section class="panel narrow" role="alert">
+            <section class="panel narrow state-card" role="alert">
+                <span class="state-icon warn"><Icon kind=IconKind::Alert /></span>
                 <h1>"Unknown shard"</h1>
                 <p>{message}</p>
-                <button type="button" class="primary" on:click=move |_| open_default_world(state)>
-                    "Open the default shard"
-                </button>
+                <div class="actions">
+                    <button type="button" class="primary" on:click=move |_| open_default_world(state)>
+                        "Open the default shard"
+                    </button>
+                </div>
             </section>
         }
         .into_any(),
@@ -115,12 +129,12 @@ pub fn App(
             });
             view! { <world::WorldScreen server shard room overseer=session.overseer /> }.into_any()
         }
-        Page::Window { url, shard, room, .. } => {
+        Page::Window { url, shard, view, .. } => {
             let (Some(server), Some(session)) = (state.server(&url), state.session.get_untracked())
             else {
-                return starting("Opening the room…".to_owned());
+                return starting("Opening the window…".to_owned());
             };
-            view! { <window::WindowScreen server shard room overseer=session.overseer /> }
+            view! { <window::WindowScreen server shard view overseer=session.overseer /> }
                 .into_any()
         }
     }
@@ -130,6 +144,7 @@ pub fn App(
         return view! {
             <Banner />
             <main id="main" class="popout">{content}</main>
+            <ToastRegion />
             <StatusBar />
         }
         .into_any();
@@ -139,6 +154,7 @@ pub fn App(
         <Banner />
         <main id="main" class:map-page=world_page>{content}</main>
         <rate_limits::RateLimitsPanel />
+        <ToastRegion />
         <StatusBar />
     }
     .into_any()
@@ -184,10 +200,10 @@ fn page(state: AppState) -> Page {
             shard,
             epoch,
         },
-        Route::Window { shard, room, .. } if known(&shard) => Page::Window {
+        Route::Window { shard, view, .. } if known(&shard) => Page::Window {
             url: server.url,
             shard,
-            room,
+            view,
             epoch,
         },
         // No shard, or `-` on a sharded server: [`resolve_shard`] picks one.
@@ -336,9 +352,10 @@ fn session_page(state: AppState, screen: Screen) -> AnyView {
     match screen {
         Screen::Starting(text) => starting(text),
         Screen::SignIn { .. } | Screen::Register { .. } if state.is_popout() => view! {
-            <section class="panel narrow" role="alert">
+            <section class="panel narrow state-card" role="alert">
+                <span class="state-icon"><Icon kind=IconKind::User /></span>
                 <h1>"Signed out"</h1>
-                <p>"Sign in in Overseer's main window, then pop the room out again."</p>
+                <p>"Sign in in Overseer's main window, then pop the window out again."</p>
             </section>
         }
         .into_any(),
@@ -348,11 +365,13 @@ fn session_page(state: AppState, screen: Screen) -> AnyView {
         Screen::Register { server } => view! { <register::Register server /> }.into_any(),
         Screen::SetUsername => view! { <register::SetUsername /> }.into_any(),
         Screen::Failed { message, .. } => view! {
-            <section class="panel narrow" role="alert">
+            <section class="panel narrow state-card" role="alert">
+                <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
                 <h1>"Cannot connect"</h1>
                 <p>{message}</p>
                 <div class="actions">
                     <button type="button" class="primary" on:click=move |_| state.retry()>
+                        <Icon kind=IconKind::Refresh />
                         "Try again"
                     </button>
                     <button type="button" on:click=move |_| state.navigate(Route::Servers)>
@@ -369,7 +388,7 @@ fn session_page(state: AppState, screen: Screen) -> AnyView {
 /// A centred progress message.
 fn starting(text: String) -> AnyView {
     view! {
-        <section class="panel starting" role="status">
+        <section class="panel narrow state-card starting" role="status">
             <span class="spinner" aria-hidden="true"></span>
             <p>{text}</p>
         </section>
@@ -385,92 +404,21 @@ fn Banner() -> impl IntoView {
         state.banner.get().map(|message| {
             view! {
                 <div class="banner" role="alert">
-                    <span>{message}</span>
+                    <Icon kind=IconKind::Alert />
+                    <span class="banner-text">{message}</span>
                     <button
                         type="button"
+                        class="icon-button sm ghost"
                         aria-label="Dismiss message"
+                        data-tip="Dismiss"
+                        data-tip-pos="left"
                         on:click=move |_| state.banner.set(None)
                     >
-                        "×"
+                        <Icon kind=IconKind::Close />
                     </button>
                 </div>
             }
         })
-    }
-}
-
-/// Connection, tick, level of detail, the world's loading progress (while loading; with the
-/// rate limit's pause and `Reset limit`), frame time and graphics backend.
-#[component]
-fn StatusBar() -> impl IntoView {
-    let state = AppState::expect();
-    let map = MapState::expect();
-    let limits = rate_limits::RateLimitsUi::expect();
-    let connection = move || match state.status.get() {
-        None => "Not connected".to_owned(),
-        Some(ConnectionStatus::Connecting) => "Connecting…".to_owned(),
-        Some(ConnectionStatus::Connected) => "Connected".to_owned(),
-        Some(ConnectionStatus::Reconnecting { attempt, delay }) => {
-            format!("Reconnecting (attempt {attempt}, in {} s)", delay.as_secs())
-        }
-        Some(ConnectionStatus::Closed) => "Disconnected".to_owned(),
-    };
-    let tick = move || {
-        map.game_time
-            .get()
-            .map_or_else(|| "tick —".to_owned(), |time| format!("tick {time}"))
-    };
-    let lod = move || match map.lod.get() {
-        None => "—",
-        Some(Lod::Overview) => "Overview",
-        Some(Lod::Terrain) => "Terrain",
-        Some(Lod::Minimap) => "Minimap",
-        Some(Lod::Detail) => "Live rooms",
-    };
-    let progress = move || {
-        map.progress
-            .get()
-            .as_ref()
-            .and_then(|progress| {
-                // The clock only matters while paused: the time left updates every second.
-                let now = if progress.stats_paused_until.is_some() {
-                    limits.now.get()
-                } else {
-                    0
-                };
-                crate::feed::progress_label(progress, now)
-            })
-            .map(|label| {
-                view! {
-                    <span class="status-item" role="status" title="Loading the world">
-                        {label}
-                    </span>
-                    <rate_limits::StatusReset />
-                }
-            })
-    };
-    let frame = move || {
-        map.frame_ms
-            .get()
-            .map_or_else(|| "frame —".to_owned(), |ms| format!("frame {ms:.2} ms"))
-    };
-    view! {
-        <footer class="status-bar" aria-label="Status">
-            <span class="status-item">
-                <span class=move || topbar::status_class(state.status.get()) aria-hidden="true"></span>
-                {connection}
-            </span>
-            <span class="status-item">{tick}</span>
-            <span class="status-item" title="Level of detail">{lod}</span>
-            {progress}
-            <span class="status-item">{frame}</span>
-            <span class="status-item">{move || map.backend.get().unwrap_or("—")}</span>
-            <span class="status-item platform">
-                {move || {
-                    if state.platform.with_value(Platform::is_tauri) { "Desktop" } else { "Web" }
-                }}
-            </span>
-        </footer>
     }
 }
 

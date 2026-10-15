@@ -1,0 +1,307 @@
+//! The status bar: connection · shard and tick · zoom level · loading progress … frame time,
+//! graphics backend and platform.
+//!
+//! An item shows only once its value is known (no "—" placeholders). While a map is shown its
+//! tick and zoom-level slots keep their width even before they are known, and every item has a
+//! fixed minimum width with tabular digits, so values arriving or changing never shift their
+//! neighbours.
+
+use leptos::prelude::*;
+use overseer::ConnectionStatus;
+use overseer_view::Lod;
+
+use crate::platform::Platform;
+use crate::route::Shard;
+use crate::state::AppState;
+use crate::ui::rate_limits::{RateLimitsUi, StatusReset};
+use crate::ui::topbar::status_class;
+use crate::ui::world::{MapState, Phase};
+
+/// The name of a zoom level, from the whole world in to one room.
+pub const fn level_name(lod: Lod) -> &'static str {
+    match lod {
+        Lod::Overview => "World",
+        Lod::Terrain => "Sectors",
+        Lod::Minimap => "Rooms",
+        Lod::Detail => "Room",
+    }
+}
+
+/// What the connection item says.
+fn connection_text(status: Option<ConnectionStatus>) -> String {
+    match status {
+        None => "Not connected".to_owned(),
+        Some(ConnectionStatus::Connecting) => "Connecting…".to_owned(),
+        Some(ConnectionStatus::Connected) => "Connected".to_owned(),
+        Some(ConnectionStatus::Reconnecting { delay, .. }) => {
+            format!("Reconnecting in {} s", delay.as_secs())
+        }
+        Some(ConnectionStatus::Closed) => "Disconnected".to_owned(),
+    }
+}
+
+/// A slot of the status bar.
+#[derive(Clone, Debug, PartialEq)]
+enum Slot {
+    /// Not part of the bar.
+    Hidden,
+    /// Keeps its width, empty: the value is coming.
+    Reserved,
+    /// Shows the value.
+    Shown(String),
+}
+
+impl Slot {
+    /// `value` when known; else reserved while `reserve`, hidden otherwise.
+    fn of(value: Option<String>, reserve: bool) -> Self {
+        match value {
+            Some(value) => Self::Shown(value),
+            None if reserve => Self::Reserved,
+            None => Self::Hidden,
+        }
+    }
+
+    /// The text shown (empty unless [`Self::Shown`]).
+    fn text(&self) -> String {
+        match self {
+            Self::Shown(text) => text.clone(),
+            Self::Hidden | Self::Reserved => String::new(),
+        }
+    }
+}
+
+/// What the status bar knows.
+#[derive(Clone, Debug, Default)]
+struct Facts {
+    /// A map (world or popped-out room) is on screen.
+    map: bool,
+    /// The shard shown, on sharded servers.
+    shard: Option<String>,
+    /// Game tick of the latest live room.
+    game_time: Option<u64>,
+    /// Zoom level of the world map.
+    lod: Option<Lod>,
+    /// CPU time of the map's last frame, in milliseconds.
+    frame_ms: Option<f32>,
+    /// Graphics backend.
+    backend: Option<&'static str>,
+}
+
+/// The map items of the status bar, from what is known.
+#[derive(Clone, Debug, PartialEq)]
+struct MapItems {
+    place: Slot,
+    level: Slot,
+    frame: Slot,
+    backend: Slot,
+}
+
+impl MapItems {
+    fn of(facts: &Facts) -> Self {
+        let place = facts.game_time.map(|time| match &facts.shard {
+            Some(shard) => format!("{shard} · tick {time}"),
+            None => format!("tick {time}"),
+        });
+        let on_map = |value: Option<String>| value.filter(|_| facts.map);
+        Self {
+            place: Slot::of(place, facts.map),
+            level: Slot::of(facts.lod.map(|lod| level_name(lod).to_owned()), facts.map),
+            frame: Slot::of(
+                on_map(facts.frame_ms.map(|ms| format!("frame {ms:.2} ms"))),
+                false,
+            ),
+            backend: Slot::of(on_map(facts.backend.map(str::to_owned)), false),
+        }
+    }
+}
+
+/// The status item of `slot` with `class` and `title`. The element stays while the slot is
+/// not hidden and only its text follows the value: no re-render per value, and observers of
+/// the element (the end-to-end tests) keep seeing it.
+fn item(slot: Memo<Slot>, class: &'static str, title: &'static str) -> impl IntoView {
+    let shown = Memo::new(move |_| slot.with(|slot| *slot != Slot::Hidden));
+    let reserved = Memo::new(move |_| slot.with(|slot| *slot == Slot::Reserved));
+    move || {
+        shown.get().then(|| {
+            view! {
+                <span class=class title=title aria-hidden=move || reserved.get().then_some("true")>
+                    {move || slot.with(Slot::text)}
+                </span>
+            }
+        })
+    }
+}
+
+/// The status bar.
+#[component]
+pub fn StatusBar() -> impl IntoView {
+    let state = AppState::expect();
+    let map = MapState::expect();
+    let limits = RateLimitsUi::expect();
+    let items = Memo::new(move |_| {
+        MapItems::of(&Facts {
+            map: map.phase.get() != Phase::Idle,
+            shard: map.shard.get().and_then(|shard| match shard {
+                Shard::Named(name) => Some(name),
+                Shard::Single => None,
+            }),
+            game_time: map.game_time.get(),
+            lod: map.lod.get(),
+            frame_ms: map.frame_ms.get(),
+            backend: map.backend.get(),
+        })
+    });
+    let place = Memo::new(move |_| items.with(|items| items.place.clone()));
+    let level = Memo::new(move |_| items.with(|items| items.level.clone()));
+    let frame = Memo::new(move |_| items.with(|items| items.frame.clone()));
+    let backend = Memo::new(move |_| items.with(|items| items.backend.clone()));
+    let connection_title = move || match state.status.get() {
+        Some(ConnectionStatus::Reconnecting { attempt, .. }) => format!("Attempt {attempt}"),
+        _ => String::new(),
+    };
+    let progress = Memo::new(move |_| {
+        map.progress.with(|progress| {
+            progress.as_ref().and_then(|progress| {
+                // The clock only matters while paused: the time left updates every second.
+                let now = if progress.stats_paused_until.is_some() {
+                    limits.now.get()
+                } else {
+                    0
+                };
+                crate::feed::progress_label(progress, now)
+            })
+        })
+    });
+    let loading = Memo::new(move |_| progress.with(Option::is_some));
+    let progress = move || {
+        loading.get().then(|| {
+            view! {
+                <span class="status-item status-progress" role="status" title="Loading the world">
+                    <span class="spinner small" aria-hidden="true"></span>
+                    <span class="status-text">{move || progress.get().unwrap_or_default()}</span>
+                </span>
+                <StatusReset />
+            }
+        })
+    };
+    view! {
+        <footer class="status-bar" aria-label="Status">
+            <span class="status-item status-connection" title=connection_title>
+                <span class=move || status_class(state.status.get()) aria-hidden="true"></span>
+                {move || connection_text(state.status.get())}
+            </span>
+            {item(place, "status-item status-place", "Game tick")}
+            {item(level, "status-item status-level", "Zoom level")}
+            {progress}
+            <span class="status-end">
+                {item(frame, "status-item status-frame", "CPU time of the last frame")}
+                {item(backend, "status-item status-backend", "Graphics backend")}
+                <span class="status-item status-platform">
+                    {move || {
+                        if state.platform.with_value(Platform::is_tauri) { "Desktop" } else { "Web" }
+                    }}
+                </span>
+            </span>
+        </footer>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use overseer::ConnectionStatus;
+    use overseer_view::Lod;
+
+    use super::{Facts, MapItems, Slot, connection_text, level_name};
+
+    #[test]
+    fn zoom_levels_are_named_from_the_world_in_to_a_room() {
+        let names = [Lod::Overview, Lod::Terrain, Lod::Minimap, Lod::Detail].map(level_name);
+        assert_eq!(names, ["World", "Sectors", "Rooms", "Room"]);
+    }
+
+    #[test]
+    fn without_a_map_no_map_item_shows() {
+        // Before connecting, on the server list: nothing but the connection and platform.
+        let items = MapItems::of(&Facts::default());
+        assert_eq!(
+            items,
+            MapItems {
+                place: Slot::Hidden,
+                level: Slot::Hidden,
+                frame: Slot::Hidden,
+                backend: Slot::Hidden,
+            }
+        );
+        // Stale values without a map stay hidden too.
+        let items = MapItems::of(&Facts {
+            frame_ms: Some(1.0),
+            backend: Some("WebGL2"),
+            ..Facts::default()
+        });
+        assert_eq!((items.frame, items.backend), (Slot::Hidden, Slot::Hidden));
+    }
+
+    #[test]
+    fn a_map_reserves_its_slots_until_their_values_arrive() {
+        let loading = Facts {
+            map: true,
+            ..Facts::default()
+        };
+        let items = MapItems::of(&loading);
+        assert_eq!(items.place, Slot::Reserved);
+        assert_eq!(items.level, Slot::Reserved);
+        assert_eq!(
+            (items.frame, items.backend),
+            (Slot::Hidden, Slot::Hidden),
+            "nothing drawn yet"
+        );
+
+        let drawn = Facts {
+            lod: Some(Lod::Terrain),
+            frame_ms: Some(0.234),
+            backend: Some("WebGPU"),
+            ..loading.clone()
+        };
+        let items = MapItems::of(&drawn);
+        assert_eq!(items.place, Slot::Reserved, "no live room yet");
+        assert_eq!(items.level, Slot::Shown("Sectors".to_owned()));
+        assert_eq!(items.frame, Slot::Shown("frame 0.23 ms".to_owned()));
+        assert_eq!(items.backend, Slot::Shown("WebGPU".to_owned()));
+
+        let live = Facts {
+            game_time: Some(1234),
+            lod: Some(Lod::Detail),
+            ..drawn.clone()
+        };
+        assert_eq!(
+            MapItems::of(&live).place,
+            Slot::Shown("tick 1234".to_owned())
+        );
+        let sharded = Facts {
+            shard: Some("shard3".to_owned()),
+            ..live
+        };
+        assert_eq!(
+            MapItems::of(&sharded).place,
+            Slot::Shown("shard3 · tick 1234".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_connection_is_named_without_placeholders() {
+        assert_eq!(connection_text(None), "Not connected");
+        assert_eq!(
+            connection_text(Some(ConnectionStatus::Connected)),
+            "Connected"
+        );
+        assert_eq!(
+            connection_text(Some(ConnectionStatus::Reconnecting {
+                attempt: 3,
+                delay: Duration::from_secs(4),
+            })),
+            "Reconnecting in 4 s"
+        );
+    }
+}

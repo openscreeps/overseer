@@ -54,14 +54,22 @@ function slowDown(page: Page): Promise<void> {
   return applied;
 }
 
-/** Adds `server` as a private server through the servers screen (`#/`), named `name`. */
+/**
+ * Adds `server` as a private server through the servers screen (`#/`), named `name`: the "Add
+ * server" dialog closes and a toast confirms.
+ */
 export async function addServer(page: Page, server: Server, name = SERVER_NAME): Promise<void> {
   await page.goto('/#/');
-  const form = page.getByRole('region', { name: 'Add server' });
-  await form.getByLabel('Name', { exact: true }).fill(name);
-  await form.getByLabel('Address', { exact: true }).fill(server.url);
-  await form.getByRole('button', { name: 'Add', exact: true }).click();
-  await expect(form.getByRole('status')).toHaveText(`Added ${server.url}`);
+  await page
+    .getByRole('region', { name: 'Servers' })
+    .getByRole('button', { name: 'Add server' })
+    .click();
+  const dialog = page.getByRole('dialog', { name: 'Add server' });
+  await dialog.getByLabel('Name', { exact: true }).fill(name);
+  await dialog.getByLabel('Address', { exact: true }).fill(server.url);
+  await dialog.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('status').filter({ hasText: `Added ${name}` })).toBeVisible();
 }
 
 /**

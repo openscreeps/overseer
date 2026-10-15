@@ -2,7 +2,7 @@
 //! minimaps and detail scenes, each recording which of its GPU data changed so that updates
 //! only touch the rooms that changed.
 
-mod cells;
+pub mod cells;
 mod minimap;
 mod overview;
 pub mod terrain;
@@ -187,6 +187,12 @@ impl Detail {
     )]
     pub fn arrival(&self, now: f64) -> f32 {
         ((now - self.since) / ARRIVAL_MS).clamp(0.0, 1.0) as f32
+    }
+
+    /// Opacity of the scene at `now` with the detail layer at `layer` (`Fades::detail`);
+    /// its room's minimap points are drawn at the rest.
+    pub fn opacity(&self, layer: f32, now: f64) -> f32 {
+        layer * self.arrival(now)
     }
 }
 
@@ -396,6 +402,15 @@ impl World {
     /// The detail slots.
     pub fn details(&self) -> &[Option<Detail>] {
         &self.details
+    }
+
+    /// The slot (index in [`Self::details`]) of a room's detail scene: its minimap points
+    /// fade out as the scene fades in ([`Detail::opacity`]), the scene drawing every object
+    /// at its true size where the minimap has coarse squares.
+    pub fn detail_slot(&self, room: RoomCoord) -> Option<usize> {
+        self.details
+            .iter()
+            .position(|detail| detail.as_ref().is_some_and(|detail| detail.room == room))
     }
 
     /// Advances the detail scenes to `now` (ms) seen from `eye` (world coordinates).

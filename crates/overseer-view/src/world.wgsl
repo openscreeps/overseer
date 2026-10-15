@@ -1,6 +1,6 @@
-// Flat world layers (appended to common.wgsl), drawn on the ground in world tiles: the rooms
-// (terrain, status and owner, borders) and minimap points, each an instanced quad built
-// from the vertex index.
+// The flat world layer (appended to common.wgsl), drawn on the ground in world tiles: the
+// rooms (terrain, status and owner, borders), each an instanced quad built from the vertex
+// index. Minimap points are in `shader.wgsl` (they fade under detail scenes).
 
 // Every room's terrain, packed 2 bits per tile: slot `s` is the 25×25 block at column
 // `s % 1640 % 40`, row `s % 1640 / 40` of layer `s / 1640` (see `world/terrain.rs`).
@@ -15,6 +15,8 @@ const ABSENT: u32 = 0xfffffffeu;
 const SLOT_SIDE: u32 = 25u;
 const SLOT_COLUMNS: u32 = 40u;
 const SLOTS_PER_LAYER: u32 = 1640u;
+// Opacity of the status and owner line inside the border of a room drawn in full resolution.
+const FRAME: f32 = 0.75;
 
 // Corner `index` (0..6) of a unit quad, as two triangles.
 fn quad_corner(index: u32) -> vec2<f32> {
@@ -129,7 +131,8 @@ fn cell_sd(c: vec4<f32>, q: vec2<f32>) -> f32 {
 }
 
 // Terrain at room-local `local` with smoothed outlines (`mesh/contour.rs`), `px` tiles per
-// pixel: walls rounded, swamps blended in, a soft shadow on the ground around walls.
+// pixel: walls rounded, swamps blended in, a contact shadow on the ground around walls at
+// most a few pixels wide (crisp when zoomed in).
 fn smooth_terrain(slot: u32, local: vec2<f32>, px: f32) -> vec3<f32> {
     let cell = floor(local - vec2<f32>(0.5));
     let q = local - vec2<f32>(0.5) - cell;
@@ -146,7 +149,7 @@ fn smooth_terrain(slot: u32, local: vec2<f32>, px: f32) -> vec3<f32> {
     let swamp = cell_sd(swamps, q);
     let aa = max(px, 1e-4);
     var color = mix(globals.plain.rgb, globals.swamp.rgb, clamp(0.5 - swamp / aa, 0.0, 1.0));
-    color = color * (1.0 - 0.4 * (1.0 - smoothstep(0.0, 0.5, wall)));
+    color = color * (1.0 - 0.4 * (1.0 - smoothstep(0.0, min(0.5, 4.0 * aa), wall)));
     return mix(color, globals.wall.rgb, clamp(0.5 - wall / aa, 0.0, 1.0));
 }
 
@@ -157,11 +160,12 @@ fn room_fragment(in: RoomOut) -> @location(0) vec4<f32> {
     // Lit like the flat tops of the detail terrain.
     let light = 0.6 + 0.4 * max(globals.light.y, 0.0);
     // The overview: area-averaged shares, filtered across rooms and mip levels; what no
-    // terrain covers is the placeholder.
+    // terrain covers is the placeholder. Status and owner show as a strong overlay.
     let shares = textureSample(overview, overview_sampler, in.overview_uv).rgb;
     let missing = max(1.0 - shares.r - shares.g - shares.b, 0.0);
     var color = (globals.wall.rgb * shares.r + globals.swamp.rgb * shares.g
         + globals.plain.rgb * shares.b) * light + globals.pending.rgb * missing;
+    color = mix(color, in.overlay.rgb, in.overlay.a);
     let near = globals.params.x;
     if near > 0.0 {
         var tiles = globals.pending.rgb;
@@ -184,35 +188,17 @@ fn room_fragment(in: RoomOut) -> @location(0) vec4<f32> {
             }
             tiles = mix(averaged, smoothed, sharp) * light;
         }
+        // Status and owner over full resolution: a light accent that keeps the terrain's
+        // contrast, and a line of its colour inside the room border (pixels 1 to 3).
+        let strength = globals.params.w;
+        tiles = accent(tiles, vec4<f32>(in.tint.rgb, in.tint.a * strength));
+        let edge = min(in.local, vec2<f32>(50.0) - in.local) / max(footprint, vec2<f32>(1e-4));
+        let inside = min(edge.x, edge.y);
+        let frame = clamp(inside - 1.0, 0.0, 1.0) * (1.0 - clamp(inside - 3.0, 0.0, 1.0));
+        let framed = select(0.0, FRAME * frame * strength, in.tint.a > 0.0);
+        tiles = mix(tiles, in.tint.rgb, framed);
         color = mix(color, tiles, near);
     }
-    // Status and owner: a strong overlay zoomed out, a light tint over full resolution.
-    let over = mix(in.overlay, in.tint, near);
-    color = mix(color, over.rgb, over.a);
     color = color * (1.0 - 0.55 * border(in.local, footprint));
     return vec4<f32>(color, 1.0);
-}
-
-struct PointOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-}
-
-@vertex
-fn point_vertex(
-    @builtin(vertex_index) index: u32,
-    @location(0) position: vec2<f32>,
-    @location(1) size: f32,
-    @location(2) color: vec4<f32>,
-) -> PointOut {
-    var out: PointOut;
-    let corner = (quad_corner(index) - vec2<f32>(0.5)) * size;
-    out.position = ground(position + vec2<f32>(0.5) + corner);
-    out.color = vec4<f32>(srgb_to_linear(color.rgb), color.a * globals.params.y);
-    return out;
-}
-
-@fragment
-fn point_fragment(in: PointOut) -> @location(0) vec4<f32> {
-    return in.color;
 }

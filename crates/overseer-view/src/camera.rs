@@ -8,13 +8,13 @@ use glam::camera::rh;
 use glam::{Mat4, Vec2, Vec3};
 use overseer::map::{RoomCoord, RoomRect};
 
-use crate::{CameraState, ViewMode};
+use crate::{CameraState, MAX_PX_PER_TILE, ViewMode};
 
 /// Tiles per room side, as a world length.
 pub const ROOM: f32 = 50.0;
 /// Vertical field of view of the perspective camera.
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
-/// Smallest visible half height (world tiles at the target).
+/// Smallest visible half height (world tiles at the target), whatever the canvas size.
 const MIN_HALF_HEIGHT: f32 = 2.0;
 /// Largest visible half height, as a multiple of the half height that frames the bounds.
 const MAX_FIT: f32 = 1.75;
@@ -65,8 +65,9 @@ pub fn rect_extent(rect: RoomRect) -> (Vec2, Vec2) {
 
 /// The camera shared by both modes: top-down is an orthographic camera looking straight down
 /// at the target, perspective an orbit camera around it at a distance that frames the same
-/// half height. The target stays inside the bounds and the zoom between [`MIN_HALF_HEIGHT`]
-/// and [`MAX_FIT`] times the framing of the bounds.
+/// half height. The target stays inside the bounds and the zoom between
+/// [`MAX_PX_PER_TILE`] (at least [`MIN_HALF_HEIGHT`]) and [`MAX_FIT`] times the framing of
+/// the bounds.
 #[derive(Clone, Debug)]
 pub struct Camera {
     /// The projection in use.
@@ -130,10 +131,60 @@ impl Camera {
         self.fit_half_height() * MAX_FIT
     }
 
-    /// The half height that frames one room.
+    /// The closest zoom: tiles of [`MAX_PX_PER_TILE`] CSS pixels at the target.
+    fn min_half_height(&self) -> f32 {
+        (self.size.y / (2.0 * MAX_PX_PER_TILE)).max(MIN_HALF_HEIGHT)
+    }
+
+    /// The range of the half height: closest and farthest zoom.
+    pub fn half_height_range(&self) -> (f32, f32) {
+        let min = self.min_half_height();
+        (min, self.max_half_height().max(min))
+    }
+
+    /// The half height that frames one room (all of it on the canvas, with a tile of margin,
+    /// in both modes).
     pub fn room_half_height(&self) -> f32 {
-        ((ROOM / 2.0 + 1.0) * (1.0 / self.aspect()).max(1.0))
-            .clamp(MIN_HALF_HEIGHT, self.max_half_height())
+        let half = ROOM / 2.0 + 1.0;
+        let flat = half * (1.0 / self.aspect()).max(1.0);
+        let framing = match self.mode {
+            ViewMode::TopDown => flat,
+            // Nearer ground looks larger: the scene scales with the half height around the
+            // target, so bisect for the smallest that keeps the corners on the canvas.
+            ViewMode::Perspective => {
+                // Around the origin: the same framing wherever the camera is.
+                let mut probe = Self {
+                    target: Vec2::ZERO,
+                    ..self.clone()
+                };
+                let mut fits = |half_height: f32| {
+                    probe.half_height = half_height;
+                    [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+                        .into_iter()
+                        .all(|(x, z)| {
+                            probe
+                                .project(Vec3::new(x * half, 0.0, z * half))
+                                .is_some_and(|pixel| {
+                                    pixel.cmpge(Vec2::ZERO).all() && pixel.cmple(self.size).all()
+                                })
+                        })
+                };
+                let (mut low, mut high) = (flat, flat * 4.0);
+                if fits(high) {
+                    for _ in 0..24 {
+                        let middle = f32::midpoint(low, high);
+                        if fits(middle) {
+                            high = middle;
+                        } else {
+                            low = middle;
+                        }
+                    }
+                }
+                high
+            }
+        };
+        let (min, max) = self.half_height_range();
+        framing.clamp(min, max)
     }
 
     /// Frames the whole bounds.
@@ -194,9 +245,8 @@ impl Camera {
     /// Keeps target, zoom and pitch in range.
     fn clamp(&mut self) {
         self.target = self.target.clamp(self.bounds.0, self.bounds.1);
-        self.half_height = self
-            .half_height
-            .clamp(MIN_HALF_HEIGHT, self.max_half_height().max(MIN_HALF_HEIGHT));
+        let (min, max) = self.half_height_range();
+        self.half_height = self.half_height.clamp(min, max);
         self.pitch = self.pitch.clamp(MIN_PITCH, MAX_PITCH);
     }
 
@@ -308,7 +358,6 @@ impl Camera {
     }
 
     /// The CSS pixel a world point projects to (`None` behind the camera).
-    #[cfg(test)]
     pub fn project(&self, world: Vec3) -> Option<Vec2> {
         let clip = self.view_projection() * world.extend(1.0);
         (clip.w > 0.0).then(|| {
@@ -361,8 +410,8 @@ impl Camera {
             return;
         }
         let before = self.ground_point(anchor, 0.0);
-        self.half_height = (self.half_height * factor)
-            .clamp(MIN_HALF_HEIGHT, self.max_half_height().max(MIN_HALF_HEIGHT));
+        let (min, max) = self.half_height_range();
+        self.half_height = (self.half_height * factor).clamp(min, max);
         if let (Some(before), Some(after)) = (before, self.ground_point(anchor, 0.0)) {
             self.move_target(before - after);
         }

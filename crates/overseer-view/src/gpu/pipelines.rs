@@ -236,7 +236,6 @@ impl Pipelines {
                 immediate_size: 0,
             })
         };
-        let flat = pipeline_layout("flat", &[Some(&globals_layout)]);
         let rooms_pipeline_layout =
             pipeline_layout("rooms", &[Some(&globals_layout), Some(&rooms_layout)]);
         let detail = pipeline_layout("detail", &[Some(&globals_layout), Some(&locals_layout)]);
@@ -276,9 +275,9 @@ impl Pipelines {
         let points = builder.build(
             &Stage {
                 label: "minimap points",
-                layout: &flat,
-                shader: &world_shader,
-                entry: ("point_vertex", "point_fragment"),
+                layout: &detail,
+                shader: &detail_shader,
+                entry: ("point_vertex", "fragment"),
                 buffers: &[Some(instances(
                     size_of::<PointInstance>(),
                     &point_attributes,

@@ -19,14 +19,22 @@
 //! | [`Lod`] | room size | drawn |
 //! |---|---|---|
 //! | [`Lod::Overview`] | below [`TERRAIN_PX_PER_ROOM`] (24) | every room's terrain from the overview layer (10 texels per room, filtered), under a strong status and owner overlay |
-//! | [`Lod::Terrain`] | from [`TERRAIN_PX_PER_ROOM`] | full-resolution terrain (one texel per tile, decoded from the packed terrain), cross-faded from the overview, under a light status and owner tint; room borders |
+//! | [`Lod::Terrain`] | from [`TERRAIN_PX_PER_ROOM`] | full-resolution terrain (one texel per tile, decoded from the packed terrain), cross-faded from the overview, with a subtle status and owner accent; room borders |
 //! | [`Lod::Minimap`] | from [`MINIMAP_PX_PER_ROOM`] (100) | + live minimap points per kind and owner |
-//! | [`Lod::Detail`] | from [`DETAIL_PX_PER_ROOM`] (300) | + the live room scene of rooms with a snapshot, over their minimap |
+//! | [`Lod::Detail`] | from [`DETAIL_PX_PER_ROOM`] (300) | + the live room scene of rooms with a snapshot, replacing their minimap; the accent fades out |
 //!
-//! Full-resolution terrain (and the light tint) cross-fades over the overview layer (and its
+//! Full-resolution terrain (and its accent) cross-fades over the overview layer (and its
 //! strong overlay) between 24 and 36 pixels per room, minimaps fade in between 100 and 150,
-//! detail scenes between 300 and 375 (and over 300 ms after their first snapshot); room
-//! borders between 4 and 10. A room scope is always [`Lod::Detail`] with every layer shown.
+//! detail scenes between 300 and 375 (and over 300 ms after their first snapshot) while the
+//! accent and the minimap points of their room fade out; room borders between 4 and 10. A
+//! room scope is always [`Lod::Detail`] with every layer but the accent shown. The camera
+//! zooms in no closer than tiles of [`MAX_PX_PER_TILE`] (64) CSS pixels; the eased wheel
+//! zoom glides into that limit and into the farthest zoom, and scrolling back acts at once.
+//!
+//! The accent keeps full-resolution terrain readable at every level: the terrain takes the
+//! status or owner colour's hue at its own brightness (walls, swamps and plains keep their
+//! contrast; closed rooms are dimmed), and a two-pixel line of the colour runs inside the
+//! room border. Own, other, reserved and unowned rooms are drawn equally crisp.
 //!
 //! Rooms whose terrain has not arrived yet are drawn in a neutral grey placeholder (lighter
 //! than terrain, so loading shows); rooms the server has no terrain for
@@ -176,13 +184,16 @@
 //!    [`Viewer::resize`] with the canvas' CSS size (`clientWidth`, `clientHeight`) and
 //!    `devicePixelRatio`, again whenever either changes (a `ResizeObserver`). `resize` sets
 //!    the canvas' backing size itself; the app only styles its CSS size.
-//! 2. Forward `pointerdown` / `pointermove` / `pointerup` (and `pointercancel`, as an up whose
-//!    [`Pick`] is ignored) with `pointerId`, `offsetX`/`offsetY` and the button
-//!    (`0` → [`PointerButton::Primary`], `1` → [`PointerButton::Middle`], `2` →
-//!    [`PointerButton::Secondary`]); capture the pointer on down so that drags leaving the
-//!    canvas keep reporting. Forward `wheel` (calling `preventDefault`) with `deltaY` in
-//!    pixels (multiply line-mode deltas by about 16). Set CSS `touch-action: none` on the
-//!    canvas so touch gestures reach the viewer, and suppress `contextmenu` for right-drag.
+//! 2. Forward `pointerdown` / `pointermove` / `pointerup` with `pointerId`, `offsetX`/`offsetY`,
+//!    the button (`0` → [`PointerButton::Primary`], `1` → [`PointerButton::Middle`], `2` →
+//!    [`PointerButton::Secondary`]) and, on down, `isPrimary`; forward `pointercancel` and
+//!    `lostpointercapture` to [`Viewer::pointer_cancel`]. Capture the pointer on down so that
+//!    drags leaving the canvas keep reporting. Forward every release and cancel, whatever
+//!    else the app does with them: a pointer the viewer still thinks pressed makes the next
+//!    press of another pointer a pinch (a primary press starts over). Forward `wheel`
+//!    (calling `preventDefault`) with `deltaY` in pixels (multiply line-mode deltas by about
+//!    16). Set CSS `touch-action: none` on the canvas so touch gestures reach the viewer,
+//!    and suppress `contextmenu` for right-drag.
 //! 3. Feed the world's data as described under Interest, and the signed-in user id to
 //!    [`Viewer::set_user`].
 //! 4. Request an animation frame after any of the calls above, and call [`Viewer::render`]
@@ -253,6 +264,9 @@ pub const DETAIL_PX_PER_ROOM: f32 = 300.0;
 pub const MINIMAP_ROOMS: usize = 64;
 /// Most detail rooms wanted at once: the server's per-user limit of room subscriptions.
 pub const DETAIL_ROOMS: usize = 2;
+/// Closest zoom: a tile is at most this many CSS pixels on the canvas (at the camera's
+/// target), enough to read every object's details; tiny canvases still show 4 tiles high.
+pub const MAX_PX_PER_TILE: f32 = 64.0;
 
 /// The camera projection.
 #[derive(
@@ -550,6 +564,12 @@ impl Viewer {
         self.view.look_at(room, tile, animate, clock::now());
     }
 
+    /// Centres a room and frames all of it (the whole 50×50 room in view, whatever the
+    /// current zoom); `animate` flies there over [`FLIGHT_MS`].
+    pub fn frame_room(&mut self, room: RoomCoord, animate: bool) {
+        self.view.frame_room(room, animate, clock::now());
+    }
+
     /// Frames the whole scope; `animate` flies there over [`FLIGHT_MS`].
     pub fn fit(&mut self, animate: bool) {
         self.view.fit(animate, clock::now());
@@ -589,9 +609,12 @@ impl Viewer {
         self.view.zoom_by(factor);
     }
 
-    /// A pointer was pressed at CSS pixel `(x, y)` of the canvas.
-    pub fn pointer_down(&mut self, id: i32, x: f32, y: f32, button: PointerButton) {
-        self.view.pointer_down(id, Vec2::new(x, y), button);
+    /// A pointer was pressed at CSS pixel `(x, y)` of the canvas. `primary` is the event's
+    /// `isPrimary` (the first pointer of a gesture, every mouse press): it starts a new
+    /// gesture, so pointers whose release never arrived cannot spoil it (nor can a pointer
+    /// pressed again without a release).
+    pub fn pointer_down(&mut self, id: i32, x: f32, y: f32, button: PointerButton, primary: bool) {
+        self.view.pointer_down(id, Vec2::new(x, y), button, primary);
     }
 
     /// A pointer moved to CSS pixel `(x, y)`; pans, orbits or pinches while pressed.
@@ -605,6 +628,12 @@ impl Viewer {
         self.view.pointer_up(id, Vec2::new(x, y), clock::now())
     }
 
+    /// A pointer's gesture ended without a release (`pointercancel`, `lostpointercapture`):
+    /// it is forgotten, without a click or a glide. Harmless after its release.
+    pub fn pointer_cancel(&mut self, id: i32) {
+        self.view.pointer_cancel(id);
+    }
+
     /// Zooms around CSS pixel `(x, y)`; positive `delta_y` (scrolling down) zooms out. The
     /// zoom eases in over the next frames (see [`ViewOptions`]).
     pub fn wheel(&mut self, x: f32, y: f32, delta_y: f32) {
@@ -614,6 +643,15 @@ impl Viewer {
     /// Highlights a room's tile (`None` clears the highlight).
     pub const fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
         self.view.select(tile);
+    }
+
+    /// The CSS pixel of the canvas where the top centre of a room's tile is drawn (`None`
+    /// behind the camera): clicking there picks the tile.
+    #[must_use]
+    pub fn tile_point(&self, room: RoomCoord, x: u8, y: u8) -> Option<(f32, f32)> {
+        self.view
+            .tile_point(room, x, y)
+            .map(|point| (point.x, point.y))
     }
 
     /// Switches features of the drawing on or off.

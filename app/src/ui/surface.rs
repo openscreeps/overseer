@@ -124,6 +124,15 @@ impl Surface {
         request_animation_frame(move || self.draw());
     }
 
+    /// Moves the keyboard focus to the canvas (after a search, say) without a focus ring:
+    /// the user did not tab there. The ring comes back once the canvas loses focus.
+    pub fn focus(self) {
+        if let Some(canvas) = self.canvas.get_untracked() {
+            let _ = canvas.set_attribute("data-quiet-focus", "");
+            let _ = canvas.focus();
+        }
+    }
+
     /// Draws a frame: follows the canvas size first, asks for another while animating.
     fn draw(self) {
         if self
@@ -283,7 +292,10 @@ pub fn SurfaceCanvas(
             _ => PointerButton::Primary,
         };
         let (x, y) = position(&event);
-        surface.with_viewer(|viewer| viewer.pointer_down(event.pointer_id(), x, y, button));
+        let primary = event.is_primary();
+        surface.with_viewer(|viewer| {
+            viewer.pointer_down(event.pointer_id(), x, y, button, primary);
+        });
     };
     let pointer_move = move |event: PointerEvent| {
         if event.buttons() == 0 {
@@ -292,20 +304,22 @@ pub fn SurfaceCanvas(
         let (x, y) = position(&event);
         surface.with_viewer(|viewer| viewer.pointer_move(event.pointer_id(), x, y));
     };
+    // Every release and cancel reaches the viewer, whatever the hooks: a pointer it still
+    // thought pressed would turn the next press into a pinch.
     let pointer_up = move |event: PointerEvent| {
         let (x, y) = position(&event);
-        let Some(hooks) = surface.hooks.try_get_value().flatten() else {
-            return;
-        };
+        let hooks = surface.hooks.try_get_value().flatten();
         surface.with_viewer(|viewer| {
-            if let Some(pick) = viewer.pointer_up(event.pointer_id(), x, y) {
+            if let Some(pick) = viewer.pointer_up(event.pointer_id(), x, y)
+                && let Some(hooks) = &hooks
+            {
                 (hooks.pick)(viewer, pick);
             }
         });
     };
+    // A cancel, or a capture lost without a release (after one, a no-op).
     let pointer_cancel = move |event: PointerEvent| {
-        let (x, y) = position(&event);
-        surface.with_viewer(|viewer| viewer.pointer_up(event.pointer_id(), x, y));
+        surface.with_viewer(|viewer| viewer.pointer_cancel(event.pointer_id()));
     };
     let wheel = move |event: WheelEvent| {
         event.prevent_default();
@@ -336,8 +350,14 @@ pub fn SurfaceCanvas(
             on:pointermove=pointer_move
             on:pointerup=pointer_up
             on:pointercancel=pointer_cancel
+            on:lostpointercapture=pointer_cancel
             on:wheel=wheel
             on:contextmenu=|event| event.prevent_default()
+            on:blur=move |_| {
+                if let Some(element) = canvas.get_untracked() {
+                    let _ = element.remove_attribute("data-quiet-focus");
+                }
+            }
         ></canvas>
         <p id=description_id class="visually-hidden">{description}</p>
     }
@@ -366,6 +386,7 @@ fn start(surface: Surface) {
             return false;
         };
         StoredValue::new_local(ResizeGuard::observe(&element, surface));
+        StoredValue::new_local(TilePointHook::install(&element, surface));
         let resize = window_event_listener(leptos::ev::resize, move |_| surface.request());
         on_cleanup(move || resize.remove());
         spawn_scoped(async move {
@@ -432,6 +453,51 @@ impl Drop for ResizeGuard {
         if let Some(observer) = &self.observer {
             observer.disconnect();
         }
+    }
+}
+
+/// Name of the canvas property holding the [`TilePointHook`] function.
+const TILE_POINT: &str = "overseerTilePoint";
+
+/// Test hook: `canvas.overseerTilePoint(room, x, y)` answers the CSS pixel of the canvas
+/// (`[x, y]`, as `offsetX`/`offsetY`) where the top centre of tile `(x, y)` of `room` (a name
+/// such as `W1N1`) is drawn: a click there picks the tile. `null` before the viewer exists,
+/// for an unknown room name, or behind the camera. End-to-end tests click objects through
+/// it; removed with the canvas.
+struct TilePointHook {
+    element: web_sys::HtmlCanvasElement,
+    /// Kept alive while installed.
+    _callback: Closure<dyn Fn(String, u8, u8) -> wasm_bindgen::JsValue>,
+}
+
+impl TilePointHook {
+    /// Installs the hook on `element`.
+    fn install(element: &web_sys::HtmlCanvasElement, surface: Surface) -> Self {
+        let callback = Closure::<dyn Fn(String, u8, u8) -> wasm_bindgen::JsValue>::new(
+            move |room: String, x: u8, y: u8| {
+                room.parse()
+                    .ok()
+                    .and_then(|room| {
+                        surface
+                            .with_viewer_quiet(|viewer| viewer.tile_point(room, x, y))
+                            .flatten()
+                    })
+                    .map_or(wasm_bindgen::JsValue::NULL, |(x, y)| {
+                        js_sys::Array::of2(&x.into(), &y.into()).into()
+                    })
+            },
+        );
+        let _ = js_sys::Reflect::set(element, &TILE_POINT.into(), callback.as_ref());
+        Self {
+            element: element.clone(),
+            _callback: callback,
+        }
+    }
+}
+
+impl Drop for TilePointHook {
+    fn drop(&mut self) {
+        let _ = js_sys::Reflect::delete_property(&self.element, &TILE_POINT.into());
     }
 }
 

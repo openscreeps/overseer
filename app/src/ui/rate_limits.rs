@@ -17,6 +17,7 @@ use web_sys::KeyboardEvent;
 use crate::profiles::ServerKind;
 use crate::rate_limits::{self, Actions};
 use crate::state::AppState;
+use crate::ui::icon::{Icon, IconKind};
 use crate::ui::world::MapState;
 
 /// The panel, the clock of relative times and the reset flow; `Copy`, provided as context.
@@ -203,7 +204,10 @@ pub fn RateLimitsPanel() -> impl IntoView {
         });
         if limits.is_empty() {
             return view! {
-                <p class="muted">"No endpoint has reported a rate limit in this session yet."</p>
+                <p class="empty-state">
+                    <Icon kind=IconKind::Check />
+                    "No endpoint has reported a rate limit in this session yet."
+                </p>
             }
             .into_any();
         }
@@ -247,7 +251,7 @@ pub fn RateLimitsPanel() -> impl IntoView {
         let left = rate_limits::time_until(until, ui.now.get())
             .map_or_else(|| "shortly".to_owned(), |left| format!("in {left}"));
         Some(view! {
-            <p>
+            <p class="notice">
                 {format!(
                     "The map's room owners wait for the map-stats limit; loading resumes {left}."
                 )}
@@ -292,15 +296,20 @@ pub fn RateLimitsPanel() -> impl IntoView {
                     on:keydown=keydown
                 >
                     <div class="panel-head">
-                        <h2 id="rate-limits-title">"Rate limits"</h2>
+                        <h2 id="rate-limits-title">
+                            <Icon kind=IconKind::Gauge />
+                            "Rate limits"
+                        </h2>
                         <button
                             type="button"
-                            class="link"
+                            class="icon-button sm ghost"
                             node_ref=close
                             aria-label="Close rate limits"
+                            data-tip="Close"
+                            data-tip-pos="left"
                             on:click=move |_| ui.open.set(false)
                         >
-                            "Close"
+                            <Icon kind=IconKind::Close />
                         </button>
                     </div>
                     {waiting}

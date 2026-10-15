@@ -25,14 +25,56 @@ pub const VERSION: u32 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The right drawer (room info, inspector) is open.
+    /// The right drawer (room, objects, console) is open.
     pub drawer: bool,
+    /// The drawer's width in CSS pixels (clamped to the window when shown).
+    #[serde(deserialize_with = "lenient_width")]
+    pub drawer_width: u16,
+    /// The drawer's tab.
+    #[serde(deserialize_with = "lenient")]
+    pub drawer_tab: DrawerTab,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { drawer: true }
+        Self {
+            drawer: true,
+            drawer_width: DRAWER_WIDTH,
+            drawer_tab: DrawerTab::Room,
+        }
     }
+}
+
+/// The drawer's default width in CSS pixels.
+pub const DRAWER_WIDTH: u16 = 384;
+
+/// A tab of the drawer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DrawerTab {
+    /// The room in focus: preview and facts.
+    #[default]
+    Room,
+    /// The room's objects and the inspector.
+    Objects,
+    /// The account's console.
+    Console,
+}
+
+/// A tab that does not decode is the default one, leaving the other settings.
+fn lenient<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(T::deserialize(value).unwrap_or_default())
+}
+
+/// A width that does not decode is [`DRAWER_WIDTH`], leaving the other settings.
+fn lenient_width<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(u16::deserialize(value).unwrap_or(DRAWER_WIDTH))
 }
 
 /// How long known world bounds are trusted before the world is measured again, in
@@ -244,7 +286,7 @@ mod tests {
 
     use overseer::map::RoomRect;
 
-    use super::{Bounds, Place, Saved, Settings};
+    use super::{Bounds, DRAWER_WIDTH, DrawerTab, Place, Saved, Settings};
     use crate::route::Route;
 
     fn camera() -> CameraState {
@@ -262,7 +304,11 @@ mod tests {
     fn round_trips() {
         let mut saved = Saved {
             route: Route::parse("#/screeps.com/shard3/W8N3"),
-            settings: Settings { drawer: false },
+            settings: Settings {
+                drawer: false,
+                drawer_width: 512,
+                drawer_tab: DrawerTab::Console,
+            },
             ..Saved::default()
         };
         let place = saved.place_mut("https://screeps.com/");
@@ -296,7 +342,10 @@ mod tests {
         ] {
             assert_eq!(Saved::parse(json), Saved::default(), "{json:?}");
         }
-        assert!(Saved::default().settings.drawer);
+        let settings = Saved::default().settings;
+        assert!(settings.drawer);
+        assert_eq!(settings.drawer_width, DRAWER_WIDTH);
+        assert_eq!(settings.drawer_tab, DrawerTab::Room);
     }
 
     #[test]
@@ -305,7 +354,7 @@ mod tests {
             "version": 9,
             "future": true,
             "route": "#/not a route",
-            "settings": {"drawer": false, "unknown": 1},
+            "settings": {"drawer": false, "unknown": 1, "drawer_width": -5, "drawer_tab": "maps"},
             "places": {
                 "http://a/": {
                     "shard": "shard1",
@@ -324,7 +373,17 @@ mod tests {
         });
         let saved = Saved::parse(Some(&json.to_string()));
         assert_eq!(saved.route, None);
-        assert!(!saved.settings.drawer);
+        assert!(
+            !saved.settings.drawer,
+            "kept next to settings that do not decode"
+        );
+        assert_eq!(saved.settings.drawer_width, DRAWER_WIDTH);
+        assert_eq!(saved.settings.drawer_tab, DrawerTab::Room);
+        let tab = Saved::parse(Some(
+            r#"{"settings": {"drawer_tab": "objects", "drawer_width": 300}}"#,
+        ));
+        assert_eq!(tab.settings.drawer_tab, DrawerTab::Objects);
+        assert_eq!(tab.settings.drawer_width, 300);
         let place = &saved.places["http://a/"];
         assert_eq!(place.shard.as_deref(), Some("shard1"));
         assert_eq!(place.mode, ViewMode::TopDown);

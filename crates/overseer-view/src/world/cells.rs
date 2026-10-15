@@ -22,11 +22,13 @@ const OWNED_PER_LEVEL: u8 = 10;
 const RESERVED: u8 = 80;
 const AREA: u8 = 100;
 const CLOSED_OVERLAY: u8 = 170;
-/// Tint strengths (of 255) over full-resolution terrain; the mix is linear, so bright owner
-/// colours need little to show while the terrain stays readable.
-const OWNED_TINT: u8 = 36;
-const RESERVED_TINT: u8 = 20;
-const AREA_TINT: u8 = 32;
+/// Accent strengths (of 255) over full-resolution terrain (`accent` in `common.wgsl`): the
+/// terrain takes the colour's hue at its own brightness (dark colours dim it), so walls,
+/// swamps and plains keep their contrast; a line of the colour runs inside the room border.
+/// The accent fades out at [`Lod::Detail`](crate::Lod::Detail).
+const OWNED_TINT: u8 = 64;
+const RESERVED_TINT: u8 = 40;
+const AREA_TINT: u8 = 56;
 const CLOSED_TINT: u8 = 150;
 
 /// What the overview keeps of a [`RoomStat`].
@@ -211,4 +213,20 @@ impl Cells {
     pub fn instances(&self) -> &[RoomInstance] {
         &self.instances
     }
+}
+
+/// The status and owner accent of `tint` (sRGB and strength) at `strength` (the accent's
+/// fade) over linear `color`: what `accent` in `common.wgsl` computes.
+#[cfg(test)]
+pub fn accent(color: glam::Vec3, tint: [u8; 4], strength: f32) -> glam::Vec3 {
+    let luminance = |color: glam::Vec3| color.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+    let [r, g, b, _] = crate::mesh::linear(u32::from_be_bytes([0, tint[0], tint[1], tint[2]]));
+    let rgb = glam::Vec3::new(r, g, b);
+    let t = (luminance(rgb) / 0.05).clamp(0.0, 1.0);
+    let hued = color * rgb;
+    let kept = hued * (luminance(color) / luminance(hued).max(1e-8));
+    color.lerp(
+        kept * (t * t * (3.0 - 2.0 * t)),
+        f32::from(tint[3]) / 255.0 * strength,
+    )
 }
