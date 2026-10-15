@@ -251,6 +251,12 @@ impl Socket {
     /// Sends queued commands, then waits for the next event. Returns `Ok(None)` once the socket
     /// is closed for good: the reconnect policy gave up.
     ///
+    /// Commands queued while handling a received frame (such as the subscriptions that follow
+    /// `auth ok`) are handed to the connection before that frame's event is returned, so a
+    /// server event published right after [`Event::Authenticated`] already finds them.
+    /// Subscriptions made by the application between calls are sent by the next call, or at
+    /// once with [`Self::flush`].
+    ///
     /// Lost connections are reported with [`SocketEvent::Disconnected`] and reopened after
     /// [`SocketEvent::Reconnecting`]; the subscriptions are sent again on the new connection
     /// (room states start over). `auth ok` tokens replace the client's token. With credentials,
@@ -268,6 +274,22 @@ impl Socket {
     /// errors of a sign-in after `auth failed`. The socket remains usable after either.
     pub async fn next(&mut self) -> Result<Option<SocketEvent>, Error> {
         poll_fn(|cx| self.poll_event(cx)).await
+    }
+
+    /// Sends queued commands (subscriptions, unsubscriptions) now instead of with the next call
+    /// to [`Self::next`]. Without an open connection they stay queued and are sent after it is
+    /// (re)opened and authenticated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WebSocket`] when the connection fails; the next call to [`Self::next`]
+    /// then reports the disconnection and reconnects.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        poll_fn(|cx| match &mut self.link {
+            Link::Open { connection, .. } => poll_send(connection, &mut self.session, cx),
+            Link::Backoff { .. } | Link::Opening { .. } | Link::Closed => Poll::Ready(Ok(())),
+        })
+        .await
     }
 
     /// Closes the connection normally; the socket does not reconnect.
@@ -448,7 +470,13 @@ fn poll_drive(
                 connection.pinged = false;
                 match message {
                     Message::Text(frame) => match session.handle_frame(&frame) {
-                        Ok(Some(event)) => return Poll::Ready(Step::Event(event)),
+                        Ok(Some(event)) => {
+                            // Commands this frame queued (subscriptions after `auth ok`) go out
+                            // before the event is returned. A send error resurfaces on the next
+                            // poll as a disconnection, so it is not reported here.
+                            let _ = poll_send(connection, session, cx);
+                            return Poll::Ready(Step::Event(event));
+                        }
                         Ok(None) => {}
                         Err(error) => return Poll::Ready(Step::Undecodable(error)),
                     },

@@ -303,6 +303,51 @@ async fn auth_ok_tokens_reach_the_http_client() {
 }
 
 #[tokio::test]
+async fn subscriptions_are_on_the_wire_when_authenticated_returns() {
+    let mut server = Server::start(
+        |request| match (request.path.as_str(), request.token.as_deref()) {
+            ("/api/version", _) => (200, VERSION.to_owned()),
+            ("/api/auth/me", Some(_)) => (200, ME.to_owned()),
+            _ => (401, r#"{"error":"unauthorized"}"#.to_owned()),
+        },
+        |_| true,
+    )
+    .await;
+    let client = Client::builder(server.url())
+        .token(Token::new("t1"))
+        .build()
+        .unwrap();
+    let mut socket = client.connect().await.unwrap();
+    socket.subscribe_code().unwrap();
+    let mut websocket = server.socket().await;
+    let (events, greeting) = tokio::join!(
+        descriptions_until(&mut socket, |event| matches!(
+            event,
+            SocketEvent::Event(Event::Authenticated)
+        )),
+        async {
+            let lines = server::receive(&mut websocket, 2).await;
+            server::send(&mut websocket, "auth ok t2").await;
+            lines
+        }
+    );
+    assert_eq!(events, ["connected", "Authenticated"]);
+    assert_eq!(greeting, ["gzip on", "auth t1"]);
+    // The socket is not polled again: an event the server publishes now (such as the `code`
+    // event of an upload made right after authenticating) must already find the subscription.
+    let subscribed = tokio::time::timeout(PATIENCE, server::receive(&mut websocket, 1)).await;
+    assert_eq!(
+        subscribed.expect("subscribed without another poll"),
+        ["subscribe user:u1/code"]
+    );
+    // Subscriptions made between polls go out with `flush`.
+    socket.subscribe_cpu().unwrap();
+    socket.flush().await.unwrap();
+    let flushed = tokio::time::timeout(PATIENCE, server::receive(&mut websocket, 1)).await;
+    assert_eq!(flushed.expect("flushed"), ["subscribe user:u1/cpu"]);
+}
+
+#[tokio::test]
 async fn the_socket_is_a_stream_that_ends_when_reconnects_run_out() {
     let mut server = Server::start(single_world, |index| index == 0).await;
     let client = Client::builder(server.url())
