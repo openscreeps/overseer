@@ -1,7 +1,12 @@
 //! A fake Screeps server: scripted HTTP routes and an echoing socket, recording what reaches it.
 
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, ready};
+use std::time::{Duration, Instant};
 
 use async_tungstenite::WebSocketStream;
 use async_tungstenite::tokio::TokioAdapter;
@@ -16,7 +21,8 @@ use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use url::Url;
 
@@ -49,6 +55,12 @@ impl Seen {
 struct Shared {
     prefix: String,
     base: String,
+    /// A request arriving on a connection idle for longer than this is dropped (see
+    /// [`Upstream::start_closing_idle`]); `None` keeps idle connections open.
+    idle: Option<Duration>,
+    connections: AtomicUsize,
+    /// `<method> <target>` of every dropped request.
+    dropped: Mutex<Vec<String>>,
     seen: Mutex<Vec<Seen>>,
     socket: mpsc::UnboundedSender<String>,
 }
@@ -62,14 +74,30 @@ pub struct Upstream {
 }
 
 impl Upstream {
-    /// Serves under `prefix` (`/` or `/season/`); other paths are 404.
+    /// Serves under `prefix` (`/` or `/season/`); other paths are 404. Connections stay open
+    /// for further requests.
     pub async fn start(prefix: &str) -> Self {
+        Self::launch(prefix, None).await
+    }
+
+    /// Like [`Self::start`], but a request arriving on a connection that idled for longer than
+    /// `idle` since its last answer is dropped unread, with its connection: what a client
+    /// sees when it reuses a connection as Node's keep-alive timeout closes it (the client cannot
+    /// have noticed the close yet).
+    pub async fn start_closing_idle(prefix: &str, idle: Duration) -> Self {
+        Self::launch(prefix, Some(idle)).await
+    }
+
+    async fn launch(prefix: &str, idle: Option<Duration>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}{prefix}", listener.local_addr().unwrap());
         let (socket_tx, socket) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             prefix: prefix.to_owned(),
             base: base.clone(),
+            idle,
+            connections: AtomicUsize::new(0),
+            dropped: Mutex::new(Vec::new()),
             seen: Mutex::new(Vec::new()),
             socket: socket_tx,
         });
@@ -77,17 +105,8 @@ impl Upstream {
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                let shared = Arc::clone(&accept);
-                tokio::spawn(async move {
-                    let service = service_fn(move |request| {
-                        let shared = Arc::clone(&shared);
-                        async move { Ok::<_, Infallible>(respond(&shared, request).await) }
-                    });
-                    let _ = http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service)
-                        .with_upgrades()
-                        .await;
-                });
+                accept.connections.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(serve(stream, Arc::clone(&accept)));
             }
         });
         Self {
@@ -99,16 +118,23 @@ impl Upstream {
 
     /// Every request received so far.
     pub fn seen(&self) -> Vec<Seen> {
-        self.shared
-            .seen
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.shared.seen).clone()
     }
 
     /// The path and query of every request received so far.
     pub fn targets(&self) -> Vec<String> {
         self.seen().into_iter().map(|seen| seen.target).collect()
+    }
+
+    /// The TCP connections accepted so far.
+    pub fn connections(&self) -> usize {
+        self.shared.connections.load(Ordering::SeqCst)
+    }
+
+    /// `<method> <target>` of every request dropped on an idle connection so far (not part of
+    /// [`Self::seen`]).
+    pub fn dropped(&self) -> Vec<String> {
+        lock(&self.shared.dropped).clone()
     }
 
     /// The next socket event: `open`, `text:<text>`, `binary:<bytes>`, `ping:<bytes>`,
@@ -118,6 +144,104 @@ impl Upstream {
             .await
             .expect("socket event in time")
             .expect("server running")
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Serves one connection with keep-alive and upgrades.
+async fn serve(stream: TcpStream, shared: Arc<Shared>) {
+    let idle_since = Arc::new(Mutex::new(None));
+    let connection = Connection {
+        stream,
+        shared: Arc::clone(&shared),
+        idle_since: Arc::clone(&idle_since),
+    };
+    let service = service_fn(move |request| {
+        let shared = Arc::clone(&shared);
+        let idle_since = Arc::clone(&idle_since);
+        async move {
+            let response = respond(&shared, request).await;
+            // An upgraded connection carries the socket from now on.
+            if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+                *lock(&idle_since) = Some(Instant::now());
+            }
+            Ok::<_, Infallible>(response)
+        }
+    });
+    let _ = http1::Builder::new()
+        .serve_connection(TokioIo::new(connection), service)
+        .with_upgrades()
+        .await;
+}
+
+/// A connection that drops a request arriving after it idled for longer than [`Shared::idle`].
+struct Connection {
+    stream: TcpStream,
+    shared: Arc<Shared>,
+    /// When the last answer was made; `None` while none was, while a request is being read and
+    /// after an upgrade.
+    idle_since: Arc<Mutex<Option<Instant>>>,
+}
+
+impl AsyncRead for Connection {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let since = *lock(&this.idle_since);
+        if let (Some(idle), Some(since)) = (this.shared.idle, since) {
+            let mut head = [0; 512];
+            let mut head = ReadBuf::new(&mut head);
+            ready!(this.stream.poll_peek(cx, &mut head))?;
+            if !head.filled().is_empty() && since.elapsed() > idle {
+                let head = String::from_utf8_lossy(head.filled());
+                let request = head.split(' ').take(2).collect::<Vec<_>>().join(" ");
+                lock(&this.shared.dropped).push(request);
+                // hyper gives up the connection and closes it, the request unread.
+                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
+            }
+        }
+        let before = buf.filled().len();
+        ready!(Pin::new(&mut this.stream).poll_read(cx, buf))?;
+        if buf.filled().len() > before {
+            *lock(&this.idle_since) = None;
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for Connection {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
     }
 }
 
@@ -144,16 +268,12 @@ async fn respond(shared: &Arc<Shared>, request: Request<Incoming>) -> Response<F
     } else {
         body.collect().await.unwrap().to_bytes()
     };
-    shared
-        .seen
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(Seen {
-            method: parts.method.to_string(),
-            target: target.clone(),
-            headers,
-            body,
-        });
+    lock(&shared.seen).push(Seen {
+        method: parts.method.to_string(),
+        target: target.clone(),
+        headers,
+        body,
+    });
     let Some(route) = parts.uri.path().strip_prefix(shared.prefix.as_str()) else {
         return reply(StatusCode::NOT_FOUND, "wrong prefix");
     };

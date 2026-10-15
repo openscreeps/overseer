@@ -8,7 +8,7 @@ use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use hyper::body::Incoming;
 
 use crate::MAX_REQUEST_BODY;
-use crate::serve::{Body, State, status};
+use crate::serve::{Body, State, retryable, status};
 
 /// The request headers forwarded to the upstream; everything else (cookies included) stays.
 const REQUEST_HEADERS: [&str; 5] = [
@@ -30,7 +30,8 @@ const RESPONSE_HEADERS: [&str; 6] = [
     "content-encoding",
 ];
 
-/// Forwards `request` to the upstream and relays the answer.
+/// Forwards `request` to the upstream and relays the answer. A request that lost its pooled
+/// connection is sent once more on a new one when that is safe (see [`retryable`]).
 pub(crate) async fn forward(state: &State, request: Request<Incoming>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     if !forwarded(&parts.method) {
@@ -66,7 +67,18 @@ pub(crate) async fn forward(state: &State, request: Request<Incoming>) -> Respon
     if has_body {
         upstream = upstream.body(body);
     }
-    match upstream.send().await {
+    let Ok(request) = upstream.build() else {
+        return status(StatusCode::BAD_GATEWAY);
+    };
+    // The body is collected, so the copy for a retry shares its bytes.
+    let retry = request.try_clone();
+    let response = match (state.http.execute(request).await, retry) {
+        (Err(error), Some(retry)) if retryable(retry.method(), &error) => {
+            state.fresh_http.execute(retry).await
+        }
+        (response, _) => response,
+    };
+    match response {
         Ok(response) => relay(response),
         Err(error) if error.is_timeout() => status(StatusCode::GATEWAY_TIMEOUT),
         Err(_) => status(StatusCode::BAD_GATEWAY),

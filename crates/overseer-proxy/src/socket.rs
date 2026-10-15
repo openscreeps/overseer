@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::cors::Origin;
-use crate::serve::{Body, SOCKET_PATH, State, millis, status};
+use crate::serve::{Body, SOCKET_PATH, State, millis, retryable, status};
 use crate::{HANDSHAKE_TIMEOUT, MAX_SOCKET_MESSAGE};
 
 /// How long the second direction may take to finish once the first has ended, and how long
@@ -67,7 +67,7 @@ pub(crate) async fn upgrade(
     let Some(url) = state.upstream_url(path_and_query) else {
         return status(StatusCode::NOT_FOUND);
     };
-    let upstream = match timeout(HANDSHAKE_TIMEOUT, connect(&state.http, url)).await {
+    let upstream = match timeout(HANDSHAKE_TIMEOUT, connect(state, url)).await {
         Ok(Ok(upstream)) => upstream,
         Ok(Err(refused)) => return status(refused),
         Err(_) => return status(StatusCode::GATEWAY_TIMEOUT),
@@ -96,15 +96,17 @@ fn has_token(headers: &HeaderMap, name: &HeaderName, token: &str) -> bool {
         .any(|item| item.trim().eq_ignore_ascii_case(token))
 }
 
-/// Opens the upstream socket; a refusal keeps the upstream's status, other failures are
+/// Opens the upstream socket, once more on a new connection when the pooled one was lost before
+/// any response (see [`retryable`]); a refusal keeps the upstream's status, other failures are
 /// `502 Bad Gateway`.
-async fn connect(http: &reqwest::Client, url: url::Url) -> Result<Upstream, StatusCode> {
-    let response = http
-        .get(url)
-        .upgrade()
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+async fn connect(state: &State, url: url::Url) -> Result<Upstream, StatusCode> {
+    let response = match handshake(&state.http, url.clone()).await {
+        Err(reqwest_websocket::Error::Reqwest(error)) if retryable(&Method::GET, &error) => {
+            handshake(&state.fresh_http, url).await
+        }
+        response => response,
+    }
+    .map_err(|_| StatusCode::BAD_GATEWAY)?;
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         return Err(response.status());
     }
@@ -112,6 +114,14 @@ async fn connect(http: &reqwest::Client, url: url::Url) -> Result<Upstream, Stat
         .into_websocket()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)
+}
+
+/// Sends the socket upgrade request to `url` through `http`.
+async fn handshake(
+    http: &reqwest::Client,
+    url: url::Url,
+) -> Result<reqwest_websocket::UpgradeResponse, reqwest_websocket::Error> {
+    http.get(url).upgrade().send().await
 }
 
 /// Relays frames between the client and the upstream until both sides are closed, one side

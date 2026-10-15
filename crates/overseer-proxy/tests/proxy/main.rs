@@ -1,7 +1,8 @@
 //! The proxy against an in-process fake upstream: forwarding, header allow-lists, statuses,
-//! redirects, static files, limits, CORS and the socket relay (the logs are checked in
-//! `tests/logs`, alone in their process).
+//! redirects, static files, limits, CORS, the socket relay and retries on pooled connections
+//! the upstream closed (the logs are checked in `tests/logs`, alone in their process).
 
+mod keep_alive;
 mod upstream;
 
 use std::io::Write;

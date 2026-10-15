@@ -59,6 +59,18 @@
 //! Socket messages from clients are capped at [`MAX_SOCKET_MESSAGE`]. Larger bodies get
 //! `413 Payload Too Large`, unreachable upstreams `502 Bad Gateway` (`504` on timeouts).
 //!
+//! # Upstream connections
+//!
+//! Connections to the upstream are kept alive for reuse, but for at most 4 s of idling: Screeps
+//! servers run on Node, which closes idle keep-alive connections after 5 s, and a request sent
+//! on a connection as the upstream closes it is lost. A request that loses its reused
+//! connection anyway is sent once more, on a new connection, only when that is safe: a `GET` or
+//! `HEAD` request or a socket upgrade (all idempotent) whose connection was reset or closed
+//! before any response arrived, or a request of any method that the connection closed before it
+//! was written. Other requests that may have reached the upstream (`POST`, `PUT`, `PATCH`,
+//! `DELETE`: console commands, code uploads, market orders) are never sent twice and get
+//! `502 Bad Gateway`, as do failed connects; timeouts get `504`.
+//!
 //! # Logs and secrets
 //!
 //! The proxy logs through `tracing`, one line per request with the method, the path without the

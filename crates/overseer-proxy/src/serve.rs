@@ -1,6 +1,7 @@
 //! Accepting connections and routing requests.
 
 use std::convert::Infallible;
+use std::error::Error as _;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +42,11 @@ const USER_AGENT: &str = concat!("overseer-proxy/", env!("CARGO_PKG_VERSION"));
 /// Longest wait for the next piece of an upstream response.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long an idle upstream connection stays pooled for reuse. Screeps servers run on Node,
+/// which closes idle keep-alive connections after 5 s; a request sent on a connection as it
+/// closes is lost, so pooled connections are dropped before that.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// Shared by every connection of one proxy.
 pub(crate) struct State {
     /// The upstream base, ending with `/`.
@@ -48,6 +54,9 @@ pub(crate) struct State {
     origins: Origins,
     /// The upstream client: no redirects, no decompression, no cookies.
     pub(crate) http: reqwest::Client,
+    /// Like `http`, but keeps no idle connections, so each request opens a new one: the retry
+    /// of a request whose pooled connection was lost (see [`retryable`]).
+    pub(crate) fresh_http: reqwest::Client,
     static_files: Option<ServeDir>,
     /// Cancelled when the proxy stops.
     pub(crate) stop: CancellationToken,
@@ -65,22 +74,19 @@ impl State {
     ) -> Result<Self, ProxyError> {
         // Err only means a provider is already installed, which then stays in use.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            // Bodies pass through as the upstream encoded them (gzip room history).
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
-            .user_agent(USER_AGENT)
-            .connect_timeout(HANDSHAKE_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
+        let http = upstream_client()
+            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+            .build()
+            .map_err(ProxyError::Client)?;
+        let fresh_http = upstream_client()
+            .pool_max_idle_per_host(0)
             .build()
             .map_err(ProxyError::Client)?;
         Ok(Self {
             upstream,
             origins,
             http,
+            fresh_http,
             static_files: static_dir.map(ServeDir::new),
             stop,
             tasks,
@@ -96,6 +102,57 @@ impl State {
             .starts_with(self.upstream.as_str())
             .then_some(url)
     }
+}
+
+/// The settings shared by the upstream clients: no redirects, no decompression, the proxy's
+/// `User-Agent`, the connect and read timeouts.
+fn upstream_client() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // Bodies pass through as the upstream encoded them (gzip room history).
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .user_agent(USER_AGENT)
+        .connect_timeout(HANDSHAKE_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+}
+
+/// Whether a `method` request that failed with `error` may be sent once more, on a new
+/// connection ([`State::fresh_http`]): when hyper reports it was never written (any method), or
+/// when it is idempotent (`GET`, `HEAD`, socket upgrades) and its connection was reset or closed
+/// before any response arrived. Connect errors, timeouts and failures after a response are not
+/// retried, and neither is any other method that may have reached the upstream.
+pub(crate) fn retryable(method: &Method, error: &reqwest::Error) -> bool {
+    if !error.is_request() || error.is_connect() || error.is_timeout() {
+        return false;
+    }
+    let idempotent = *method == Method::GET || *method == Method::HEAD;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(cause) = cause.downcast_ref::<hyper::Error>() {
+            // hyper hands a request back as canceled only before it starts writing it.
+            if cause.is_canceled() {
+                return true;
+            }
+            if cause.is_incomplete_message() || cause.is_closed() {
+                return idempotent;
+            }
+        }
+        if let Some(cause) = cause.downcast_ref::<io::Error>() {
+            return idempotent
+                && matches!(
+                    cause.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::UnexpectedEof
+                );
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// Accepts connections until the proxy stops.
