@@ -76,6 +76,11 @@ pub enum WorldEvent {
     /// The overviews one request brought, each with a new [`RoomStat::fetched_at`] (changed
     /// or not): the app persists them. Nearest first.
     Stats(Vec<(RoomCoord, Arc<RoomStat>)>),
+    /// The rate limit started holding back wanted overviews, until its reset (milliseconds
+    /// since the Unix epoch), or stopped (`None`): the change of
+    /// [`WorldProgress::stats_paused_until`], which carries no data of its own. See
+    /// [`WorldMap::recheck_rate_limit`].
+    StatsPaused(Option<u64>),
     /// The latest minimap of a room.
     Minimap(RoomCoord, Arc<RoomMap>),
     /// A room's minimap is no longer live (it left [`Interest::minimaps`]).
@@ -100,6 +105,10 @@ pub struct WorldProgress {
     /// Rooms whose overview is wanted: every room of the world while [`Interest::stats`] is
     /// set and a user is signed in, else none.
     pub stats_wanted: usize,
+    /// While overview requests wait for the reset of the endpoint's rate limit (none left,
+    /// or only the near share left while far rooms are wanted): when it resets, in
+    /// milliseconds since the Unix epoch. `None` when not paused.
+    pub stats_paused_until: Option<u64>,
 }
 
 impl WorldProgress {
@@ -150,7 +159,11 @@ impl WorldProgress {
 ///   may use only [`STATS_FAR_SHARE`] percent of the window (42 of 60), so near rooms always
 ///   refresh; none goes out while none is left, and after HTTP 429 the next waits for the
 ///   reset (60 s when the server-wide limit refused it). Other failures are retried after
-///   30 s.
+///   30 s. While the limit holds back wanted overviews, [`WorldProgress::stats_paused_until`]
+///   says until when ([`WorldEvent::StatsPaused`] reports each change). The user can lift
+///   the limit early (screeps.com's reset page); [`Self::recheck_rate_limit`] then resumes
+///   without waiting for the reset. It sends nothing of its own and does nothing while not
+///   paused.
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
 /// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order.
@@ -339,6 +352,21 @@ impl WorldMap {
         self.work.dirty = true;
     }
 
+    /// After the user lifted the overviews' rate limit (screeps.com's reset page): while
+    /// overview loading is paused ([`WorldProgress::stats_paused_until`]), forgets the stale
+    /// limit ([`net::Client::forget_rate_limit`](crate::net::Client::forget_rate_limit)) and
+    /// the wait for its reset, so the next request goes out at once regardless of the
+    /// budget; its response's headers record the real limit, and loading resumes when it
+    /// succeeds (it pauses again when the limit still holds). Returns whether it was paused;
+    /// while not paused nothing changes and nothing is sent.
+    pub fn recheck_rate_limit(&mut self) -> bool {
+        let paused = self.work.stats.recheck(self.overseer.client());
+        if paused {
+            self.work.dirty = true;
+        }
+        paused
+    }
+
     /// How much of what is wanted is known.
     #[must_use]
     pub fn progress(&self) -> WorldProgress {
@@ -350,6 +378,7 @@ impl WorldMap {
             terrain_wanted,
             stats_known,
             stats_wanted,
+            stats_paused_until: self.work.stats.paused(),
         }
     }
 
@@ -368,6 +397,10 @@ impl WorldMap {
                 return Err(Closed);
             }
             self.plan();
+            // Planning reports pauses of its own.
+            if !self.work.events.is_empty() {
+                continue;
+            }
             let Self {
                 overseer,
                 status,
@@ -408,7 +441,9 @@ impl WorldMap {
         let shard = self.shard.as_deref();
         let client = self.overseer.client();
         let terrain = work.terrain.plan(&self.map, client, shard, now);
-        let stats = work.stats.plan(&self.map, client, shard, now);
+        let stats = work
+            .stats
+            .plan(&self.map, client, shard, now, &mut work.events);
         let due = match (terrain, stats) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (due, None) | (None, due) => due,

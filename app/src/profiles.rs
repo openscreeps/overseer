@@ -46,6 +46,11 @@ pub struct SavedUser {
     /// Username; `None` until the account chose one.
     #[serde(default)]
     pub username: Option<String>,
+    /// How the account signed in on screeps.com: `Some(true)` with an API token (its rate limits
+    /// can be lifted on screeps.com's reset page), `Some(false)` with a password (a session
+    /// token, which the reset page does not take), `None` when saved before the app recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<bool>,
 }
 
 /// A saved server.
@@ -355,6 +360,13 @@ mod tests {
         local.user = Some(SavedUser {
             id: "u1".to_owned(),
             username: Some("Player".to_owned()),
+            api_token: Some(false),
+        });
+        let official = profiles.server_mut(OFFICIAL_URL).unwrap();
+        official.user = Some(SavedUser {
+            id: "u2".to_owned(),
+            username: None,
+            api_token: Some(true),
         });
         profiles.add(local).unwrap();
         let parsed = Profiles::parse(Some(&profiles.to_json()));
@@ -387,7 +399,9 @@ mod tests {
             official.user,
             Some(SavedUser {
                 id: "1".to_owned(),
-                username: None
+                username: None,
+                // Saved before the app recorded how the account signed in.
+                api_token: None,
             })
         );
         assert_eq!(profiles.servers[1].url, "http://old.example:21025/");

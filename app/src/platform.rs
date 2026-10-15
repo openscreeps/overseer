@@ -5,6 +5,7 @@
 //! | Servers | through the shell's proxy (`proxy_url`) | directly, or the page's own `overseer-proxy` ([`crate::connect`]) |
 //! | Secrets (tokens, server passwords) | OS credential store (`secret_*` commands) | `localStorage` under `overseer.secret.<key>`, readable by anything running on the page's origin |
 //! | External links | system browser (`tauri-plugin-opener`) | new tab |
+//! | screeps.com's rate-limit reset page ([`Platform::open_reset_page`]) | system browser; the app rechecks when its window regains focus | popup that keeps this page as its opener; the app resumes on the page's success message |
 //! | Popped-out rooms | a native window per route (`open_window`, size and position remembered) | `window.open` popup per route |
 //!
 //! Saved profiles ([`crate::profiles`]) and state ([`crate::saved`]) are in `localStorage`
@@ -183,6 +184,35 @@ impl Platform {
             .open_with_url_and_target_and_features(url, "_blank", "noopener,noreferrer")
             .map(drop)
             .map_err(|error| js_message(&error))
+    }
+
+    /// Opens screeps.com's rate-limit reset page `url` ([`crate::rate_limits::reset_url`]):
+    /// in the shell, the system browser (the page cannot reach the app; recheck when the
+    /// window regains focus); in a browser, a popup that keeps this page as its opener, so
+    /// the page's success message reaches this window.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when it cannot be opened (a blocked popup).
+    pub async fn open_reset_page(&self, url: &str) -> Result<(), String> {
+        if self.tauri {
+            return self.open_external(url).await;
+        }
+        let window = web_sys::window().ok_or_else(|| "no window".to_owned())?;
+        let opened = window
+            .open_with_url_and_target_and_features(
+                url,
+                "overseer_rate_limit_reset",
+                "popup,width=520,height=720",
+            )
+            .map_err(|error| js_message(&error))?;
+        match opened {
+            Some(opened) => {
+                let _ = opened.focus();
+                Ok(())
+            }
+            None => Err("the browser blocked the window; allow popups for this page".to_owned()),
+        }
     }
 }
 

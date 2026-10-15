@@ -72,6 +72,18 @@ impl Session {
     }
 }
 
+/// How a session began, which decides what [`AppState::begin`] remembers of the sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// Resumed from the stored token: the saved sign-in stays.
+    Resumed,
+    /// Signed in (or registered) with a name or e-mail and a password; the name, when given,
+    /// fills the sign-in form next time.
+    Password(Option<String>),
+    /// Signed in with an API token (screeps.com).
+    ApiToken,
+}
+
 /// Everything the components share; `Copy`, provided as context.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -298,7 +310,7 @@ impl AppState {
         let outcome = self.connect_saved(&server).await;
         self.resuming.set_value(None);
         match outcome {
-            Ok(overseer) => self.begin(&server.url, overseer, None),
+            Ok(overseer) => self.begin(&server.url, overseer, Start::Resumed),
             Err(screen) => self.screen.set(screen),
         }
         // The route may have moved on meanwhile.
@@ -348,9 +360,9 @@ impl AppState {
     }
 
     /// Starts using a connected session on the server with base URL `url`: saves who signed
-    /// in (and the `login` name used), persists every token, follows the connection and
-    /// notices, and shows the route's content (or the username form).
-    pub fn begin(self, url: &str, overseer: Overseer, login: Option<String>) {
+    /// in and how (`start`), persists every token, follows the connection and notices, and
+    /// shows the route's content (or the username form).
+    pub fn begin(self, url: &str, overseer: Overseer, start: Start) {
         let epoch = self.epoch.get_value() + 1;
         self.epoch.set_value(epoch);
         if let Some(previous) = self.session.get_untracked() {
@@ -366,11 +378,21 @@ impl AppState {
         let user_id = overseer.user_id().map(str::to_owned);
         self.update_profiles(|profiles| {
             if let Some(server) = profiles.server_mut(url) {
-                if login.is_some() {
-                    server.login = login;
+                let saved = server.user.take();
+                let api_token = match &start {
+                    Start::Resumed => saved.as_ref().and_then(|user| user.api_token),
+                    Start::Password(_) => Some(false),
+                    Start::ApiToken => Some(true),
+                };
+                if let Start::Password(Some(login)) = start {
+                    server.login = Some(login);
                 }
-                let username = server.user.take().and_then(|user| user.username);
-                server.user = user_id.map(|id| SavedUser { id, username });
+                let username = saved.and_then(|user| user.username);
+                server.user = user_id.map(|id| SavedUser {
+                    id,
+                    username,
+                    api_token,
+                });
             }
         });
         self.follow_tokens(epoch, url, &overseer);
@@ -516,7 +538,7 @@ impl AppState {
         };
         match session::connect(&self.platform(), &session.server, auth, None).await {
             Ok(overseer) => {
-                self.begin(&session.server, overseer, None);
+                self.begin(&session.server, overseer, Start::Password(None));
                 Ok(())
             }
             Err(failure) => {

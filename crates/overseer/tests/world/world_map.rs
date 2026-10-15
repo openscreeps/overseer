@@ -1,7 +1,7 @@
 //! The world map: bounds (measured and known), interest diffing, whole-world terrain batching,
 //! absent rooms and seeding, progress, overview near/far lifetimes, seeding and budget split,
-//! minimap cap, detail priority, refusals (stale ones behind barriers) and terrain reuse,
-//! cancel safety.
+//! rate-limit pauses and rechecks, minimap cap, detail priority, refusals (stale ones behind
+//! barriers) and terrain reuse, cancel safety.
 //!
 //! Tests on paused time drive [`WorldMap::next`] by yielding (see [`event`]): a runtime that
 //! never idles never advances paused time on its own, so only `tokio::time::advance` moves it.
@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{FutureExt, StreamExt};
+use overseer::core::api::endpoints;
 use overseer::map::{
     DetailState, Interest, MINIMAP_CAP, RoomCoord, RoomRect, RoomStat, RoomStatus,
     STATS_BATCH_SECTORS, STATS_FAR_TTL, STATS_TTL, TERRAIN_BATCH, WorldEvent, WorldMap,
@@ -186,8 +187,16 @@ async fn event(world: &mut WorldMap) -> WorldEvent {
     }
 }
 
+/// Whether `event` only reports a state: terrain (or its absence) and overview pauses.
+const fn is_quiet(event: &WorldEvent) -> bool {
+    matches!(
+        event,
+        WorldEvent::Terrain(..) | WorldEvent::NoTerrain(..) | WorldEvent::StatsPaused(_)
+    )
+}
+
 /// Drives `next` for a while without moving the clock and fails on any event but terrain
-/// (or its absence).
+/// (or its absence) and overview pauses.
 async fn quiet(world: &mut WorldMap) {
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_millis(300) {
@@ -195,17 +204,14 @@ async fn quiet(world: &mut WorldMap) {
             biased;
             event = world.next() => {
                 let event = event.unwrap();
-                assert!(
-                    matches!(event, WorldEvent::Terrain(..) | WorldEvent::NoTerrain(..)),
-                    "unexpected {event:?}"
-                );
+                assert!(is_quiet(&event), "unexpected {event:?}");
             }
             () = tokio::task::yield_now() => {}
         }
     }
 }
 
-/// Drives `next` (failing on events but terrain) until `done` holds.
+/// Drives `next` (failing on events but terrain and overview pauses) until `done` holds.
 async fn settle(world: &mut WorldMap, mut done: impl FnMut() -> bool) {
     let start = std::time::Instant::now();
     while !done() {
@@ -214,10 +220,7 @@ async fn settle(world: &mut WorldMap, mut done: impl FnMut() -> bool) {
             biased;
             event = world.next() => {
                 let event = event.unwrap();
-                assert!(
-                    matches!(event, WorldEvent::Terrain(..) | WorldEvent::NoTerrain(..)),
-                    "unexpected {event:?}"
-                );
+                assert!(is_quiet(&event), "unexpected {event:?}");
             }
             () = tokio::task::yield_now() => {}
         }
@@ -444,11 +447,22 @@ async fn whole_world_terrain_is_batched_nearest_first_once_per_session() {
     assert_eq!(requested(&server, "/api/game/rooms").len(), 4);
 }
 
-/// The next overviews, skipping terrain events.
+/// The next overviews, skipping terrain events and overview pauses.
 async fn stats(world: &mut WorldMap) -> Vec<(RoomCoord, Arc<RoomStat>)> {
     loop {
         match event(world).await {
             WorldEvent::Stats(stats) => return stats,
+            event if is_quiet(&event) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// The next pause change of overview loading, skipping terrain events.
+async fn paused(world: &mut WorldMap) -> Option<u64> {
+    loop {
+        match event(world).await {
+            WorldEvent::StatsPaused(until) => return until,
             WorldEvent::Terrain(..) | WorldEvent::NoTerrain(..) => {}
             other => panic!("unexpected {other:?}"),
         }
@@ -715,6 +729,7 @@ async fn far_overviews_leave_the_near_share_of_the_budget_and_a_429_waits_for_th
     advance(&mut world, Duration::from_secs(300)).await;
     quiet(&mut world).await;
     assert_eq!(map_stats(&server).len(), 2);
+    assert!(world.progress().stats_paused_until.is_some());
 
     // New near rooms still go out: the 429 holds them until its reset.
     world.set_interest(&Interest {
@@ -728,6 +743,7 @@ async fn far_overviews_leave_the_near_share_of_the_budget_and_a_429_waits_for_th
     advance(&mut world, Duration::from_secs(60)).await;
     quiet(&mut world).await;
     assert_eq!(map_stats(&server).len(), 3);
+    assert!(world.progress().stats_paused_until.is_some());
     advance(&mut world, Duration::from_secs(65)).await;
     let near = stats(&mut world).await;
     assert!(rooms_of(near.iter().map(|(room, _)| room)).is_subset(&corner));
@@ -740,6 +756,127 @@ async fn far_overviews_leave_the_near_share_of_the_budget_and_a_429_waits_for_th
     }
     assert_eq!(world.progress().stats_known, 6400);
     assert!(map_stats(&server).len() <= 6);
+    quiet(&mut world).await;
+    assert_eq!(world.progress().stats_paused_until, None);
+}
+
+/// The reset of `X-RateLimit-*` `headers` as [`WorldProgress::stats_paused_until`] reports
+/// it: milliseconds since the Unix epoch, a second after the reset (clock skew).
+///
+/// [`WorldProgress::stats_paused_until`]: overseer::map::WorldProgress::stats_paused_until
+fn paused_until(headers: &[(&'static str, String)]) -> u64 {
+    let (_, reset) = headers
+        .iter()
+        .find(|(name, _)| *name == "X-RateLimit-Reset")
+        .unwrap();
+    (reset.parse::<u64>().unwrap() + 1) * 1000
+}
+
+#[tokio::test]
+async fn a_paused_overview_load_says_until_when_and_a_recheck_after_a_reset_resumes() {
+    // 80 × 80 rooms, all far (no minimap): three requests of the nearest sectors.
+    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    // 18 of 60 left after the first: only the near share, so far rooms wait for the reset in
+    // half an hour.
+    let exhausted = rate_limit(60, 18, Duration::from_mins(30));
+    let until = paused_until(&exhausted);
+    lock(&fake.scripted).push_back((200, exhausted));
+    let (server, overseer, websocket) = connect(fake.routes()).await;
+    answer_pings(websocket);
+    let mut world = overseer.map().world(None).await.unwrap();
+    tokio::time::pause();
+
+    world.set_interest(&Interest {
+        stats: Some(world.bounds()),
+        ..Interest::default()
+    });
+    assert_eq!(world.progress().stats_paused_until, None);
+    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    // Paused, and until when: the reset as the server's clock says it.
+    assert_eq!(paused(&mut world).await, Some(until));
+    let progress = world.progress();
+    assert_eq!(progress.stats_paused_until, Some(until));
+    assert!(!progress.is_complete());
+    let left = until - epoch_millis();
+    assert!((1_790_000..=1_802_000).contains(&left), "{left} ms left");
+    advance(&mut world, Duration::from_secs(600)).await;
+    quiet(&mut world).await;
+    assert_eq!(map_stats(&server).len(), 1);
+
+    // A recheck while the limit still holds: one request, refused, and paused again.
+    lock(&fake.scripted).push_back((429, rate_limit(60, 0, Duration::from_mins(20))));
+    assert!(world.recheck_rate_limit());
+    assert_eq!(paused(&mut world).await, None);
+    let again = paused(&mut world).await;
+    assert!(again.is_some_and(|again| again < until), "{again:?}");
+    assert_eq!(world.progress().stats_paused_until, again);
+    assert_eq!(map_stats(&server).len(), 2);
+    advance(&mut world, Duration::from_secs(60)).await;
+    quiet(&mut world).await;
+    assert_eq!(map_stats(&server).len(), 2);
+
+    // The user lifted the limit: the recheck's request goes out at once, its headers record
+    // the real limit, and loading resumes until every room is known.
+    lock(&fake.scripted).push_back((200, rate_limit(60, 59, Duration::from_secs(3600))));
+    assert!(world.recheck_rate_limit());
+    assert_eq!(paused(&mut world).await, None);
+    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    assert_eq!(map_stats(&server).len(), 3);
+    assert_eq!(
+        overseer
+            .client()
+            .rate_limit::<endpoints::GameMapStats>()
+            .map(|limit| limit.remaining),
+        Some(59)
+    );
+    advance(&mut world, Duration::from_secs(2)).await;
+    assert_eq!(stats(&mut world).await.len(), 1400);
+    assert_eq!(map_stats(&server).len(), 4);
+    let progress = world.progress();
+    assert!(progress.is_complete());
+    assert_eq!(progress.stats_paused_until, None);
+}
+
+#[tokio::test]
+async fn a_recheck_while_not_paused_sends_nothing() {
+    let fake = Fake::new(40, rect("W19N19", "E19S19"));
+    // Few requests left, but nothing waits for them.
+    lock(&fake.scripted).extend([
+        (200, rate_limit(60, 40, Duration::from_mins(30))),
+        (200, rate_limit(60, 10, Duration::from_mins(30))),
+    ]);
+    let (server, overseer, websocket) = connect(fake.routes()).await;
+    answer_pings(websocket);
+    let mut world = overseer.map().world(None).await.unwrap();
+    tokio::time::pause();
+
+    // Before any request.
+    assert!(!world.recheck_rate_limit());
+    world.set_interest(&Interest {
+        stats: Some(world.bounds()),
+        minimaps: vec![room("W15N15")],
+        ..Interest::default()
+    });
+    // Between two requests, while pacing.
+    assert_eq!(stats(&mut world).await.len(), 400);
+    assert!(!world.recheck_rate_limit());
+    advance(&mut world, Duration::from_secs(2)).await;
+    assert_eq!(stats(&mut world).await.len(), 1200);
+    // Every room known and fresh: 10 left is no pause.
+    quiet(&mut world).await;
+    assert_eq!(world.progress().stats_paused_until, None);
+    assert!(!world.recheck_rate_limit());
+    advance(&mut world, Duration::from_secs(60)).await;
+    quiet(&mut world).await;
+    assert_eq!(map_stats(&server).len(), 2);
+    // The limit seen is kept.
+    assert_eq!(
+        overseer
+            .client()
+            .rate_limit::<endpoints::GameMapStats>()
+            .map(|limit| limit.remaining),
+        Some(10)
+    );
 }
 
 #[tokio::test]

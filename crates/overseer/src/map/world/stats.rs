@@ -87,6 +87,9 @@ pub(super) struct Stats {
     /// The latest rate limit seen and its reset as an [`Instant`], converted once from the
     /// server's clock.
     seen: Option<(RateLimit, Instant)>,
+    /// While the rate limit holds back wanted overviews: when it resets, in milliseconds since
+    /// the Unix epoch.
+    paused: Option<u64>,
 }
 
 impl Stats {
@@ -102,6 +105,7 @@ impl Stats {
             fetch: None,
             not_before: None,
             seen: None,
+            paused: None,
         }
     }
 
@@ -153,17 +157,42 @@ impl Stats {
         (self.known_in_world, wanted)
     }
 
+    /// While the rate limit holds back wanted overviews, when it resets (milliseconds since
+    /// the Unix epoch).
+    pub(super) const fn paused(&self) -> Option<u64> {
+        self.paused
+    }
+
+    /// After the user lifted the rate limit (screeps.com's reset page): while paused, forgets
+    /// the endpoint's limit and the wait for its reset, so the next request goes out and its
+    /// response's headers record the real limit. Returns whether it was paused; otherwise
+    /// nothing changes.
+    pub(super) fn recheck(&mut self, client: &Client) -> bool {
+        if self.paused.is_none() {
+            return false;
+        }
+        client.forget_rate_limit::<endpoints::GameMapStats>();
+        self.not_before = None;
+        self.seen = None;
+        true
+    }
+
     /// Requests the overviews of the stale near rooms, else of the stale far rooms, when the
     /// budget allows; returns when to plan again (the budget allows the next request or an
-    /// overview goes stale).
+    /// overview goes stale). Queues a [`WorldEvent::StatsPaused`] when the rate limit starts
+    /// or stops holding back wanted overviews (or its reset moves).
     pub(super) fn plan(
         &mut self,
         map: &Map,
         client: &Client,
         shard: Option<&str>,
         now: Instant,
+        events: &mut VecDeque<WorldEvent>,
     ) -> Option<Instant> {
-        let rect = self.rect?;
+        let Some(rect) = self.rect else {
+            self.set_paused(None, events);
+            return None;
+        };
         if self.fetch.is_some() {
             return None;
         }
@@ -186,6 +215,8 @@ impl Stats {
                 _ => far.push(room),
             }
         }
+        let paused = self.held_back(client, now, !near.is_empty(), !far.is_empty());
+        self.set_paused(paused, events);
         let ready = self.ready_at(client, now);
         let batch = if near.is_empty() {
             if far.is_empty() {
@@ -291,6 +322,26 @@ impl Stats {
             (now + reset.saturating_duration_since(now) / limit.remaining).max(gap)
         } else {
             gap
+        }
+    }
+
+    /// When the rate limit holds back wanted overviews, its reset in milliseconds since the
+    /// Unix epoch: no request is left while `near` rooms are wanted, or the window is down to
+    /// its near share while `far` rooms are.
+    fn held_back(&mut self, client: &Client, now: Instant, near: bool, far: bool) -> Option<u64> {
+        let limit = client.rate_limit::<endpoints::GameMapStats>()?;
+        let blocks =
+            (near && limit.remaining == 0) || (far && limit.remaining <= near_share(limit.limit));
+        (blocks && self.reset_at(limit, now) > now)
+            .then(|| limit.reset.saturating_add(1).saturating_mul(1000))
+    }
+
+    /// Makes `paused` the paused state, queueing a [`WorldEvent::StatsPaused`] when it
+    /// changes.
+    fn set_paused(&mut self, paused: Option<u64>, events: &mut VecDeque<WorldEvent>) {
+        if self.paused != paused {
+            self.paused = paused;
+            events.push_back(WorldEvent::StatsPaused(paused));
         }
     }
 

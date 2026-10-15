@@ -10,7 +10,7 @@ use crate::platform::Platform;
 use crate::profiles::{Server, server_password_key};
 use crate::route::Route;
 use crate::session::{self, Failure};
-use crate::state::{AppState, Screen};
+use crate::state::{AppState, Screen, Start};
 use crate::ui::form::FormError;
 use crate::ui::open_external;
 
@@ -317,7 +317,12 @@ fn sign_in(state: AppState, attempt: Attempt, feedback: Feedback) {
                         "Could not store the server password: {error}"
                     )));
                 }
-                state.begin(&attempt.url, overseer, attempt.login);
+                let start = if token_sign_in {
+                    Start::ApiToken
+                } else {
+                    Start::Password(attempt.login)
+                };
+                state.begin(&attempt.url, overseer, start);
             }
             Err(Failure::Unauthorized) => feedback.error.set(Some(
                 if token_sign_in {

@@ -10,7 +10,8 @@
 //!
 //! The task also hands what the world fetched (terrain, rooms without terrain, overviews) to
 //! the app's cache and reports the world's loading progress ([`progress_label`] for the
-//! status bar).
+//! status bar, including when the rate limit holds overviews back); after the user lifted the
+//! limit, [`Feed::recheck_rate_limit`] resumes them.
 //!
 //! The task ends when the feed and every subscription are dropped or the session closes;
 //! dropping the `WorldMap` then ends its subscriptions.
@@ -41,6 +42,7 @@ enum Command {
     Subscribe(u64, Reach, Deliver),
     Interest(u64, Interest),
     Unsubscribe(u64),
+    RecheckRateLimit,
 }
 
 /// A running world; cheap to clone.
@@ -87,6 +89,13 @@ impl Feed {
             id,
             commands: self.commands.clone(),
         }
+    }
+
+    /// After the user lifted the rate limit: resumes overview loading paused by it
+    /// ([`WorldMap::recheck_rate_limit`]); nothing happens while it is not paused.
+    pub fn recheck_rate_limit(&self) {
+        // A send fails only once the task ended.
+        let _ = self.commands.send(Command::RecheckRateLimit);
     }
 }
 
@@ -167,6 +176,9 @@ async fn run(
                     }
                     Command::Unsubscribe(id) => {
                         sinks.remove(&id);
+                    }
+                    Command::RecheckRateLimit => {
+                        world.recheck_rate_limit();
                     }
                 }
                 let interests: Vec<(Reach, &Interest)> = sinks
@@ -300,9 +312,11 @@ impl Unique {
     }
 }
 
-/// The status bar's loading progress, such as `Terrain 12 345 / 25 000 · Owners 2 500 / 25 000`;
+/// The status bar's loading progress at `now` (milliseconds since the Unix epoch), such as
+/// `Terrain 12 345 / 25 000 · Owners 2 500 / 25 000`, with
+/// `waiting for the rate limit, resumes in 12 min` while the rate limit holds overviews back;
 /// `None` once everything wanted is known.
-pub fn progress_label(progress: &WorldProgress) -> Option<String> {
+pub fn progress_label(progress: &WorldProgress, now: u64) -> Option<String> {
     if progress.is_complete() {
         return None;
     }
@@ -321,8 +335,11 @@ pub fn progress_label(progress: &WorldProgress) -> Option<String> {
             grouped(progress.stats_wanted)
         )
     });
+    let waiting = progress
+        .stats_paused_until
+        .map(|until| crate::rate_limits::waiting_label(until, now));
     Some(
-        [terrain, owners]
+        [terrain, owners, waiting]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
@@ -433,15 +450,17 @@ mod tests {
 
     #[test]
     fn progress_shows_until_everything_is_known() {
+        let now = 1_700_000_000_000;
         let loading = WorldProgress {
             terrain_known: 12_000,
             terrain_absent: 345,
             terrain_wanted: 25_000,
             stats_known: 2_500,
             stats_wanted: 25_000,
+            stats_paused_until: None,
         };
         assert_eq!(
-            progress_label(&loading).as_deref(),
+            progress_label(&loading, now).as_deref(),
             Some("Terrain 12\u{202f}345 / 25\u{202f}000 · Owners 2\u{202f}500 / 25\u{202f}000")
         );
         let terrain_only = WorldProgress {
@@ -450,7 +469,7 @@ mod tests {
             ..loading
         };
         assert_eq!(
-            progress_label(&terrain_only).as_deref(),
+            progress_label(&terrain_only, now).as_deref(),
             Some("Terrain 12\u{202f}345 / 25\u{202f}000")
         );
         let owners_left = WorldProgress {
@@ -458,20 +477,56 @@ mod tests {
             ..loading
         };
         assert_eq!(
-            progress_label(&owners_left).as_deref(),
+            progress_label(&owners_left, now).as_deref(),
             Some("Terrain 25\u{202f}000 / 25\u{202f}000 · Owners 2\u{202f}500 / 25\u{202f}000")
         );
         let done = WorldProgress {
             stats_known: 25_000,
             ..owners_left
         };
-        assert_eq!(progress_label(&done), None);
-        assert_eq!(progress_label(&WorldProgress::default()), None);
+        assert_eq!(progress_label(&done, now), None);
+        assert_eq!(progress_label(&WorldProgress::default(), now), None);
         let small = WorldProgress {
             terrain_known: 7,
             terrain_wanted: 999,
             ..WorldProgress::default()
         };
-        assert_eq!(progress_label(&small).as_deref(), Some("Terrain 7 / 999"));
+        assert_eq!(
+            progress_label(&small, now).as_deref(),
+            Some("Terrain 7 / 999")
+        );
+    }
+
+    #[test]
+    fn paused_overviews_say_when_they_resume_as_time_passes() {
+        let now = 1_700_000_000_000;
+        let paused = WorldProgress {
+            stats_known: 2_500,
+            stats_wanted: 33_124,
+            stats_paused_until: Some(now + 42 * 60_000),
+            ..WorldProgress::default()
+        };
+        assert_eq!(
+            progress_label(&paused, now).as_deref(),
+            Some(
+                "Owners 2\u{202f}500 / 33\u{202f}124 · waiting for the rate limit, resumes in 42 min"
+            )
+        );
+        assert_eq!(
+            progress_label(&paused, now + 41 * 60_000 + 30_000).as_deref(),
+            Some(
+                "Owners 2\u{202f}500 / 33\u{202f}124 · waiting for the rate limit, resumes in 30 s"
+            )
+        );
+        assert_eq!(
+            progress_label(&paused, now + 42 * 60_000).as_deref(),
+            Some("Owners 2\u{202f}500 / 33\u{202f}124 · waiting for the rate limit, resuming")
+        );
+        // Everything known: nothing to wait for.
+        let known = WorldProgress {
+            stats_known: 33_124,
+            ..paused
+        };
+        assert_eq!(progress_label(&known, now), None);
     }
 }

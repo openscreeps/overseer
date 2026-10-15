@@ -10,7 +10,7 @@ use overseer::net::Client;
 
 use crate::register::{Registration, confirm_error, email_error, password_error, username_error};
 use crate::session::{self, Failure};
-use crate::state::{AppState, Screen};
+use crate::state::{AppState, Screen, Start};
 use crate::ui::form::{Field, FormError};
 use crate::ui::spawn_scoped;
 
@@ -197,7 +197,9 @@ pub fn Register(
                 password: registration.password,
             };
             match session::connect(&platform, &url, auth, None).await {
-                Ok(overseer) => state.begin(&url, overseer, Some(registration.username)),
+                Ok(overseer) => {
+                    state.begin(&url, overseer, Start::Password(Some(registration.username)));
+                }
                 Err(failure) => {
                     busy.set(false);
                     let message = match failure {

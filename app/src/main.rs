@@ -31,6 +31,7 @@ mod feed;
 mod levels;
 mod platform;
 mod profiles;
+mod rate_limits;
 mod register;
 mod route;
 mod saved;

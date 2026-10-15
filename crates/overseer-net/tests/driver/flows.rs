@@ -118,6 +118,10 @@ async fn endpoint_rate_limits_beyond_the_maximum_wait_are_returned() {
     );
     assert_eq!(server.requests().len(), 1);
     assert_eq!(client.rate_limit::<endpoints::AuthMe>(), Some(rejected));
+    // A limit known to be stale (lifted outside the client) is forgotten until the next reply.
+    client.forget_rate_limit::<endpoints::AuthMe>();
+    assert_eq!(client.rate_limit::<endpoints::AuthMe>(), None);
+    assert_eq!(client.rate_limits(), []);
 }
 
 #[tokio::test]

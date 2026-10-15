@@ -245,7 +245,8 @@ pub fn apply(viewer: &mut Viewer, event: &WorldEvent) {
         WorldEvent::Detail(room, DetailState::Refused(_)) | WorldEvent::DetailGone(room) => {
             viewer.clear_room(*room);
         }
-        WorldEvent::Detail(_, DetailState::Pending) => {}
+        // Pauses show in the status bar (the world's progress).
+        WorldEvent::Detail(_, DetailState::Pending) | WorldEvent::StatsPaused(_) => {}
     }
 }
 

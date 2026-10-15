@@ -392,6 +392,53 @@ main.popout {
   align-self: center;
 }
 
+/* A panel over the page, under the account menu (Rate limits). */
+.panel.floating {
+  position: fixed;
+  top: 3.5rem;
+  right: 0.75rem;
+  z-index: 40;
+  width: min(34rem, calc(100vw - 1.5rem));
+  max-height: calc(100vh - 6rem);
+  overflow: auto;
+  background: var(--panel-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+table.limits {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+table.limits th,
+table.limits td {
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+table.limits thead th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+table.limits tbody th {
+  font-weight: normal;
+}
+
+.status-bar button.status-action {
+  font-size: inherit;
+}
+
 .starting {
   align-self: center;
   margin-top: 4rem;

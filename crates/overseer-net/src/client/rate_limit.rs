@@ -75,6 +75,10 @@ impl RateLimits {
         self.0.get(&(E::METHOD, E::PATH)).copied()
     }
 
+    pub(crate) fn forget<E: Endpoint>(&mut self) {
+        self.0.remove(&(E::METHOD, E::PATH));
+    }
+
     /// Every recorded limit, ordered by path and method.
     pub(crate) fn all(&self) -> Vec<EndpointRateLimit> {
         let mut all: Vec<_> = self

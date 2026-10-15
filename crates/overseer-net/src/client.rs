@@ -183,6 +183,14 @@ impl Client {
         lock(&self.inner.rate_limits).all()
     }
 
+    /// Forgets the latest rate limit reported for endpoint `E`, so [`Self::rate_limit`] is
+    /// `None` until a response reports one again. For a limit known to be stale, such as
+    /// after the user lifted it outside this client (screeps.com's reset page): the next
+    /// response's headers record the real one.
+    pub fn forget_rate_limit<E: Endpoint>(&self) {
+        lock(&self.inner.rate_limits).forget::<E>();
+    }
+
     /// The server's shards and capabilities and the signed-in user, fetched once and cached.
     ///
     /// Requests `GET /api/version`, and `GET /api/auth/me` when the client holds a token or

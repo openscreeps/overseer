@@ -171,7 +171,8 @@
 //! that is within [`RateLimitPolicy::max_wait`], or after [`RateLimitPolicy::global_delay`] for
 //! the server-wide limit ([`ClientBuilder::rate_limit`] configures or disables this).
 //! [`Client::rate_limit`] and [`Client::rate_limits`] expose the latest limit of each endpoint
-//! for display.
+//! for display; [`Client::forget_rate_limit`] drops one known to be stale (lifted by the user
+//! on screeps.com's reset page) until the next response reports it again.
 //!
 //! No total request timeout is applied (the socket upgrade shares the client); wrap calls in
 //! [`rt::timeout`] where needed.

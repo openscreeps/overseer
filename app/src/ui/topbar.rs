@@ -12,6 +12,7 @@ use web_sys::KeyboardEvent;
 use crate::profiles::Profiles;
 use crate::route::{Route, Shard, parse_room};
 use crate::state::AppState;
+use crate::ui::rate_limits::RateLimitsUi;
 use crate::ui::window::ModeSwitch;
 use crate::ui::world::MapState;
 
@@ -476,10 +477,11 @@ fn signed_in_account(
     })
 }
 
-/// The signed-in account: profile and sign-out.
+/// The signed-in account: profile, rate limits and sign-out.
 #[component]
 fn AccountMenu() -> impl IntoView {
     let state = AppState::expect();
+    let limits = RateLimitsUi::expect();
     let server = Signal::derive(move || {
         state
             .session
@@ -517,6 +519,15 @@ fn AccountMenu() -> impl IntoView {
                         <button
                             type="button"
                             role="menuitem"
+                            on:click=move |_| limits.open.set(true)
+                        >
+                            "Rate limits"
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button
+                            type="button"
+                            role="menuitem"
                             on:click=move |_| spawn_local(async move { state.sign_out().await })
                         >
                             "Sign out"
@@ -546,6 +557,7 @@ mod tests {
         server.user = Some(SavedUser {
             id: "u1".to_owned(),
             username: username.map(str::to_owned),
+            api_token: Some(false),
         });
         let mut profiles = Profiles::default();
         profiles.servers.push(server);

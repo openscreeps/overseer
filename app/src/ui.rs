@@ -7,6 +7,7 @@
 mod drawer;
 mod form;
 mod profile;
+mod rate_limits;
 mod register;
 mod room_panel;
 mod servers;
@@ -68,6 +69,9 @@ pub fn App(
     provide_context(state);
     let map = MapState::new();
     provide_context(map);
+    let limits = rate_limits::RateLimitsUi::new();
+    provide_context(limits);
+    limits.listen(map);
     state.start();
     follow_shards(state, map);
     resolve_shard(state);
@@ -134,6 +138,7 @@ pub fn App(
         <topbar::TopBar />
         <Banner />
         <main id="main" class:map-page=world_page>{content}</main>
+        <rate_limits::RateLimitsPanel />
         <StatusBar />
     }
     .into_any()
@@ -394,12 +399,13 @@ fn Banner() -> impl IntoView {
     }
 }
 
-/// Connection, tick, level of detail, the world's loading progress (while loading), frame
-/// time and graphics backend.
+/// Connection, tick, level of detail, the world's loading progress (while loading; with the
+/// rate limit's pause and `Reset limit`), frame time and graphics backend.
 #[component]
 fn StatusBar() -> impl IntoView {
     let state = AppState::expect();
     let map = MapState::expect();
+    let limits = rate_limits::RateLimitsUi::expect();
     let connection = move || match state.status.get() {
         None => "Not connected".to_owned(),
         Some(ConnectionStatus::Connecting) => "Connecting…".to_owned(),
@@ -425,12 +431,21 @@ fn StatusBar() -> impl IntoView {
         map.progress
             .get()
             .as_ref()
-            .and_then(crate::feed::progress_label)
+            .and_then(|progress| {
+                // The clock only matters while paused: the time left updates every second.
+                let now = if progress.stats_paused_until.is_some() {
+                    limits.now.get()
+                } else {
+                    0
+                };
+                crate::feed::progress_label(progress, now)
+            })
             .map(|label| {
                 view! {
                     <span class="status-item" role="status" title="Loading the world">
                         {label}
                     </span>
+                    <rate_limits::StatusReset />
                 }
             })
     };
