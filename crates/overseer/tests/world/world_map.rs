@@ -1,6 +1,7 @@
 //! The world map: bounds (measured and known), interest diffing, whole-world terrain batching,
 //! absent rooms and seeding, progress, overview near/far lifetimes, seeding and budget split,
-//! minimap cap, detail priority, refusals and terrain reuse, cancel safety.
+//! minimap cap, detail priority, refusals (stale ones behind barriers) and terrain reuse,
+//! cancel safety.
 //!
 //! Tests on paused time drive [`WorldMap::next`] by yielding (see [`event`]): a runtime that
 //! never idles never advances paused time on its own, so only `tokio::time::advance` moves it.
@@ -839,6 +840,59 @@ async fn subscribed(world: &mut WorldMap, websocket: &mut Ws, count: usize) -> V
     }
 }
 
+/// Prefix of the detail barriers' channels.
+const BARRIER: &str = "roomMap2:overseer-barrier-";
+
+/// Receives the next frame, driving `next` meanwhile, and returns the barrier channel it
+/// subscribes.
+async fn barrier(world: &mut WorldMap, websocket: &mut Ws) -> String {
+    let frame = subscribed(world, websocket, 1).await.remove(0);
+    frame
+        .strip_prefix("subscribe ")
+        .filter(|channel| channel.starts_with(BARRIER))
+        .unwrap_or_else(|| panic!("a barrier subscription expected, got {frame}"))
+        .to_owned()
+}
+
+/// Answers `channel` like the server answers a new `roomMap2` subscription of a room that does
+/// not exist (after processing every earlier command), and checks that it is released.
+async fn answer(world: &mut WorldMap, websocket: &mut Ws, channel: &str) {
+    server::send(websocket, &format!(r#"["{channel}",{{}}]"#)).await;
+    assert_eq!(
+        subscribed(world, websocket, 1).await,
+        [format!("unsubscribe {channel}")]
+    );
+}
+
+/// Receives the barrier subscribed next and answers it.
+async fn pass_barrier(world: &mut WorldMap, websocket: &mut Ws) {
+    let channel = barrier(world, websocket).await;
+    answer(world, websocket, &channel).await;
+}
+
+/// Subscribes `W1N1`, `W2N2` and `W3N3` in that order, passes the barrier and delivers an update
+/// of each at tick 9.
+async fn three_live_rooms(world: &mut WorldMap, websocket: &mut Ws) -> [RoomCoord; 3] {
+    let rooms = [room("W1N1"), room("W2N2"), room("W3N3")];
+    world.set_interest(&Interest {
+        detail: rooms.to_vec(),
+        ..Interest::default()
+    });
+    let pending = rooms.map(|room| (room, "pending".to_owned()));
+    assert_eq!(details(world, 3).await, pending);
+    let sent = subscribed(world, websocket, 3).await;
+    assert_eq!(
+        sent.into_iter().collect::<BTreeSet<_>>(),
+        frames("subscribe", "room", &rooms)
+    );
+    pass_barrier(world, websocket).await;
+    for room in rooms {
+        update(websocket, room, 9).await;
+        assert_eq!(details(world, 1).await, [(room, "live 9".to_owned())]);
+    }
+    rooms
+}
+
 #[tokio::test]
 async fn detail_follows_priority_and_retries_refusals_after_an_interest_change() {
     let fake = Fake::new(12, rect("W10N10", "W0N0"));
@@ -857,6 +911,7 @@ async fn detail_follows_priority_and_retries_refusals_after_an_interest_change()
         sent.into_iter().collect::<BTreeSet<_>>(),
         frames("subscribe", "room", &[a, b, c])
     );
+    pass_barrier(&mut world, &mut websocket).await;
     for room in [a, b, c] {
         update(&mut websocket, room, 9).await;
         assert_eq!(details(&mut world, 1).await, [(room, "live 9".to_owned())]);
@@ -868,6 +923,7 @@ async fn detail_follows_priority_and_retries_refusals_after_an_interest_change()
     let refused = (c, "refused: subscribe limit reached".to_owned());
     assert_eq!(details(&mut world, 1).await, std::slice::from_ref(&refused));
     assert_eq!(receive(&mut websocket, 1).await, ["unsubscribe room:W3N3"]);
+    pass_barrier(&mut world, &mut websocket).await;
     assert!(matches!(world.detail(a), Some(DetailState::Live(_))));
     update(&mut websocket, a, 10).await;
     assert_eq!(details(&mut world, 1).await, [(a, "live 10".to_owned())]);
@@ -892,9 +948,11 @@ async fn detail_follows_priority_and_retries_refusals_after_an_interest_change()
         subscribed(&mut world, &mut websocket, 1).await,
         ["subscribe room:W3N3"]
     );
+    pass_barrier(&mut world, &mut websocket).await;
     refuse(&mut websocket, c).await;
     assert_eq!(details(&mut world, 1).await, [refused]);
     assert_eq!(receive(&mut websocket, 1).await, ["unsubscribe room:W3N3"]);
+    pass_barrier(&mut world, &mut websocket).await;
 
     // Rooms that leave the interest are released.
     world.set_interest(&Interest {
@@ -906,7 +964,98 @@ async fn detail_follows_priority_and_retries_refusals_after_an_interest_change()
         [(b, "gone".to_owned()), (c, "gone".to_owned())]
     );
     assert_eq!(receive(&mut websocket, 1).await, ["unsubscribe room:W2N2"]);
+    pass_barrier(&mut world, &mut websocket).await;
     assert!(world.detail(b).is_none());
+    no_frame(&mut websocket).await;
+}
+
+#[tokio::test]
+async fn detail_ignores_refusals_the_server_sends_before_processing_a_release() {
+    let fake = Fake::new(12, rect("W10N10", "W0N0"));
+    let (_server, overseer, mut websocket) = connect(fake.routes()).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let [a, b, c] = three_live_rooms(&mut world, &mut websocket).await;
+
+    // The server refuses one room at random: the least important one is released.
+    refuse(&mut websocket, a).await;
+    let refused = (c, "refused: subscribe limit reached".to_owned());
+    assert_eq!(details(&mut world, 1).await, std::slice::from_ref(&refused));
+    assert_eq!(receive(&mut websocket, 1).await, ["unsubscribe room:W3N3"]);
+    let barrier = barrier(&mut world, &mut websocket).await;
+
+    // Until it processes the release, the server still counts three rooms: on each update it
+    // refuses one of them at random and serves the others. Those refusals release nothing.
+    for (time, skipped) in [(10, b), (11, a), (12, c), (13, b)] {
+        refuse(&mut websocket, skipped).await;
+        for served in [a, b].into_iter().filter(|&room| room != skipped) {
+            update(&mut websocket, served, time).await;
+            assert_eq!(
+                details(&mut world, 1).await,
+                [(served, format!("live {time}"))]
+            );
+        }
+    }
+    assert!(matches!(world.detail(a), Some(DetailState::Live(_))));
+    assert!(matches!(world.detail(b), Some(DetailState::Live(_))));
+    assert!(matches!(world.detail(c), Some(DetailState::Refused(_))));
+
+    // Then it answers the barrier and serves both remaining rooms.
+    answer(&mut world, &mut websocket, &barrier).await;
+    for room in [a, b] {
+        update(&mut websocket, room, 14).await;
+        assert_eq!(details(&mut world, 1).await, [(room, "live 14".to_owned())]);
+    }
+    no_frame(&mut websocket).await;
+}
+
+#[tokio::test]
+async fn detail_ignores_a_refusal_crossing_a_new_subscription_of_the_room() {
+    let fake = Fake::new(12, rect("W10N10", "W0N0"));
+    let (_server, overseer, mut websocket) = connect(fake.routes()).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let [a, b, c] = three_live_rooms(&mut world, &mut websocket).await;
+    refuse(&mut websocket, b).await;
+    assert_eq!(
+        details(&mut world, 1).await,
+        [(c, "refused: subscribe limit reached".to_owned())]
+    );
+    assert_eq!(receive(&mut websocket, 1).await, ["unsubscribe room:W3N3"]);
+    let first = barrier(&mut world, &mut websocket).await;
+
+    // Before the server processed the release, the interest drops the second room and wants
+    // the third again: it is subscribed again behind a new barrier.
+    world.set_interest(&Interest {
+        detail: vec![a, c],
+        ..Interest::default()
+    });
+    assert_eq!(
+        details(&mut world, 2).await,
+        [(b, "gone".to_owned()), (c, "pending".to_owned())]
+    );
+    assert_eq!(
+        subscribed(&mut world, &mut websocket, 3).await,
+        [
+            "unsubscribe room:W2N2".to_owned(),
+            "subscribe room:W3N3".to_owned(),
+            format!("unsubscribe {first}"),
+        ]
+    );
+    let second = barrier(&mut world, &mut websocket).await;
+
+    // Refusals of the third room (and of the first) sent before the server processed those
+    // commands arrive after the new subscription: they neither refuse it nor release a room.
+    refuse(&mut websocket, c).await;
+    refuse(&mut websocket, a).await;
+    update(&mut websocket, a, 10).await;
+    assert_eq!(details(&mut world, 1).await, [(a, "live 10".to_owned())]);
+    // The server answers the first barrier (released meanwhile) and the second, then serves
+    // both rooms.
+    server::send(&mut websocket, &format!(r#"["{first}",{{}}]"#)).await;
+    answer(&mut world, &mut websocket, &second).await;
+    for room in [a, c] {
+        update(&mut websocket, room, 11).await;
+        assert_eq!(details(&mut world, 1).await, [(room, "live 11".to_owned())]);
+    }
     no_frame(&mut websocket).await;
 }
 
@@ -933,6 +1082,7 @@ async fn detail_reuses_the_world_terrain() {
         subscribed(&mut world, &mut websocket, 1).await,
         ["subscribe room:W5N5"]
     );
+    pass_barrier(&mut world, &mut websocket).await;
     update(&mut websocket, seeded, 9).await;
     let WorldEvent::Detail(_, DetailState::Live(snapshot)) = event(&mut world).await else {
         panic!("a live update expected");

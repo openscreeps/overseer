@@ -36,6 +36,10 @@ pub(super) struct Details {
     /// Subscribes the rooms; `None` without a signed-in user.
     access: Option<Rooms>,
     shard: Option<String>,
+    /// The [barrier](Rooms::barrier) behind the latest subscription or release, until it
+    /// yields; `None` once it did: refusals arriving from then on reflect the current
+    /// subscriptions (see [`Self::poll`]).
+    barrier: Option<Watch<()>>,
 }
 
 impl Details {
@@ -63,9 +67,12 @@ impl Details {
         }
         self.access = rooms.cloned();
         self.shard = shard.map(str::to_owned);
+        let mut released = false;
         for room in &self.order {
             if !order.contains(room) {
-                self.rooms.remove(room);
+                if let Some(detail) = self.rooms.remove(room) {
+                    released |= matches!(detail.live, Live::Watching(_));
+                }
                 events.push_back(WorldEvent::DetailGone(*room));
             }
         }
@@ -92,16 +99,23 @@ impl Details {
             self.rooms.insert(room, detail);
         }
         self.order = order;
-        self.start(terrain, events);
+        self.start(terrain, events, released);
     }
 
     /// Subscribes the rooms waiting for a terrain `terrain` now knows, and refuses those the
-    /// server does not know. Returns whether anything changed.
-    fn start(&mut self, terrain: &Terrains, events: &mut VecDeque<WorldEvent>) -> bool {
+    /// server does not know; then, when it subscribed a room or `released` one before, puts a
+    /// new barrier behind those changes. Returns whether anything changed.
+    fn start(
+        &mut self,
+        terrain: &Terrains,
+        events: &mut VecDeque<WorldEvent>,
+        released: bool,
+    ) -> bool {
         let Some(rooms) = &self.access else {
             return false;
         };
         let mut changed = false;
+        let mut subscribed = false;
         for &room in &self.order {
             let Some(detail) = self.rooms.get_mut(&room) else {
                 continue;
@@ -121,7 +135,10 @@ impl Details {
             };
             changed = true;
             match watch {
-                Ok(watch) => detail.live = Live::Watching(watch),
+                Ok(watch) => {
+                    detail.live = Live::Watching(watch);
+                    subscribed = true;
+                }
                 Err(error) => {
                     detail.live = Live::Off;
                     detail.state = DetailState::Refused(error);
@@ -129,23 +146,70 @@ impl Details {
                 }
             }
         }
+        if subscribed || released {
+            self.renew_barrier();
+        }
         changed
     }
 
     /// Subscribes the rooms whose terrain arrived and delivers what arrived:
     /// [`DetailState::Live`] per update, [`DetailState::Refused`] when a subscription fails or
-    /// the server refuses one. A refusal (`err@room`, sent each update for every subscription
-    /// of the user beyond the limit, chosen at random by the server) releases the least
-    /// important subscribed room, so the most important ones stay live. Returns whether
-    /// anything changed.
+    /// the server refuses one. Returns whether anything changed.
+    ///
+    /// The server refuses (`err@room`) every subscription of the user beyond its limit, chosen
+    /// at random, on each update until it processes a release, and answers a subscription with
+    /// a refusal counted at its latest update. A refusal therefore releases a room only when it
+    /// reflects the current subscriptions: when it arrived after the barrier behind the latest
+    /// subscription or release yielded, so the server sent it after processing them (refusals
+    /// found when the barrier yields may predate it and are dropped too; the server repeats
+    /// those that still hold on its next update). It then releases the least important
+    /// subscribed room, so the most important ones stay live, and puts a new barrier behind
+    /// that release: refusals arriving meanwhile, of other rooms or of a room subscribed again,
+    /// release nothing.
     pub(super) fn poll(
         &mut self,
         cx: &mut Context<'_>,
         terrain: &Terrains,
         events: &mut VecDeque<WorldEvent>,
     ) -> Result<bool, Closed> {
-        let mut changed = self.start(terrain, events);
-        let mut refusals = Vec::new();
+        let mut changed = self.start(terrain, events, false);
+        loop {
+            let current = self.settle(cx)?;
+            let (updated, refusal) = self.drain(cx, current, events)?;
+            changed |= updated;
+            let Some(error) = refusal else {
+                return Ok(changed);
+            };
+            self.release_least_important(error, events);
+            changed = true;
+        }
+    }
+
+    /// Polls the barrier; whether it had yielded before this call (refusals reflect the
+    /// current subscriptions). Once it yields it is released.
+    fn settle(&mut self, cx: &mut Context<'_>) -> Result<bool, Closed> {
+        let Some(barrier) = &mut self.barrier else {
+            return Ok(true);
+        };
+        match barrier.poll_next_unpin(cx) {
+            Poll::Pending => {}
+            Poll::Ready(Some(_)) => self.barrier = None,
+            Poll::Ready(None) => return Err(Closed),
+        }
+        Ok(false)
+    }
+
+    /// Takes what arrived for every subscribed room: each update becomes
+    /// [`DetailState::Live`]; refusals are dropped, but the first one is returned when they are
+    /// `current`. Returns whether a room was updated and that refusal.
+    fn drain(
+        &mut self,
+        cx: &mut Context<'_>,
+        current: bool,
+        events: &mut VecDeque<WorldEvent>,
+    ) -> Result<(bool, Option<String>), Closed> {
+        let mut updated = false;
+        let mut refusal = None;
         for &room in &self.order {
             let Some(Detail {
                 state,
@@ -159,10 +223,12 @@ impl Details {
                     Poll::Pending => break,
                     Poll::Ready(None) => return Err(Closed),
                     Poll::Ready(Some(snapshot)) => {
-                        changed = true;
                         if let Some(error) = &snapshot.subscription_error {
-                            refusals.push((room, error.clone()));
+                            if current && refusal.is_none() {
+                                refusal = Some(error.clone());
+                            }
                         } else {
+                            updated = true;
                             *state = DetailState::Live(Arc::clone(&snapshot));
                             events.push_back(WorldEvent::Detail(room, DetailState::Live(snapshot)));
                         }
@@ -170,16 +236,12 @@ impl Details {
                 }
             }
         }
-        for (room, error) in refusals {
-            self.refuse(room, error, events);
-        }
-        Ok(changed)
+        Ok((updated, refusal))
     }
 
-    /// Handles the refusal of `room`'s subscription: releases the least important subscribed
-    /// room (possibly `room` itself) and reports it refused. Ignored when `room` was released
-    /// meanwhile.
-    fn refuse(&mut self, room: RoomCoord, error: String, events: &mut VecDeque<WorldEvent>) {
+    /// Releases the least important subscribed room, reports it refused with `error` and puts
+    /// a new barrier behind the release.
+    fn release_least_important(&mut self, error: String, events: &mut VecDeque<WorldEvent>) {
         let subscribed = |room: &RoomCoord| {
             matches!(
                 self.rooms.get(room),
@@ -189,9 +251,6 @@ impl Details {
                 })
             )
         };
-        if !subscribed(&room) {
-            return;
-        }
         let Some(victim) = self.order.iter().rev().copied().find(subscribed) else {
             return;
         };
@@ -200,5 +259,16 @@ impl Details {
             detail.state = DetailState::Refused(error);
             events.push_back(WorldEvent::Detail(victim, detail.state.clone()));
         }
+        self.renew_barrier();
+    }
+
+    /// Replaces the barrier with one behind the subscriptions and releases sent so far.
+    fn renew_barrier(&mut self) {
+        // Released first, so the frames read in order: the old barrier's release, the new one.
+        self.barrier = None;
+        self.barrier = self
+            .access
+            .as_ref()
+            .map(|rooms| rooms.barrier(self.shard.as_deref()));
     }
 }

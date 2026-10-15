@@ -9,6 +9,7 @@ pub use info::StatInterval;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use overseer_net::core::api::Terrain;
 use overseer_net::core::api::types::GameRoomObject;
@@ -18,6 +19,13 @@ use tokio::sync::watch;
 
 use crate::live::{Sink, Watch};
 use crate::{Error, Overseer};
+
+/// Prefix of the [`Rooms::barrier`] channels' room names, which no room has.
+const BARRIER_PREFIX: &str = "overseer-barrier-";
+
+/// Serial number of the next [`Rooms::barrier`], unique in the process: a barrier never shares
+/// a channel (or its latest value) with another.
+static NEXT_BARRIER: AtomicU64 = AtomicU64::new(0);
 
 /// A watched room as a renderer reads it, built once per update and shared by every
 /// [`Watch`] of the room.
@@ -190,6 +198,27 @@ impl Rooms {
         });
         let receiver = receiver.ok_or(Error::Closed)?;
         Ok(Watch::new(receiver, registration))
+    }
+
+    /// A barrier behind every subscription and release sent so far on `shard` (`None`: the
+    /// default shard): yields once the server has processed them. Dropping it unsubscribes.
+    ///
+    /// It subscribes to the `roomMap2` view of a room that does not exist, under a name unique
+    /// in the process. The server handles a connection's commands in order and answers a new
+    /// `roomMap2` subscription at once, with `{}` for such a room (checked on screeps.com and
+    /// `OpenScreeps`), and writes its replies and updates in order: its first value comes after
+    /// the server processed everything sent before it, and whatever arrives after that value
+    /// was sent after that. The server keeps sending the view each update; only the first
+    /// value matters.
+    pub(crate) fn barrier(&self, shard: Option<&str>) -> Watch<()> {
+        let serial = NEXT_BARRIER.fetch_add(1, Ordering::Relaxed);
+        let channel = Channel::RoomMap {
+            shard: self.overseer.resolve_shard(shard),
+            room: format!("{BARRIER_PREFIX}{serial}"),
+        };
+        self.overseer.watch(channel, |payload| {
+            matches!(payload, Payload::RoomMap(_)).then_some(())
+        })
     }
 }
 

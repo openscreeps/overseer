@@ -158,10 +158,21 @@ impl WorldProgress {
 ///   [`Interest::terrain`]), so a seeded or fetched room subscribes without any request; a
 ///   room the server does not know is refused.
 ///   The server sends each user at most 2 rooms per update across all connections (pop-out
-///   windows included) and refuses the others (`subscribe limit reached`): the least
-///   important subscribed room is then released and reported [`DetailState::Refused`] once,
-///   and not subscribed again until [`Interest::detail`] changes. Rooms that leave are
-///   released ([`WorldEvent::DetailGone`]).
+///   windows included) and refuses the others (`subscribe limit reached`, chosen at random,
+///   on every update): the least important subscribed room is then released and reported
+///   [`DetailState::Refused`] once, and not subscribed again until [`Interest::detail`]
+///   changes. Rooms that leave are released ([`WorldEvent::DetailGone`]).
+///   A refusal releases a room only when it reflects the current subscriptions: the server
+///   keeps refusing over-limit rooms until it processes a release (several updates when its
+///   command queue is busy), and a refusal sent before a release can arrive after the same
+///   room is subscribed again. Every subscription or release of detail rooms is therefore
+///   followed by a barrier: a `roomMap2` subscription of a room that does not exist
+///   (`overseer-barrier-<n>`), which the server answers at once and in order (screeps.com and
+///   `OpenScreeps`), then released. Refusals that arrive before its answer, or are found
+///   waiting when it arrives, release nothing and change no state (the server repeats those
+///   that still hold on its next update); each later round of refusals releases one room and
+///   starts a new barrier. Should a server never answer, rooms are never released for its
+///   refusals and the server keeps choosing which ones to skip.
 ///
 /// Overviews, minimaps and detail need a signed-in user: without one, [`Interest::stats`] and
 /// [`Interest::minimaps`] are ignored and detail rooms are refused.

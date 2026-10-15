@@ -377,11 +377,9 @@ async fn detail_stays_within_the_servers_cap_and_is_released_when_unwanted() {
     .await;
     assert_eq!(gone, BTreeSet::from([second, third]));
     assert!(world.detail(second).is_none());
-    // The server refuses an over-limit room on every update until it processes the release,
-    // and a refusal sent before then must not reach the room subscribed again: wait until the
-    // server has processed the releases (its replies are ordered, so earlier refusals arrived).
-    support::subscribed(&overseer).await;
-
+    // The server refuses an over-limit room on every update until it processes the releases,
+    // and a refusal sent before then can arrive after the room is subscribed again: the world
+    // map releases nothing for such refusals, so the third room is wanted again at once.
     world.set_interest(&Interest {
         detail: vec![mine, third],
         ..Interest::default()
