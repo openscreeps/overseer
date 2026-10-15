@@ -1,7 +1,7 @@
 {
   "identifier": "default",
-  "description": "The main window: core APIs and opening screeps.com pages in the system browser",
-  "windows": ["main"],
+  "description": "The main window and popped-out route windows: core APIs and opening screeps.com pages in the system browser",
+  "windows": ["main", "route-*"],
   "permissions": [
     "core:default",
     {

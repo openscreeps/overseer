@@ -1,22 +1,18 @@
-// Terrain and object shapes, lit by one directional light (computed per vertex: every face is
-// flat), drawn in linear colour into an sRGB target.
+// Detail scenes (appended to common.wgsl): terrain meshes and object shapes in room-local
+// tiles, moved to their room and faded by the per-room uniforms.
 
-struct Globals {
-    view_projection: mat4x4<f32>,
-    // xyz: unit direction towards the light.
-    light: vec4<f32>,
+struct Locals {
+    // xyz: world offset of the room; w: opacity.
+    offset: vec4<f32>,
+    // rgb: linear tint of the terrain; a: its strength.
+    tint: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> globals: Globals;
+@group(1) @binding(0) var<uniform> locals: Locals;
 
 struct Varyings {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
-}
-
-fn lit(normal: vec3<f32>, color: vec4<f32>) -> vec4<f32> {
-    let light = 0.6 + 0.4 * max(dot(normalize(normal), globals.light.xyz), 0.0);
-    return vec4<f32>(color.rgb * light, color.a);
 }
 
 @vertex
@@ -26,8 +22,9 @@ fn terrain_vertex(
     @location(2) color: vec4<f32>,
 ) -> Varyings {
     var out: Varyings;
-    out.position = globals.view_projection * vec4<f32>(position, 1.0);
-    out.color = lit(normal, color);
+    out.position = globals.view_projection * vec4<f32>(position + locals.offset.xyz, 1.0);
+    let shaded = lit(normal, color);
+    out.color = vec4<f32>(mix(shaded.rgb, locals.tint.rgb, locals.tint.a), locals.offset.w);
     return out;
 }
 
@@ -40,9 +37,11 @@ fn object_vertex(
     @location(4) color: vec4<f32>,
 ) -> Varyings {
     var out: Varyings;
-    out.position = globals.view_projection * vec4<f32>(offset + position * scale, 1.0);
+    let world = locals.offset.xyz + offset + position * scale;
+    out.position = globals.view_projection * vec4<f32>(world, 1.0);
     // Normals of a scaled shape: inverse scale (scales are never zero).
-    out.color = lit(normal / scale, color);
+    let shaded = lit(normal / scale, color);
+    out.color = vec4<f32>(shaded.rgb, shaded.a * locals.offset.w);
     return out;
 }
 

@@ -346,7 +346,7 @@ pub fn SetUsername() -> impl IntoView {
             match overseer.account().refresh().await {
                 Ok(me) => {
                     state.remember_username(&session.server, me.username.clone());
-                    state.screen.set(Screen::Profile);
+                    state.screen.set(Screen::Ready);
                 }
                 Err(failure) => {
                     busy.set(false);

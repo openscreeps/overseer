@@ -45,6 +45,7 @@ leptos = { version = "0.8", features = ["csr"] }
 tauri = { version = "2.12", features = [] }
 tauri-build = { version = "2.5", features = [] }
 tauri-plugin-opener = "2.7"
+tauri-plugin-window-state = "2.5"
 # Room renderer: WebGPU and WebGL2 in browsers, no native backend (see overseer-view).
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
 # overseer-proxy: HTTP server, static files, logs and the binary's command line.
@@ -57,6 +58,8 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false }
+# xtask: `cargo xtask e2e` stops its disposable server on Ctrl-C and SIGTERM.
+ctrlc = { version = "3.5", features = ["termination"] }
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -2 }

@@ -20,6 +20,7 @@ overseer-proxy.workspace = true
 serde.workspace = true
 tauri.workspace = true
 tauri-plugin-opener.workspace = true
+tauri-plugin-window-state.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
 

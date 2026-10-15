@@ -1,4 +1,9 @@
-//! The wgpu side: pipelines, buffers and the render pass of a frame.
+//! The wgpu side: buffers and textures mirroring the [`World`], and the render pass of a
+//! frame. Layers are drawn in order: overview cells, atlas terrain and minimap points flat on
+//! the ground without depth, then the detail scenes with depth (blended by their opacity) and
+//! the selection frame over everything.
+
+mod pipelines;
 
 use std::ops::Range;
 
@@ -6,8 +11,12 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
-use crate::mesh::{self, Instance, ShapeVertex, TerrainVertex};
-use crate::scene::{Frame, Scene};
+use crate::MINIMAP_ROOMS;
+use crate::camera::room_origin;
+use crate::mesh::{self, CellInstance, Instance, PointInstance, TerrainInstance};
+use crate::view::{Fades, View};
+use crate::world::{DETAIL_SLOTS, Detail, LEVEL0, LEVEL1, POINTS, World};
+use pipelines::Pipelines;
 
 /// Depth buffer format (supported, with multisampling, by WebGPU and WebGL2).
 pub const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -18,13 +27,52 @@ const CLEAR: wgpu::Color = wgpu::Color {
     b: 0.003,
     a: 1.0,
 };
+/// Mip levels of the terrain atlas: 50 and 25 texels per room.
+const ATLAS_LEVELS: u32 = 2;
 
-/// The uniform block of the shader.
+/// The per-frame uniform block (`Globals` in `common.wgsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct Globals {
     view_projection: [[f32; 4]; 4],
     light: [f32; 4],
+    params: [f32; 4],
+    plain: [f32; 4],
+    swamp: [f32; 4],
+    wall: [f32; 4],
+}
+
+/// The per-room uniform block of detail scenes (`Locals` in `shader.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+struct Locals {
+    offset: [f32; 4],
+    tint: [f32; 4],
+}
+
+/// What a frame draws besides the world's own data.
+#[derive(Clone, Copy, Debug)]
+pub struct Draw {
+    /// World to clip space.
+    pub view_projection: Mat4,
+    /// Layer opacities.
+    pub fades: Fades,
+    /// The selection frame.
+    pub selection: Option<Instance>,
+    /// Frame time (ms), for the detail scenes' fade-in.
+    pub now: f64,
+}
+
+impl Draw {
+    /// The frame of `view` at `now`.
+    pub fn of(view: &View, now: f64) -> Self {
+        Self {
+            view_projection: view.camera.view_projection(),
+            fades: view.fades(),
+            selection: view.selection(),
+            now,
+        }
+    }
 }
 
 /// Render targets sized to the output.
@@ -36,6 +84,20 @@ struct Targets {
     msaa: Option<wgpu::TextureView>,
 }
 
+/// GPU resources of one detail slot.
+#[derive(Debug)]
+struct DetailGpu {
+    /// [`Detail::id`] of the scene uploaded (0: none).
+    id: u64,
+    terrain_version: u64,
+    /// Terrain vertex and index buffers and index count.
+    terrain: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    instances: wgpu::Buffer,
+    capacity: usize,
+    locals: wgpu::Buffer,
+    group: wgpu::BindGroup,
+}
+
 /// GPU resources of the viewer.
 #[derive(Debug)]
 pub struct Gpu {
@@ -44,26 +106,35 @@ pub struct Gpu {
     /// Format of the output view (sRGB).
     pub format: wgpu::TextureFormat,
     samples: u32,
+    pipelines: Pipelines,
     globals: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    terrain_pipeline: wgpu::RenderPipeline,
-    object_pipeline: wgpu::RenderPipeline,
-    /// Object pipeline drawn over everything (the selection frame).
-    overlay_pipeline: wgpu::RenderPipeline,
+    globals_group: wgpu::BindGroup,
+    atlas: wgpu::Texture,
+    atlas_side: u32,
+    atlas_per_row: u32,
+    atlas_group: wgpu::BindGroup,
     shape_vertices: wgpu::Buffer,
     shape_indices: wgpu::Buffer,
     shape_ranges: [Range<u32>; 3],
-    /// Terrain vertex and index buffers, index count and the scene's terrain version.
-    terrain: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
-    terrain_version: u64,
-    instances: wgpu::Buffer,
-    instance_capacity: usize,
+    cells: wgpu::Buffer,
+    cell_capacity: usize,
+    cell_count: u32,
+    terrain_instances: wgpu::Buffer,
+    terrain_slots: u32,
+    points: wgpu::Buffer,
+    details: Vec<DetailGpu>,
+    selection: wgpu::Buffer,
+    /// Locals of the selection: no offset, opaque.
+    world_group: wgpu::BindGroup,
+    /// Texel scratch of atlas uploads.
+    level0: Box<[u8; LEVEL0]>,
+    level1: Box<[u8; LEVEL1]>,
     targets: Option<Targets>,
 }
 
 impl Gpu {
-    /// Creates the pipelines and static buffers for an output of `format` (sRGB) drawn with
-    /// `samples` samples per pixel.
+    /// Creates the pipelines and buffers for an output of `format` (sRGB) drawn with
+    /// `samples` samples per pixel and a terrain atlas of `atlas_per_row²` rooms.
     #[cfg_attr(
         not(any(target_arch = "wasm32", test)),
         expect(
@@ -76,53 +147,60 @@ impl Gpu {
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
         samples: u32,
+        atlas_per_row: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("overseer-view"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-        let globals = device.create_buffer(&wgpu::BufferDescriptor {
+        let pipelines = Pipelines::new(&device, format, samples);
+        let globals = buffer(
+            &device,
+            "globals",
+            size_of::<Globals>(),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("globals"),
-            size: size_of::<Globals>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals"),
-            layout: &layout,
+            layout: &pipelines.globals_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: globals.as_entire_binding(),
             }],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("overseer-view"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
+        let atlas_side = atlas_per_row * 50;
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("terrain atlas"),
+            size: wgpu::Extent3d {
+                width: atlas_side,
+                height: atlas_side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: ATLAS_LEVELS,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
-        let pipelines = Pipelines {
-            device: &device,
-            layout: &pipeline_layout,
-            shader: &shader,
-            format,
-            samples,
-        };
-        let terrain_pipeline = pipelines.terrain();
-        let object_pipeline = pipelines.objects(false);
-        let overlay_pipeline = pipelines.objects(true);
+        let filter = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("terrain atlas"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
+        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terrain atlas"),
+            layout: &pipelines.atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&filter),
+                },
+            ],
+        });
         let (shapes, shape_ranges) = mesh::shapes();
         let shape_vertices = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("shape vertices"),
@@ -134,25 +212,61 @@ impl Gpu {
             contents: bytemuck::cast_slice(&shapes.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let instance_capacity = 64;
-        let instances = instance_buffer(&device, instance_capacity);
+        let terrain_slots = atlas_per_row * atlas_per_row;
+        let vertex = wgpu::BufferUsages::VERTEX;
+        let terrain_instances = buffer(
+            &device,
+            "terrain instances",
+            terrain_slots as usize * size_of::<TerrainInstance>(),
+            vertex,
+        );
+        let points = buffer(
+            &device,
+            "minimap points",
+            MINIMAP_ROOMS * POINTS * size_of::<PointInstance>(),
+            vertex,
+        );
+        let cell_capacity = 1;
+        let cells = buffer(&device, "cells", size_of::<CellInstance>(), vertex);
+        let details = (0..DETAIL_SLOTS)
+            .map(|_| detail_gpu(&device, &pipelines, 64))
+            .collect();
+        let selection = buffer(&device, "selection", size_of::<Instance>(), vertex);
+        let world_locals = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("world locals"),
+            contents: bytemuck::bytes_of(&Locals {
+                offset: [0.0, 0.0, 0.0, 1.0],
+                tint: [0.0; 4],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let world_group = locals_group(&device, &pipelines, &world_locals);
         Self {
             device,
             queue,
             format,
             samples,
+            pipelines,
             globals,
-            bind_group,
-            terrain_pipeline,
-            object_pipeline,
-            overlay_pipeline,
+            globals_group,
+            atlas,
+            atlas_side,
+            atlas_per_row,
+            atlas_group,
             shape_vertices,
             shape_indices,
             shape_ranges,
-            terrain: None,
-            terrain_version: 0,
-            instances,
-            instance_capacity,
+            cells,
+            cell_capacity,
+            cell_count: 0,
+            terrain_instances,
+            terrain_slots,
+            points,
+            details,
+            selection,
+            world_group,
+            level0: Box::new([0; LEVEL0]),
+            level1: Box::new([0; LEVEL1]),
             targets: None,
         }
     }
@@ -162,32 +276,113 @@ impl Gpu {
         self.queue.present(texture);
     }
 
-    /// Uploads the scene's terrain when it changed and grows the instance buffer to the
-    /// scene's needs (called when the scene changes, so that frames do not allocate).
-    pub fn sync(&mut self, scene: &Scene) {
-        let (terrain, version) = scene.terrain();
-        if version != self.terrain_version {
-            self.terrain_version = version;
-            self.terrain = (!terrain.indices.is_empty()).then(|| {
-                let vertices = self.device.create_buffer_init(&BufferInitDescriptor {
-                    label: Some("terrain vertices"),
-                    contents: bytemuck::cast_slice(&terrain.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                let indices = self.device.create_buffer_init(&BufferInitDescriptor {
-                    label: Some("terrain indices"),
-                    contents: bytemuck::cast_slice(&terrain.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                let count = u32::try_from(terrain.indices.len()).unwrap_or(u32::MAX);
-                (vertices, indices, count)
-            });
+    /// Uploads what changed in the world: cells, atlas texels and instances, minimap slots
+    /// and detail terrain; grows buffers to the world's needs.
+    pub fn sync(&mut self, world: &mut World) {
+        self.sync_cells(world);
+        self.sync_atlas(world);
+        let stride = size_of::<PointInstance>();
+        let (queue, points) = (&self.queue, &self.points);
+        let minimaps = &mut world.minimaps;
+        let mut dirty = std::mem::take(&mut minimaps.dirty);
+        dirty.drain(MINIMAP_ROOMS, |slots| {
+            for slot in slots {
+                let data = minimaps.points(slot);
+                if !data.is_empty() {
+                    let offset = (slot * POINTS * stride) as u64;
+                    queue.write_buffer(points, offset, bytemuck::cast_slice(data));
+                }
+            }
+        });
+        minimaps.dirty = dirty;
+        for (gpu, detail) in self.details.iter_mut().zip(world.details()) {
+            if let Some(detail) = detail {
+                sync_detail(&self.device, gpu, detail);
+            } else {
+                gpu.id = 0;
+                gpu.terrain = None;
+            }
         }
-        let needed = scene.instance_capacity();
-        if needed > self.instance_capacity {
-            self.instance_capacity = needed.next_power_of_two();
-            self.instances = instance_buffer(&self.device, self.instance_capacity);
+    }
+
+    fn sync_cells(&mut self, world: &mut World) {
+        let cells = &mut world.cells;
+        let len = cells.instances().len();
+        if len > self.cell_capacity {
+            self.cell_capacity = len.next_power_of_two();
+            self.cells = buffer(
+                &self.device,
+                "cells",
+                self.cell_capacity * size_of::<CellInstance>(),
+                wgpu::BufferUsages::VERTEX,
+            );
+            cells.dirty.mark_all();
         }
+        self.cell_count = u32::try_from(len).unwrap_or(u32::MAX);
+        let stride = size_of::<CellInstance>();
+        let (queue, buffer) = (&self.queue, &self.cells);
+        let mut dirty = std::mem::take(&mut cells.dirty);
+        dirty.drain(len, |range| {
+            let offset = (range.start * stride) as u64;
+            queue.write_buffer(
+                buffer,
+                offset,
+                bytemuck::cast_slice(&cells.instances()[range]),
+            );
+        });
+        cells.dirty = dirty;
+    }
+
+    fn sync_atlas(&mut self, world: &mut World) {
+        let atlas = &mut world.atlas;
+        let mut uploads = std::mem::take(&mut atlas.uploads);
+        uploads.sort_unstable();
+        uploads.dedup();
+        for &slot in &uploads {
+            if !atlas.texels(slot, &mut self.level0, &mut self.level1) {
+                continue;
+            }
+            let (column, row) = (slot % self.atlas_per_row, slot / self.atlas_per_row);
+            for (level, data, side) in [(0, &self.level0[..], 50), (1, &self.level1[..], 25)] {
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.atlas,
+                        mip_level: level,
+                        origin: wgpu::Origin3d {
+                            x: column * side,
+                            y: row * side,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(side * 2),
+                        rows_per_image: Some(side),
+                    },
+                    wgpu::Extent3d {
+                        width: side,
+                        height: side,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+        uploads.clear();
+        atlas.uploads = uploads;
+        let stride = size_of::<TerrainInstance>();
+        let (queue, buffer) = (&self.queue, &self.terrain_instances);
+        let mut dirty = std::mem::take(&mut atlas.dirty);
+        dirty.drain(atlas.instances().len(), |range| {
+            let offset = (range.start * stride) as u64;
+            queue.write_buffer(
+                buffer,
+                offset,
+                bytemuck::cast_slice(&atlas.instances()[range]),
+            );
+        });
+        atlas.dirty = dirty;
     }
 
     /// Sizes the depth and multisample targets to the output (recreated only on change).
@@ -223,32 +418,61 @@ impl Gpu {
         self.targets = Some(Targets { size, depth, msaa });
     }
 
-    /// Draws a frame of the scene into `output` (a view of [`Self::format`], sized by the
-    /// latest [`Self::resize`]).
-    pub fn draw(
-        &mut self,
-        output: &wgpu::TextureView,
-        view_projection: Mat4,
-        scene: &Scene,
-        frame: &Frame,
-    ) {
-        let Some(targets) = &self.targets else {
-            return;
-        };
+    /// Writes the uniforms and instances of a frame.
+    fn prepare(&self, draw: &Draw, world: &World) {
+        let terrain = |rgb| mesh::linear(rgb);
         let globals = Globals {
-            view_projection: view_projection.to_cols_array_2d(),
-            light: Vec3::new(-0.4, 1.0, -0.3)
-                .normalize()
-                .extend(0.0)
-                .to_array(),
+            view_projection: draw.view_projection.to_cols_array_2d(),
+            light: light().extend(0.0).to_array(),
+            params: [
+                draw.fades.terrain,
+                draw.fades.minimap,
+                draw.fades.borders,
+                1.0 / f32::from(u16::try_from(self.atlas_side).unwrap_or(u16::MAX)),
+            ],
+            plain: terrain(mesh::PLAIN),
+            swamp: terrain(mesh::SWAMP),
+            wall: terrain(mesh::WALL_TOP),
         };
         self.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        let instances = scene.instances();
-        if !instances.is_empty() && instances.len() <= self.instance_capacity {
+        for (gpu, detail) in self.details.iter().zip(world.details()) {
+            let Some(detail) = detail else {
+                continue;
+            };
+            let instances = detail.scene.instances();
+            if !instances.is_empty() && instances.len() <= gpu.capacity {
+                self.queue
+                    .write_buffer(&gpu.instances, 0, bytemuck::cast_slice(instances));
+            }
+            let origin = room_origin(detail.room);
+            let tint = world.tint(detail.room);
+            let [r, g, b, _] = mesh::linear(u32::from_be_bytes([0, tint[0], tint[1], tint[2]]));
+            let locals = Locals {
+                offset: [
+                    origin.x,
+                    0.0,
+                    origin.y,
+                    draw.fades.detail * detail.arrival(draw.now),
+                ],
+                tint: [r, g, b, f32::from(tint[3]) / 255.0],
+            };
             self.queue
-                .write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+                .write_buffer(&gpu.locals, 0, bytemuck::bytes_of(&locals));
         }
+        if let Some(selection) = &draw.selection {
+            self.queue
+                .write_buffer(&self.selection, 0, bytemuck::bytes_of(selection));
+        }
+    }
+
+    /// Draws a frame of the world into `output` (a view of [`Self::format`], sized by the
+    /// latest [`Self::resize`]).
+    pub fn draw(&self, output: &wgpu::TextureView, draw: &Draw, world: &World) {
+        let Some(targets) = &self.targets else {
+            return;
+        };
+        self.prepare(draw, world);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -258,7 +482,7 @@ impl Gpu {
                 .as_ref()
                 .map_or((output, None), |msaa| (msaa, Some(output)));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("room"),
+                label: Some("world"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
@@ -280,145 +504,180 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            if let Some((vertices, indices, count)) = &self.terrain {
-                pass.set_pipeline(&self.terrain_pipeline);
-                pass.set_vertex_buffer(0, vertices.slice(..));
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*count, 0, 0..1);
-            }
-            if instances.len() <= self.instance_capacity {
+            pass.set_bind_group(0, &self.globals_group, &[]);
+            self.draw_flat(&mut pass, draw, world);
+            self.draw_details(&mut pass, draw, world);
+            if draw.selection.is_some() {
+                pass.set_pipeline(&self.pipelines.overlay);
+                pass.set_bind_group(1, &self.world_group, &[]);
                 pass.set_vertex_buffer(0, self.shape_vertices.slice(..));
+                pass.set_vertex_buffer(1, self.selection.slice(..));
                 pass.set_index_buffer(self.shape_indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.set_pipeline(&self.object_pipeline);
-                for (shape, range) in self.shape_ranges.iter().zip(&frame.ranges) {
-                    self.draw_instances(&mut pass, shape, range.clone());
-                }
-                if let Some(selection) = frame.selection {
-                    pass.set_pipeline(&self.overlay_pipeline);
-                    let ring = &self.shape_ranges[2];
-                    self.draw_instances(&mut pass, ring, selection..selection + 1);
-                }
+                pass.draw_indexed(self.shape_ranges[2].clone(), 0, 0..1);
             }
         }
         self.queue.submit([encoder.finish()]);
     }
 
-    /// Draws `instances` of a shape. The instance buffer is bound at the first instance:
-    /// WebGL2 has no first-instance offset.
-    fn draw_instances(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        shape: &Range<u32>,
-        instances: Range<u32>,
-    ) {
-        if instances.is_empty() {
-            return;
+    /// Cells, atlas terrain and minimap points.
+    fn draw_flat(&self, pass: &mut wgpu::RenderPass<'_>, draw: &Draw, world: &World) {
+        if self.cell_count > 0 {
+            pass.set_pipeline(&self.pipelines.cells);
+            pass.set_vertex_buffer(0, self.cells.slice(..));
+            pass.draw(0..6, 0..self.cell_count);
         }
-        let stride = size_of::<Instance>() as u64;
-        let bytes = u64::from(instances.start) * stride..u64::from(instances.end) * stride;
-        pass.set_vertex_buffer(1, self.instances.slice(bytes));
-        pass.draw_indexed(shape.clone(), 0, 0..instances.end - instances.start);
+        if draw.fades.terrain > 0.0 {
+            pass.set_pipeline(&self.pipelines.atlas);
+            pass.set_bind_group(1, &self.atlas_group, &[]);
+            pass.set_vertex_buffer(0, self.terrain_instances.slice(..));
+            pass.draw(0..6, 0..self.terrain_slots);
+        }
+        if draw.fades.minimap > 0.0 {
+            pass.set_pipeline(&self.pipelines.points);
+            let stride = size_of::<PointInstance>() as u64;
+            let bounds = world.bounds();
+            for (slot, room, count) in world.minimaps.slots() {
+                if count == 0 || !bounds.contains(room) {
+                    continue;
+                }
+                let start = (slot * POINTS) as u64 * stride;
+                pass.set_vertex_buffer(
+                    0,
+                    self.points.slice(start..start + u64::from(count) * stride),
+                );
+                pass.draw(0..6, 0..count);
+            }
+        }
+    }
+
+    /// The detail scenes: terrain, then objects per shape.
+    fn draw_details(&self, pass: &mut wgpu::RenderPass<'_>, draw: &Draw, world: &World) {
+        let bounds = world.bounds();
+        for (gpu, detail) in self.details.iter().zip(world.details()) {
+            let Some(detail) = detail else {
+                continue;
+            };
+            if gpu.id != detail.id
+                || !bounds.contains(detail.room)
+                || draw.fades.detail * detail.arrival(draw.now) <= 0.0
+            {
+                continue;
+            }
+            pass.set_bind_group(1, &gpu.group, &[]);
+            if let Some((vertices, indices, count)) = &gpu.terrain {
+                pass.set_pipeline(&self.pipelines.detail_terrain);
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*count, 0, 0..1);
+            }
+            if detail.scene.instances().len() > gpu.capacity {
+                continue;
+            }
+            pass.set_pipeline(&self.pipelines.objects);
+            pass.set_vertex_buffer(0, self.shape_vertices.slice(..));
+            pass.set_index_buffer(self.shape_indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (shape, range) in self.shape_ranges.iter().zip(&detail.frame.ranges) {
+                if range.is_empty() {
+                    continue;
+                }
+                // WebGL2 has no first-instance offset: bind the buffer at the first instance.
+                let stride = size_of::<Instance>() as u64;
+                let bytes = u64::from(range.start) * stride..u64::from(range.end) * stride;
+                pass.set_vertex_buffer(1, gpu.instances.slice(bytes));
+                pass.draw_indexed(shape.clone(), 0, 0..range.end - range.start);
+            }
+        }
+    }
+}
+
+/// The direction towards the light.
+fn light() -> Vec3 {
+    Vec3::new(-0.4, 1.0, -0.3).normalize()
+}
+
+/// Uploads a detail scene's terrain when it changed and grows its instance buffer.
+fn sync_detail(device: &wgpu::Device, gpu: &mut DetailGpu, detail: &Detail) {
+    let (terrain, version) = detail.scene.terrain();
+    if gpu.id != detail.id || gpu.terrain_version != version {
+        gpu.id = detail.id;
+        gpu.terrain_version = version;
+        gpu.terrain = (!terrain.indices.is_empty()).then(|| {
+            let vertices = device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("terrain vertices"),
+                contents: bytemuck::cast_slice(&terrain.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let indices = device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("terrain indices"),
+                contents: bytemuck::cast_slice(&terrain.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let count = u32::try_from(terrain.indices.len()).unwrap_or(u32::MAX);
+            (vertices, indices, count)
+        });
+    }
+    let needed = detail.scene.instance_capacity();
+    if needed > gpu.capacity {
+        gpu.capacity = needed.next_power_of_two();
+        gpu.instances = instance_buffer(device, gpu.capacity);
+    }
+}
+
+/// An empty detail slot with room for `capacity` instances.
+fn detail_gpu(device: &wgpu::Device, pipelines: &Pipelines, capacity: usize) -> DetailGpu {
+    let locals = buffer(
+        device,
+        "locals",
+        size_of::<Locals>(),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let group = locals_group(device, pipelines, &locals);
+    DetailGpu {
+        id: 0,
+        terrain_version: 0,
+        terrain: None,
+        instances: instance_buffer(device, capacity),
+        capacity,
+        locals,
+        group,
     }
 }
 
 fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("instances"),
-        size: (capacity * size_of::<Instance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+    buffer(
+        device,
+        "instances",
+        capacity * size_of::<Instance>(),
+        wgpu::BufferUsages::VERTEX,
+    )
+}
+
+fn locals_group(
+    device: &wgpu::Device,
+    pipelines: &Pipelines,
+    locals: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("locals"),
+        layout: &pipelines.locals_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: locals.as_entire_binding(),
+        }],
     })
 }
 
-/// What every pipeline shares.
-struct Pipelines<'a> {
-    device: &'a wgpu::Device,
-    layout: &'a wgpu::PipelineLayout,
-    shader: &'a wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-    samples: u32,
-}
-
-impl Pipelines<'_> {
-    fn terrain(&self) -> wgpu::RenderPipeline {
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
-        let buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: size_of::<TerrainVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &attributes,
-        })];
-        self.build("terrain", "terrain_vertex", &buffers, false)
-    }
-
-    /// The object pipeline; `overlay` draws over everything (no depth test or write).
-    fn objects(&self, overlay: bool) -> wgpu::RenderPipeline {
-        let shape = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-        let instance = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32x3, 4 => Float32x4];
-        let buffers = [
-            Some(wgpu::VertexBufferLayout {
-                array_stride: size_of::<ShapeVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &shape,
-            }),
-            Some(wgpu::VertexBufferLayout {
-                array_stride: size_of::<Instance>() as u64,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &instance,
-            }),
-        ];
-        let label = if overlay { "overlay" } else { "objects" };
-        self.build(label, "object_vertex", &buffers, overlay)
-    }
-
-    fn build(
-        &self,
-        label: &str,
-        entry_point: &str,
-        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-        overlay: bool,
-    ) -> wgpu::RenderPipeline {
-        self.device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(self.layout),
-                vertex: wgpu::VertexState {
-                    module: self.shader,
-                    entry_point: Some(entry_point),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers,
-                },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..wgpu::PrimitiveState::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH,
-                    depth_write_enabled: Some(!overlay),
-                    depth_compare: Some(if overlay {
-                        wgpu::CompareFunction::Always
-                    } else {
-                        wgpu::CompareFunction::Less
-                    }),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: self.samples,
-                    ..wgpu::MultisampleState::default()
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: self.shader,
-                    entry_point: Some("fragment"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-    }
+/// A buffer of `size` bytes, writable from the queue.
+fn buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: usize,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size.max(16) as u64,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }

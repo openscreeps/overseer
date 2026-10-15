@@ -58,6 +58,17 @@ impl Owner {
             Some(_) => Self::Other,
         }
     }
+
+    /// The owner's colour (sRGB); `None` without an owner.
+    pub const fn color(self) -> Option<u32> {
+        match self {
+            Self::None => None,
+            Self::Mine => Some(MINE),
+            Self::Other => Some(OTHER),
+            Self::Invader => Some(INVADER_COLOR),
+            Self::SourceKeeper => Some(KEEPER_COLOR),
+        }
+    }
 }
 
 impl Style {
@@ -114,12 +125,9 @@ impl Style {
         if !self.owned {
             return self.color;
         }
-        match owner {
-            Owner::None => self.color,
-            Owner::Mine => MINE,
-            Owner::Other => OTHER,
-            Owner::Invader => INVADER_COLOR,
-            Owner::SourceKeeper => KEEPER_COLOR,
+        match owner.color() {
+            Some(color) => color,
+            None => self.color,
         }
     }
 }

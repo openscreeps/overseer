@@ -1,5 +1,6 @@
-//! The world map: bounds, interest diffing, terrain batching and seeding, overview lifetime and
-//! budget, minimap cap, detail priority and refusals, cancel safety.
+//! The world map: bounds (measured and known), interest diffing, terrain batching and seeding,
+//! overview lifetime and budget, minimap cap, detail priority, refusals and terrain reuse, cancel
+//! safety.
 //!
 //! Tests on paused time drive [`WorldMap::next`] by yielding (see [`event`]): a runtime that
 //! never idles never advances paused time on its own, so only `tokio::time::advance` moves it.
@@ -272,6 +273,43 @@ async fn bounds_come_from_the_world_size_and_the_central_rooms() {
         let world = overseer.map().world(None).await.unwrap();
         assert_eq!(world.bounds(), rect(west, east), "size {size}");
     }
+}
+
+#[tokio::test]
+async fn known_bounds_make_no_request() {
+    let fake = Fake::new(12, rect("W10N10", "W0N0"));
+    let (server, overseer, _websocket) = connect(fake.routes()).await;
+    let before = server.requests().len();
+    let bounds = rect("W10N10", "W0N0");
+    let mut world = overseer.map().world_with_bounds(None, bounds).unwrap();
+    assert_eq!(world.bounds(), bounds);
+    assert_eq!(world.shard(), None);
+    assert_eq!(
+        server.requests().len(),
+        before,
+        "no world-size or probe request"
+    );
+
+    // The given bounds clip the overviews like measured ones.
+    world.set_interest(&Interest {
+        stats: Some(rect("W20N20", "E5S5")),
+        ..Interest::default()
+    });
+    let WorldEvent::Stats(stats) = event(&mut world).await else {
+        panic!("overviews expected");
+    };
+    assert_eq!(stats.len(), 121);
+    assert!(
+        map_stats(&server)[0]
+            .iter()
+            .all(|name| bounds.contains(room(name)))
+    );
+
+    overseer.shutdown().await;
+    assert!(matches!(
+        overseer.map().world_with_bounds(None, bounds),
+        Err(overseer::Error::Closed)
+    ));
 }
 
 #[tokio::test]
@@ -648,6 +686,88 @@ async fn detail_follows_priority_and_retries_refusals_after_an_interest_change()
     assert_eq!(receive(&mut websocket, 1).await, ["unsubscribe room:W2N2"]);
     assert!(world.detail(b).is_none());
     no_frame(&mut websocket).await;
+}
+
+#[tokio::test]
+async fn detail_reuses_the_world_terrain() {
+    let fake = Fake::new(12, rect("W10N10", "W0N0"));
+    let (server, overseer, mut websocket) = connect(fake.routes()).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let (seeded, fetched, unknown) = (room("W5N5"), room("W6N6"), room("W30N30"));
+    let terrain = overseer.map().terrain(["W0N0"], None).await.unwrap()["W0N0"].clone();
+    world.insert_terrain(seeded, Arc::clone(&terrain));
+    let before = requested(&server, "/api/game/rooms").len();
+
+    // A seeded room subscribes at once, with the seeded terrain and without any request.
+    world.set_interest(&Interest {
+        detail: vec![seeded],
+        ..Interest::default()
+    });
+    assert_eq!(
+        details(&mut world, 1).await,
+        [(seeded, "pending".to_owned())]
+    );
+    assert_eq!(
+        subscribed(&mut world, &mut websocket, 1).await,
+        ["subscribe room:W5N5"]
+    );
+    update(&mut websocket, seeded, 9).await;
+    let WorldEvent::Detail(_, DetailState::Live(snapshot)) = event(&mut world).await else {
+        panic!("a live update expected");
+    };
+    assert!(Arc::ptr_eq(&snapshot.terrain, &terrain));
+    assert_eq!(requested(&server, "/api/game/rooms").len(), before);
+
+    // Other rooms' terrain comes with the world's terrain batch, ahead of the terrain wanted;
+    // a room the server does not know is refused.
+    world.set_interest(&Interest {
+        detail: vec![seeded, fetched, unknown],
+        terrain: vec![room("W1N1")],
+        ..Interest::default()
+    });
+    let mut states = Vec::new();
+    let mut terrain_events = Vec::new();
+    while states.len() < 3 {
+        match event(&mut world).await {
+            WorldEvent::Detail(room, DetailState::Pending) => states.push((room, "pending")),
+            WorldEvent::Detail(room, DetailState::Refused(error)) => {
+                assert_eq!(error, "the server has no room W30N30");
+                states.push((room, "refused"));
+            }
+            WorldEvent::Terrain(room, _) => terrain_events.push(room),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(
+        states,
+        [
+            (fetched, "pending"),
+            (unknown, "pending"),
+            (unknown, "refused")
+        ]
+    );
+    assert_eq!(
+        subscribed(&mut world, &mut websocket, 1).await,
+        ["subscribe room:W6N6"]
+    );
+    let batches = requested(&server, "/api/game/rooms");
+    assert_eq!(batches.len(), before + 1);
+    assert_eq!(
+        batches[before]
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["W1N1", "W30N30", "W6N6"])
+    );
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|request| request.path != "/api/game/room-terrain"),
+        "no room-terrain request"
+    );
+    assert!(matches!(world.detail(fetched), Some(DetailState::Pending)));
+    assert!(world.terrain(fetched).is_some());
 }
 
 #[tokio::test]

@@ -84,11 +84,11 @@ pub enum WorldEvent {
 /// The world of one shard as one continuous map: the overview, terrain, live minimap and live
 /// detail of the rooms the UI needs, as the view moves.
 ///
-/// Created by [`Map::world`]. The app tells it what it needs with [`Self::set_interest`]
-/// (usually from the renderer's camera), which never blocks: it diffs subscriptions and queues
-/// requests, and the work happens while the app awaits [`Self::next`], which returns every
-/// change. The latest data stays readable with [`Self::terrain`], [`Self::stat`],
-/// [`Self::minimap`] and [`Self::detail`].
+/// Created by [`Map::world`] or [`Map::world_with_bounds`]. The app tells it what it needs with
+/// [`Self::set_interest`] (usually from the renderer's camera), which never blocks: it diffs
+/// subscriptions and queues requests, and the work happens while the app awaits
+/// [`Self::next`], which returns every change. The latest data stays readable with
+/// [`Self::terrain`], [`Self::stat`], [`Self::minimap`] and [`Self::detail`].
 ///
 /// # Policies
 ///
@@ -112,6 +112,9 @@ pub enum WorldEvent {
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
 /// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order.
+///   Their terrain comes from the terrain above (they are wanted first, ahead of
+///   [`Interest::terrain`]), so a seeded or fetched room subscribes without any request; a
+///   room the server does not know is refused.
 ///   The server sends each user at most 2 rooms per update across all connections (pop-out
 ///   windows included) and refuses the others (`subscribe limit reached`): the least
 ///   important subscribed room is then released and reported [`DetailState::Refused`] once,
@@ -158,7 +161,7 @@ impl Work {
     ) -> Poll<Result<(), Closed>> {
         let mut changed = self.terrain.poll(cx, &mut self.events)?;
         changed |= self.stats.poll(cx, client, &mut self.events)?;
-        changed |= self.details.poll(cx, &mut self.events)?;
+        changed |= self.details.poll(cx, &self.terrain, &mut self.events)?;
         if let Some((_, sleep)) = &mut self.timer
             && sleep.as_mut().poll(cx).is_ready()
         {
@@ -218,7 +221,13 @@ impl WorldMap {
             .stats
             .filter(|_| user)
             .and_then(|rect| rect.intersection(&self.bounds));
-        work.terrain.want(&interest.terrain);
+        let detail = unique(&interest.detail);
+        if user {
+            let rooms = detail.iter().chain(&interest.terrain).copied();
+            work.terrain.want(&rooms.collect::<Vec<_>>());
+        } else {
+            work.terrain.want(&interest.terrain);
+        }
         if let Some(view) = &mut self.minimaps {
             let rooms = unique(&interest.minimaps);
             let change = view.set_rooms(rooms.iter().take(MINIMAP_CAP).map(ToString::to_string));
@@ -232,9 +241,10 @@ impl WorldMap {
         }
         let rooms = user.then(|| self.overseer.rooms());
         work.details.set(
-            unique(&interest.detail),
+            detail,
             rooms.as_ref(),
             self.shard.as_deref(),
+            &work.terrain,
             &mut work.events,
         );
         self.interest = interest.clone();
@@ -378,6 +388,24 @@ impl Map {
         };
         let rooms = |count: i64| u32::try_from(count).unwrap_or(0);
         let bounds = RoomRect::world(rooms(size.width), rooms(size.height), sides);
+        Ok(WorldMap::new(self.overseer.clone(), shard, bounds))
+    }
+
+    /// The world of `shard` as one continuous map whose bounds the caller already knows (for
+    /// example [`WorldMap::bounds`] persisted by the app from an earlier session): unlike
+    /// [`Self::world`] it makes no request. Bounds larger than the world only cost requests
+    /// for rooms the server does not know; smaller ones hide rooms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown).
+    pub fn world_with_bounds(
+        &self,
+        shard: Option<&str>,
+        bounds: RoomRect,
+    ) -> Result<WorldMap, Error> {
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
         Ok(WorldMap::new(self.overseer.clone(), shard, bounds))
     }
 }

@@ -76,6 +76,11 @@ impl Terrains {
         self.queue.retain(|&queued| queued != room);
     }
 
+    /// Whether the server does not know `room`.
+    pub(super) fn is_absent(&self, room: RoomCoord) -> bool {
+        self.absent.contains(&room)
+    }
+
     /// Requests the next batch unless one is in flight; returns when to plan again while a
     /// failure holds requests back.
     pub(super) fn plan(&mut self, map: &Map, shard: Option<&str>, now: Instant) -> Option<Instant> {

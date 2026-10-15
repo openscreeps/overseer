@@ -13,8 +13,9 @@ use overseer::core::socket::{UserCpu, UserCpuCpu};
 
 use crate::levels::{self, LevelProgress};
 use crate::register::{confirm_error, email_error, password_error};
+use crate::route::{Route, Shard, parse_room};
 use crate::session;
-use crate::state::{AppState, Screen};
+use crate::state::AppState;
 use crate::ui::form::{Field, FormError, FormStatus};
 use crate::ui::spawn_scoped;
 
@@ -54,9 +55,9 @@ pub fn Profile() -> impl IntoView {
     let state = AppState::expect();
     let Some(session) = state.session.get_untracked() else {
         return view! {
-            <section class="panel">
+            <section class="panel narrow">
                 <p>"You are not signed in."</p>
-                <button type="button" on:click=move |_| state.screen.set(Screen::Servers)>
+                <button type="button" on:click=move |_| state.navigate(Route::Servers)>
                     "Servers"
                 </button>
             </section>
@@ -83,11 +84,13 @@ pub fn Profile() -> impl IntoView {
     reload(false);
     let reload = StoredValue::new_local(reload);
     view! {
-        <Summary overseer=overseer.clone() me />
-        <div class="columns">
-            <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
-            <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
-            <Password overseer me />
+        <div class="page">
+            <Summary overseer=overseer.clone() me />
+            <div class="columns">
+                <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
+                <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
+                <Password overseer me />
+            </div>
         </div>
     }
     .into_any()
@@ -103,6 +106,7 @@ fn Summary(
     let badge = RwSignal::new(None::<String>);
     let world_status = RwSignal::new(None::<String>);
     let start_room = RwSignal::new(None::<String>);
+    let start_route = RwSignal::new(None::<Route>);
     let cpu = RwSignal::new(None::<UserCpu>);
     {
         let overseer = overseer.clone();
@@ -124,10 +128,20 @@ fn Summary(
                 Err(error) => session::describe(&error),
             }));
             start_room.set(Some(match account.start_room(None).await {
-                Ok(Some(room)) => room.shard.map_or_else(
-                    || room.room.clone(),
-                    |shard| format!("{shard} / {}", room.room),
-                ),
+                Ok(Some(room)) => {
+                    let slug = state
+                        .session_server()
+                        .and_then(|server| state.slug(&server.url));
+                    start_route.set(slug.map(|server| Route::World {
+                        server,
+                        shard: Some(Shard::of(room.shard.as_deref())),
+                        room: parse_room(&room.room),
+                    }));
+                    room.shard.map_or_else(
+                        || room.room.clone(),
+                        |shard| format!("{shard} / {}", room.room),
+                    )
+                }
                 Ok(None) => "none".to_owned(),
                 Err(error) => session::describe(&error),
             }));
@@ -194,7 +208,24 @@ fn Summary(
                     <dt>"World status"</dt>
                     <dd>{move || world_status.get().unwrap_or_else(|| "…".to_owned())}</dd>
                     <dt>"Start room"</dt>
-                    <dd>{move || start_room.get().unwrap_or_else(|| "…".to_owned())}</dd>
+                    <dd>
+                        {move || start_room.get().unwrap_or_else(|| "…".to_owned())}
+                        {move || {
+                            start_route
+                                .get()
+                                .map(|route| {
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="link"
+                                            on:click=move |_| state.navigate(route.clone())
+                                        >
+                                            "Show on the map"
+                                        </button>
+                                    }
+                                })
+                        }}
+                    </dd>
                 </dl>
             }
             .into_any()
@@ -204,14 +235,21 @@ fn Summary(
         <section class="panel" aria-labelledby="profile-title">
             {body}
             <div class="actions">
-                <button type="button" on:click=move |_| state.screen.set(Screen::Room)>
-                    "Open the room view"
+                <button type="button" class="primary" on:click=move |_| open_map(state)>
+                    "Open the map"
                 </button>
                 <button type="button" class="danger" on:click=sign_out disabled=move || signing_out.get()>
                     "Sign out"
                 </button>
             </div>
         </section>
+    }
+}
+
+/// Opens the world of the signed-in server.
+fn open_map(state: AppState) {
+    if let Some(server) = state.session_server() {
+        state.open_server(&server.url);
     }
 }
 

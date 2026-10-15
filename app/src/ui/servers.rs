@@ -21,11 +21,14 @@ pub fn Servers() -> impl IntoView {
             .collect_view()
     };
     view! {
-        <section class="panel" aria-labelledby="servers-title">
-            <h1 id="servers-title">"Servers"</h1>
-            <ul class="server-list">{items}</ul>
-        </section>
-        <AddServer />
+        <div class="page">
+            <section aria-labelledby="servers-title">
+                <h1 id="servers-title">"Servers"</h1>
+                <p class="muted">"Choose a server to open its world map."</p>
+                <ul class="server-list">{items}</ul>
+            </section>
+            <AddServer />
+        </div>
     }
 }
 
@@ -59,19 +62,40 @@ fn ServerItem(server: Server) -> impl IntoView {
     let remove = move |_| {
         let url = remove_url.clone();
         let platform = state.platform();
+        let slug = state.slug(&url);
+        state.update_saved(|saved| saved.forget(&url, slug.as_deref()));
         state.update_profiles(|profiles| profiles.remove(&url));
         spawn_local(async move {
             let _ = platform
                 .secret_delete(&crate::profiles::token_key(&url))
                 .await;
             let _ = platform.secret_delete(&server_password_key(&url)).await;
+            // The cache is bounded anyway; a failure leaves rooms to be evicted later.
+            #[cfg(target_arch = "wasm32")]
+            let _ = crate::terrain_cache::forget_server(&url).await;
         });
     };
     let name = server.name.clone();
+    let live_url = server.url.clone();
+    let dot = move || {
+        let live = state.session.with(|session| {
+            session
+                .as_ref()
+                .is_some_and(|session| session.server == live_url)
+        });
+        if live {
+            super::topbar::status_class(state.status.get())
+        } else {
+            "dot off"
+        }
+    };
     view! {
         <li class="server">
             <div class="server-info">
-                <strong>{server.name}</strong>
+                <strong>
+                    <span class=dot aria-hidden="true"></span>
+                    {server.name}
+                </strong>
                 <span class="muted">{kind} " · " {server.url}</span>
                 <span>{account}</span>
             </div>

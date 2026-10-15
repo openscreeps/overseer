@@ -2,7 +2,14 @@
 //! browser or in the Tauri shell's webview (`app/src-tauri`).
 //!
 //! The UI is a Leptos client-side app; sessions, live data and every API call come from the
-//! `overseer` library running in the page, rooms are drawn by `overseer-view` into a canvas.
+//! `overseer` library running in the page, the world and its rooms are drawn by
+//! `overseer-view` into canvases.
+//!
+//! Navigation is server → shard → world → room: [`route`] keeps it in the URL hash, the world
+//! map ([`feed`]) zooms continuously from the whole shard into live rooms, and a room also
+//! shows alone as a room control (in the drawer, or popped out into its own window).
+//! [`saved`] and [`terrain_cache`] remember where the user was and every room terrain
+//! across restarts.
 //! [`platform`] hides where it runs: the Tauri shell (proxy, OS keychain, external links) or a
 //! plain browser (direct connections or the page's own `overseer-proxy`, `localStorage`).
 //!
@@ -20,12 +27,23 @@
 //!   `cargo run -p overseer-proxy -- --upstream https://screeps.com/ --static app/dist`.
 
 mod connect;
+mod feed;
 mod levels;
 mod platform;
 mod profiles;
 mod register;
+mod route;
+mod saved;
 mod session;
 mod state;
+#[cfg_attr(
+    not(any(target_arch = "wasm32", test)),
+    expect(
+        dead_code,
+        reason = "the cache runs in browsers; natively only its tests use it"
+    )
+)]
+mod terrain_cache;
 mod ui;
 
 fn main() {

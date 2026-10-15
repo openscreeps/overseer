@@ -17,7 +17,7 @@ overseer.workspace = true
 overseer-view.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `broadcast::error::RecvError` of the notices.
+# `broadcast::error::RecvError` of the notices, `mpsc` of the world feed.
 tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
 wasm-bindgen.workspace = true
@@ -25,12 +25,28 @@ wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
 web-sys = { workspace = true, features = [
   "CssStyleDeclaration",
+  "DomException",
   "DomRect",
+  "DomStringList",
   "Element",
+  "History",
   "HtmlCanvasElement",
   "HtmlElement",
+  "HtmlSelectElement",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbKeyRange",
+  "IdbObjectStore",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "KeyboardEvent",
   "Location",
   "MediaQueryList",
+  "Node",
+  "NodeList",
+  "Performance",
   "PointerEvent",
   "ResizeObserver",
   "Response",

@@ -1,0 +1,509 @@
+//! The top bar: server switcher, shard switcher, breadcrumb, room search, 2D/3D, drawer
+//! toggle and account menu. Its height never changes; world controls show on the world
+//! route only.
+
+use leptos::html::{Button, Div};
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use overseer::ConnectionStatus;
+use wasm_bindgen::JsCast;
+use web_sys::KeyboardEvent;
+
+use crate::route::{Route, Shard, parse_room};
+use crate::state::AppState;
+use crate::ui::window::ModeSwitch;
+use crate::ui::world::MapState;
+
+/// The top bar.
+#[component]
+pub fn TopBar() -> impl IntoView {
+    let page = expect_context::<Memo<super::Page>>();
+    let on_world = move || matches!(page.get(), super::Page::World { .. });
+    view! {
+        <header class="topbar">
+            <a class="brand" href="#/" aria-label="Overseer: servers">
+                <img src="icon.svg" alt="" width="22" height="22" />
+                <span>"Overseer"</span>
+            </a>
+            <ServerSwitcher />
+            <Show when=on_world>
+                <ShardSwitcher />
+            </Show>
+            <Breadcrumb />
+            <span class="spacer"></span>
+            <Show when=on_world>
+                <RoomSearch />
+                <ModeSwitch />
+                <DrawerToggle />
+            </Show>
+            <AccountMenu />
+        </header>
+    }
+}
+
+/// A menu button and its menu: arrow keys move between items, Escape closes it and returns
+/// to the button, a click outside or on an item closes it.
+#[component]
+fn Menu(
+    /// Element id of the menu.
+    id: &'static str,
+    /// Accessible name of the button.
+    #[prop(into)]
+    label: Signal<String>,
+    /// The button's content.
+    button: ViewFn,
+    /// `li role="none"` items holding `role="menuitem"` (or `menuitemradio`) buttons.
+    children: ChildrenFn,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let root = NodeRef::<Div>::new();
+    let trigger = NodeRef::<Button>::new();
+    let outside = window_event_listener(leptos::ev::pointerdown, move |event| {
+        if !open.get_untracked() {
+            return;
+        }
+        let inside = root.get_untracked().is_some_and(|root| {
+            event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+                .is_some_and(|target| root.contains(Some(&target)))
+        });
+        if !inside {
+            open.set(false);
+        }
+    });
+    on_cleanup(move || outside.remove());
+    let items = move || {
+        root.get_untracked()
+            .and_then(|root| root.query_selector_all("[role^=menuitem]").ok())
+            .map(|list| {
+                (0..list.length())
+                    .filter_map(|index| list.item(index))
+                    .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let focus_item = move |step: i32| {
+        let items = items();
+        if items.is_empty() {
+            return;
+        }
+        let active = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element());
+        let current = items.iter().position(|item| {
+            active
+                .as_ref()
+                .is_some_and(|active| active == item.unchecked_ref::<web_sys::Element>())
+        });
+        let count = i32::try_from(items.len()).unwrap_or(i32::MAX);
+        let next = current.map_or(if step > 0 { 0 } else { count - 1 }, |index| {
+            (i32::try_from(index).unwrap_or(0) + step).rem_euclid(count)
+        });
+        if let Some(item) = usize::try_from(next).ok().and_then(|next| items.get(next)) {
+            let _ = item.focus();
+        }
+    };
+    let keydown = move |event: KeyboardEvent| match event.key().as_str() {
+        "Escape" => {
+            event.prevent_default();
+            open.set(false);
+            if let Some(trigger) = trigger.get_untracked() {
+                let _ = trigger.focus();
+            }
+        }
+        "ArrowDown" => {
+            event.prevent_default();
+            if !open.get_untracked() {
+                open.set(true);
+            }
+            request_animation_frame(move || focus_item(1));
+        }
+        "ArrowUp" => {
+            event.prevent_default();
+            focus_item(-1);
+        }
+        "Tab" => open.set(false),
+        _ => {}
+    };
+    let menu_id = id;
+    view! {
+        <div class="menu" node_ref=root on:keydown=keydown>
+            <button
+                type="button"
+                class="menu-button"
+                node_ref=trigger
+                aria-haspopup="menu"
+                aria-expanded=move || open.get().to_string()
+                aria-controls=menu_id
+                aria-label=label
+                on:click=move |_| open.update(|open| *open = !*open)
+            >
+                {move || button.run()}
+            </button>
+            <ul
+                id=menu_id
+                role="menu"
+                class="menu-list"
+                hidden=move || !open.get()
+                on:click=move |event| {
+                    let item = event
+                        .target()
+                        .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                        .and_then(|element| element.closest("[role^=menuitem]").ok().flatten());
+                    if item.is_some() {
+                        open.set(false);
+                    }
+                }
+            >
+                {children()}
+            </ul>
+        </div>
+    }
+}
+
+/// The CSS class of the status dot of a connection.
+pub fn status_class(status: Option<ConnectionStatus>) -> &'static str {
+    match status {
+        Some(ConnectionStatus::Connected) => "dot ok",
+        Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. }) => "dot busy",
+        _ => "dot off",
+    }
+}
+
+/// The saved servers and their state; "Manage servers" opens the list.
+#[component]
+fn ServerSwitcher() -> impl IntoView {
+    let state = AppState::expect();
+    let current = move || {
+        state.profiles.track();
+        state
+            .route
+            .with(|route| route.server().and_then(|slug| state.server_by_slug(slug)))
+    };
+    let live_url = move || {
+        state
+            .session
+            .with(|session| session.as_ref().map(|s| s.server.clone()))
+    };
+    let button = move || {
+        let server = current();
+        let live = server
+            .as_ref()
+            .is_some_and(|server| live_url().as_deref() == Some(server.url.as_str()));
+        let dot = if live {
+            status_class(state.status.get())
+        } else {
+            "dot off"
+        };
+        let name = server.map_or_else(|| "Servers".to_owned(), |server| server.name);
+        view! {
+            <span class=dot aria-hidden="true"></span>
+            <span class="menu-text">{name}</span>
+            <span class="caret" aria-hidden="true">"▾"</span>
+        }
+    };
+    let label = Signal::derive(move || {
+        current().map_or_else(
+            || "Server: none chosen".to_owned(),
+            |server| format!("Server: {}", server.name),
+        )
+    });
+    let items = move || {
+        let live = live_url();
+        let current_url = current().map(|server| server.url);
+        state
+            .profiles
+            .get()
+            .servers
+            .into_iter()
+            .map(|server| {
+                let account = server.user.as_ref().map_or_else(
+                    || "signed out".to_owned(),
+                    |user| {
+                        user.username
+                            .clone()
+                            .unwrap_or_else(|| "signed in".to_owned())
+                    },
+                );
+                let dot = if live.as_deref() == Some(server.url.as_str()) {
+                    status_class(state.status.get())
+                } else {
+                    "dot off"
+                };
+                let checked = (current_url.as_deref() == Some(server.url.as_str())).to_string();
+                let url = server.url.clone();
+                view! {
+                    <li role="none">
+                        <button
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked=checked
+                            on:click=move |_| state.open_server(&url)
+                        >
+                            <span class=dot aria-hidden="true"></span>
+                            <span class="item-main">{server.name}</span>
+                            <span class="item-note">{account}</span>
+                        </button>
+                    </li>
+                }
+            })
+            .collect_view()
+    };
+    view! {
+        <Menu id="server-menu" label button=ViewFn::from(button)>
+            {items}
+            <li role="separator"></li>
+            <li role="none">
+                <button type="button" role="menuitem" on:click=move |_| state.navigate(Route::Servers)>
+                    "Manage servers…"
+                </button>
+            </li>
+        </Menu>
+    }
+}
+
+/// The shard of the world; hidden with fewer than two shards.
+#[component]
+fn ShardSwitcher() -> impl IntoView {
+    let state = AppState::expect();
+    let map = MapState::expect();
+    let change = move |event: leptos::ev::Event| {
+        let Some(select) = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::HtmlSelectElement>().ok())
+        else {
+            return;
+        };
+        let shard = Shard::Named(select.value());
+        let Some(slug) = state
+            .route
+            .with_untracked(|route| route.server().map(str::to_owned))
+        else {
+            return;
+        };
+        let room = state.server_by_slug(&slug).and_then(|server| {
+            state.saved.with_untracked(|saved| {
+                saved
+                    .places
+                    .get(&server.url)
+                    .and_then(|place| place.rooms.get(&shard.to_string()).copied())
+            })
+        });
+        state.navigate(Route::World {
+            server: slug,
+            shard: Some(shard),
+            room,
+        });
+    };
+    move || {
+        let shards = map.shards.get();
+        (shards.len() >= 2).then(|| {
+            let current = map.shard.get().map(|shard| shard.to_string());
+            let options = shards
+                .into_iter()
+                .map(|name| {
+                    let selected = current.as_deref() == Some(name.as_str());
+                    view! { <option value=name.clone() selected=selected>{name.clone()}</option> }
+                })
+                .collect_view();
+            view! {
+                <select class="shard-select" aria-label="Shard" on:change=change>
+                    {options}
+                </select>
+            }
+        })
+    }
+}
+
+/// Where the user is: World › room on the world route, else the screen's name.
+#[component]
+fn Breadcrumb() -> impl IntoView {
+    let state = AppState::expect();
+    let map = MapState::expect();
+    move || match state.route.get() {
+        Route::World { .. } => {
+            let world = map
+                .shard
+                .get()
+                .and_then(|shard| shard.name().map(str::to_owned))
+                .unwrap_or_else(|| "World".to_owned());
+            let room = map.room.get();
+            view! {
+                <nav class="breadcrumb" aria-label="Breadcrumb">
+                    <ol>
+                        <li>
+                            <button
+                                type="button"
+                                class="crumb"
+                                aria-current=room.is_none().then_some("page")
+                                title="Show the whole world"
+                                on:click=move |_| map.show_world()
+                            >
+                                {world}
+                            </button>
+                        </li>
+                        {room
+                            .map(|room| {
+                                view! {
+                                    <li aria-current="page">
+                                        <span class="crumb">{room.to_string()}</span>
+                                    </li>
+                                }
+                            })}
+                    </ol>
+                </nav>
+            }
+            .into_any()
+        }
+        Route::Servers => view! { <span class="crumb-title">"Servers"</span> }.into_any(),
+        Route::Profile { .. } => view! { <span class="crumb-title">"Account"</span> }.into_any(),
+        Route::Window { .. } => ().into_any(),
+    }
+}
+
+/// "W8N3" jumps there.
+#[component]
+fn RoomSearch() -> impl IntoView {
+    let map = MapState::expect();
+    let query = RwSignal::new(String::new());
+    let error = RwSignal::new(None::<String>);
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        let text = query.get_untracked();
+        let Some(room) = parse_room(&text) else {
+            error.set(Some(format!(
+                "“{}” is not a room name such as W8N3",
+                text.trim()
+            )));
+            return;
+        };
+        if map
+            .bounds
+            .get_untracked()
+            .is_some_and(|bounds| !bounds.contains(room))
+        {
+            error.set(Some(format!("{room} is outside this world")));
+            return;
+        }
+        error.set(None);
+        query.set(String::new());
+        map.go_to(room);
+    };
+    view! {
+        <form class="room-search" role="search" on:submit=submit novalidate>
+            <input
+                id="room-search"
+                type="search"
+                placeholder="Go to room (/)"
+                aria-label="Go to room"
+                aria-invalid=move || error.with(Option::is_some).to_string()
+                aria-describedby="room-search-error"
+                autocomplete="off"
+                spellcheck="false"
+                size="12"
+                bind:value=query
+                on:input=move |_| error.set(None)
+                on:keydown=move |event: KeyboardEvent| {
+                    if event.key() == "Escape" {
+                        event.prevent_default();
+                        query.set(String::new());
+                        error.set(None);
+                        if let Some(target) = event
+                            .target()
+                            .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
+                        {
+                            let _ = target.blur();
+                        }
+                    }
+                }
+            />
+            <span id="room-search-error" class="search-error" role="alert">
+                {move || error.get()}
+            </span>
+        </form>
+    }
+}
+
+/// Opens or closes the drawer (saved in the settings).
+#[component]
+fn DrawerToggle() -> impl IntoView {
+    let state = AppState::expect();
+    let open = move || state.saved.with(|saved| saved.settings.drawer);
+    let toggle = move |_| {
+        let next = !open();
+        state.update_saved(|saved| saved.settings.drawer = next);
+    };
+    view! {
+        <button
+            type="button"
+            class="icon-button"
+            aria-expanded=move || open().to_string()
+            aria-controls="drawer"
+            aria-label="Room drawer"
+            title="Room drawer"
+            on:click=toggle
+        >
+            "▤"
+        </button>
+    }
+}
+
+/// The signed-in account: profile and sign-out.
+#[component]
+fn AccountMenu() -> impl IntoView {
+    let state = AppState::expect();
+    let account = move || {
+        state.profiles.track();
+        state.session.track();
+        state.session_server().and_then(|server| {
+            let slug = state.slug(&server.url)?;
+            let name = server
+                .user
+                .and_then(|user| user.username)
+                .unwrap_or_else(|| "Account".to_owned());
+            Some((slug, name))
+        })
+    };
+    move || {
+        account().map(|(slug, name)| {
+            let label = format!("Account: {name}");
+            let button_name = name.clone();
+            view! {
+                <Menu
+                    id="account-menu"
+                    label=label
+                    button=ViewFn::from(move || {
+                        view! {
+                            <span class="menu-text">{button_name.clone()}</span>
+                            <span class="caret" aria-hidden="true">"▾"</span>
+                        }
+                    })
+                >
+                    <li role="none">
+                        <button
+                            type="button"
+                            role="menuitem"
+                            on:click={
+                                let slug = slug.clone();
+                                move |_| state.navigate(Route::Profile { server: slug.clone() })
+                            }
+                        >
+                            "Profile"
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button
+                            type="button"
+                            role="menuitem"
+                            on:click=move |_| spawn_local(async move { state.sign_out().await })
+                        >
+                            "Sign out"
+                        </button>
+                    </li>
+                </Menu>
+            }
+        })
+    }
+}

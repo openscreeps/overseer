@@ -1,6 +1,6 @@
 [package]
 name = "overseer-view"
-description = "Room viewer of the Overseer app: renders live room snapshots with wgpu into a browser canvas (WebGPU, else WebGL2)"
+description = "World and room viewer of the Overseer app: renders a shard's rooms, from overview to live room snapshots, with wgpu into a browser canvas (WebGPU, else WebGL2)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 overseer.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 # Native builds compile the renderer without a GPU backend: the scene, camera, picking and
 # interpolation are platform-independent, only the canvas constructor needs a browser.

@@ -12,7 +12,7 @@ use url::Url;
 /// `localStorage` key of the saved profiles.
 pub const STORAGE_KEY: &str = "overseer.profiles";
 /// Version written into the saved document; older documents parse with defaults.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// The official server.
 pub const OFFICIAL_URL: &str = "https://screeps.com/";
 /// The official seasonal server (screeps.com accounts).
@@ -63,9 +63,6 @@ pub struct Server {
     /// The signed-in account; `None` when signed out.
     #[serde(default)]
     pub user: Option<SavedUser>,
-    /// The room last opened, as `shard/room` or `room`.
-    #[serde(default)]
-    pub room: Option<String>,
 }
 
 impl Server {
@@ -77,7 +74,6 @@ impl Server {
             kind,
             login: None,
             user: None,
-            room: None,
         }
     }
 
@@ -91,20 +87,17 @@ impl Server {
     }
 }
 
-/// Every saved server and the one in use.
+/// Every saved server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profiles {
     /// Servers, screeps.com first.
     pub servers: Vec<Server>,
-    /// URL of the server whose session resumes on start.
-    pub active: Option<String>,
 }
 
 impl Default for Profiles {
     fn default() -> Self {
         Self {
             servers: vec![Server::official()],
-            active: None,
         }
     }
 }
@@ -114,7 +107,6 @@ impl Default for Profiles {
 #[serde(default)]
 struct Stored {
     servers: Vec<serde_json::Value>,
-    active: Option<String>,
 }
 
 /// The saved document as written.
@@ -122,7 +114,6 @@ struct Stored {
 struct Saved<'a> {
     version: u32,
     servers: &'a [Server],
-    active: Option<&'a str>,
 }
 
 impl Profiles {
@@ -134,7 +125,6 @@ impl Profiles {
             .unwrap_or_default();
         let mut profiles = Self {
             servers: Vec::new(),
-            active: None,
         };
         for value in stored.servers {
             let Ok(mut server) = serde_json::from_value::<Server>(value) else {
@@ -160,9 +150,6 @@ impl Profiles {
             }
             None => profiles.servers.insert(0, Server::official()),
         }
-        profiles.active = stored
-            .active
-            .filter(|active| profiles.server(active).is_some());
         profiles
     }
 
@@ -171,7 +158,6 @@ impl Profiles {
         let saved = Saved {
             version: VERSION,
             servers: &self.servers,
-            active: self.active.as_deref(),
         };
         serde_json::to_string(&saved).unwrap_or_default()
     }
@@ -213,9 +199,81 @@ impl Profiles {
     pub fn remove(&mut self, url: &str) {
         self.servers
             .retain(|server| server.kind == ServerKind::Official || server.url != url);
-        if self.active.as_deref() == Some(url) {
-            self.active = None;
+    }
+
+    /// The route slug of the server with base URL `url` (see [`crate::route`]): its [`base_slug`], and
+    /// when another saved server has the same one, a suffix: `-http` for a plain-HTTP URL
+    /// whose HTTPS twin is listed too, else `-<n>` with `n` its position among those servers
+    /// (from 2).
+    pub fn slug(&self, url: &str) -> Option<String> {
+        self.server(url)?;
+        let base = base_slug(url);
+        let twins: Vec<&str> = self
+            .servers
+            .iter()
+            .map(|server| server.url.as_str())
+            .filter(|other| base_slug(other) == base)
+            .collect();
+        if twins.len() == 1 {
+            return Some(base);
         }
+        let without_scheme = |url: &str| url.split_once("://").map(|(_, rest)| rest.to_owned());
+        let https_twin = url.starts_with("http://")
+            && twins.iter().any(|other| {
+                other.starts_with("https://") && without_scheme(other) == without_scheme(url)
+            });
+        if https_twin {
+            return Some(format!("{base}-http"));
+        }
+        let position = twins.iter().position(|other| *other == url)?;
+        Some(if position == 0 {
+            base
+        } else {
+            format!("{base}-{}", position + 1)
+        })
+    }
+
+    /// The server whose [`Self::slug`] is `slug`.
+    pub fn by_slug(&self, slug: &str) -> Option<&Server> {
+        self.servers
+            .iter()
+            .find(|server| self.slug(&server.url).as_deref() == Some(slug))
+    }
+}
+
+/// The slug of a server URL, before disambiguation ([`Profiles::slug`]): its host, port and
+/// path segments joined by `-`, lower-case, with every character outside `[a-z0-9.]`
+/// replaced by `-` and runs of `-` collapsed (`https://screeps.com/season/` →
+/// `screeps.com-season`, `http://localhost:21025/` → `localhost-21025`). It depends on the
+/// URL only, so links stay valid across sessions and machines.
+pub fn base_slug(url: &str) -> String {
+    let Ok(url) = Url::parse(url) else {
+        return "server".to_owned();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(url.host_str().map(str::to_owned));
+    parts.extend(url.port().map(|port| port.to_string()));
+    parts.extend(
+        url.path()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_owned),
+    );
+    let mut slug = String::new();
+    for character in parts.join("-").chars() {
+        let character = character.to_ascii_lowercase();
+        let keep = character.is_ascii_lowercase() || character.is_ascii_digit() || character == '.';
+        if keep {
+            slug.push(character);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        "server".to_owned()
+    } else {
+        slug.to_owned()
     }
 }
 
@@ -265,7 +323,9 @@ pub fn server_password_key(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{OFFICIAL_URL, Profiles, SEASON_URL, SavedUser, Server, ServerKind, normalize_url};
+    use super::{
+        OFFICIAL_URL, Profiles, SEASON_URL, SavedUser, Server, ServerKind, base_slug, normalize_url,
+    };
 
     fn private(url: &str) -> Server {
         Server::new("Local".to_owned(), url.to_owned(), ServerKind::Private)
@@ -296,9 +356,7 @@ mod tests {
             id: "u1".to_owned(),
             username: Some("Player".to_owned()),
         });
-        local.room = Some("W1N1".to_owned());
         profiles.add(local).unwrap();
-        profiles.active = Some("http://localhost:21025/".to_owned());
         let parsed = Profiles::parse(Some(&profiles.to_json()));
         assert_eq!(parsed, profiles);
     }
@@ -334,7 +392,6 @@ mod tests {
         );
         assert_eq!(profiles.servers[1].url, "http://old.example:21025/");
         assert_eq!(profiles.servers[1].user, None);
-        assert_eq!(profiles.active, None);
     }
 
     #[test]
@@ -354,7 +411,6 @@ mod tests {
                 .is_err()
         );
         assert_eq!(profiles.servers.len(), 2);
-        profiles.active = Some("http://localhost:21025/".to_owned());
         profiles.remove("http://localhost:21025/");
         profiles.remove(OFFICIAL_URL);
         assert_eq!(profiles, Profiles::default());
@@ -384,5 +440,55 @@ mod tests {
         ] {
             assert!(normalize_url(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn slugs_are_stable_and_distinct() {
+        assert_eq!(base_slug(OFFICIAL_URL), "screeps.com");
+        assert_eq!(base_slug(SEASON_URL), "screeps.com-season");
+        assert_eq!(base_slug("http://localhost:21025/"), "localhost-21025");
+        assert_eq!(base_slug("http://127.0.0.1:21025/"), "127.0.0.1-21025");
+        assert_eq!(base_slug("http://My_Host:80/a b/C/"), "my-host-a-20b-c");
+        assert_eq!(base_slug("not a url"), "server");
+
+        let mut profiles = Profiles::default();
+        for url in [
+            "http://screeps.com/",
+            "http://a.example/x-y/",
+            "http://a.example/x/y/",
+            SEASON_URL,
+        ] {
+            profiles.add(private(url)).unwrap();
+        }
+        let slugs: Vec<_> = profiles
+            .servers
+            .iter()
+            .map(|server| profiles.slug(&server.url).unwrap())
+            .collect();
+        assert_eq!(
+            slugs,
+            [
+                "screeps.com",
+                "screeps.com-http",
+                "a.example-x-y",
+                "a.example-x-y-2",
+                "screeps.com-season"
+            ]
+        );
+        for (server, slug) in profiles.servers.iter().zip(&slugs) {
+            assert_eq!(profiles.by_slug(slug), Some(server));
+        }
+        assert_eq!(profiles.slug("http://unknown/"), None);
+        assert_eq!(profiles.by_slug("unknown"), None);
+        // Slugs depend on the URL alone, except between servers sharing one.
+        profiles.remove("http://a.example/x-y/");
+        assert_eq!(
+            profiles.slug(SEASON_URL).as_deref(),
+            Some("screeps.com-season")
+        );
+        assert_eq!(
+            profiles.slug("https://screeps.com/").as_deref(),
+            Some("screeps.com")
+        );
     }
 }

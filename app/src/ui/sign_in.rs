@@ -8,6 +8,7 @@ use overseer::core::Token;
 
 use crate::platform::Platform;
 use crate::profiles::{Server, server_password_key};
+use crate::route::Route;
 use crate::session::{self, Failure};
 use crate::state::{AppState, Screen};
 use crate::ui::form::FormError;
@@ -35,9 +36,9 @@ pub fn SignIn(
     let state = AppState::expect();
     let Some(server) = state.server(&server) else {
         return view! {
-            <section class="panel">
+            <section class="panel narrow">
                 <p role="alert">"This server is no longer in the list."</p>
-                <button type="button" on:click=move |_| state.screen.set(Screen::Servers)>
+                <button type="button" on:click=move |_| state.navigate(Route::Servers)>
                     "Back to the servers"
                 </button>
             </section>
@@ -46,15 +47,24 @@ pub fn SignIn(
     };
     let title = format!("Sign in to {}", server.name);
     let form = if server.kind.uses_screeps_accounts() {
-        view! { <ScreepsSignIn server /> }.into_any()
+        view! { <ScreepsSignIn server=server.clone() /> }.into_any()
     } else {
-        view! { <PrivateSignIn server /> }.into_any()
+        view! { <PrivateSignIn server=server.clone() /> }.into_any()
     };
     view! {
-        <section class="panel narrow" aria-labelledby="sign-in-title">
-            <h1 id="sign-in-title">{title}</h1>
+        <section class="panel narrow card" aria-labelledby="sign-in-title">
+            <header class="card-head">
+                <img src="icon.svg" alt="" width="40" height="40" />
+                <div>
+                    <h1 id="sign-in-title">{title}</h1>
+                    <p class="muted">{server.url.clone()}</p>
+                </div>
+            </header>
             {message.map(|message| view! { <p class="notice" role="alert">{message}</p> })}
             {form}
+            <button type="button" class="link back" on:click=move |_| state.navigate(Route::Servers)>
+                "← Choose another server"
+            </button>
         </section>
     }
     .into_any()

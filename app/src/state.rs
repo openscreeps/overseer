@@ -1,5 +1,14 @@
-//! The app's state and the session lifecycle: resume on start, sign in, token rotation,
-//! expiry, disconnect and sign-out.
+//! The app's state: the route (URL hash), what is remembered across restarts, and the
+//! session lifecycle (resume for the route's server, sign in, token rotation, expiry,
+//! disconnect and sign-out).
+//!
+//! The route decides the server: when it names a server other than the live session's, that
+//! server's saved session resumes from its stored token, or its sign-in form shows. The live
+//! session stays connected while the server list is shown.
+//!
+//! A popped-out window ([`Route::Window`] at start) shares the stored tokens but never writes
+//! the saved profiles or [`Saved`] state, and never deletes a token: the main window owns
+//! them.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -8,18 +17,18 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::platform::{self, Platform};
 use crate::profiles::{Profiles, SavedUser, Server, token_key};
+use crate::route::Route;
+use crate::saved::Saved;
 use crate::session::{self, Failure};
 
 /// Shown when a stored token is rejected.
 const EXPIRED: &str = "Your session has expired. Sign in again.";
 
-/// The screen on display.
+/// The session side of the screen on display for a server route.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
     /// Connecting or resuming a session, with what is happening.
     Starting(String),
-    /// The server list.
-    Servers,
     /// Sign-in to the server with base URL `server`, with a message (expired session, …).
     SignIn {
         /// Server base URL.
@@ -32,12 +41,17 @@ pub enum Screen {
         /// Server base URL.
         server: String,
     },
+    /// The server could not be reached (its session stays saved).
+    Failed {
+        /// Server base URL.
+        server: String,
+        /// What went wrong.
+        message: String,
+    },
     /// The signed-in account has no username yet.
     SetUsername,
-    /// The signed-in account.
-    Profile,
-    /// The room viewer.
-    Room,
+    /// The route's content (world, profile, room window).
+    Ready,
 }
 
 /// The live session.
@@ -51,19 +65,11 @@ pub struct Session {
     epoch: u64,
 }
 
-/// What the room screen reports to the status bar.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct RoomStats {
-    /// `shard/room` or `room` on display.
-    pub room: Option<String>,
-    /// Game tick of the latest update.
-    pub game_time: Option<u64>,
-    /// CPU time of the last frame, in milliseconds.
-    pub frame_ms: Option<f32>,
-    /// Objects drawn.
-    pub objects: usize,
-    /// Graphics backend (`WebGPU`, `WebGL2`).
-    pub backend: Option<&'static str>,
+impl Session {
+    /// Distinguishes this session from earlier and later ones.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 /// Everything the components share; `Copy`, provided as context.
@@ -73,7 +79,11 @@ pub struct AppState {
     pub platform: StoredValue<Platform>,
     /// Saved servers.
     pub profiles: RwSignal<Profiles>,
-    /// The screen on display.
+    /// Where the user was (main window only writes it).
+    pub saved: RwSignal<Saved>,
+    /// The route on display.
+    pub route: RwSignal<Route>,
+    /// The session side of the screen.
     pub screen: RwSignal<Screen>,
     /// The live session.
     pub session: RwSignal<Option<Session>, LocalStorage>,
@@ -81,10 +91,12 @@ pub struct AppState {
     pub status: RwSignal<Option<ConnectionStatus>>,
     /// A message for the user outside any form (server messages, failures of background work).
     pub banner: RwSignal<Option<String>>,
-    /// Room screen figures for the status bar.
-    pub room_stats: RwSignal<RoomStats>,
+    /// This window shows a popped-out room.
+    pub popout: StoredValue<bool>,
     /// Counter of sessions begun.
     epoch: StoredValue<u64>,
+    /// Base URL of the server a session is being resumed for.
+    resuming: StoredValue<Option<String>>,
 }
 
 impl AppState {
@@ -93,12 +105,15 @@ impl AppState {
         Self {
             platform: StoredValue::new(platform),
             profiles: RwSignal::new(platform::load_profiles()),
+            saved: RwSignal::new(platform::load_saved()),
+            route: RwSignal::new(Route::Servers),
             screen: RwSignal::new(Screen::Starting("Starting…".to_owned())),
             session: RwSignal::new_local(None),
             status: RwSignal::new(None),
             banner: RwSignal::new(None),
-            room_stats: RwSignal::new(RoomStats::default()),
+            popout: StoredValue::new(false),
             epoch: StoredValue::new(0),
+            resuming: StoredValue::new(None),
         }
     }
 
@@ -112,28 +127,116 @@ impl AppState {
         self.platform.get_value()
     }
 
-    /// Resumes the last active session or shows the server list.
+    /// Whether this window is a popped-out room.
+    pub fn is_popout(self) -> bool {
+        self.popout.get_value()
+    }
+
+    /// Starts on the URL's route, else the last route, else the server list; follows the
+    /// URL hash (back, forward, edited links) and keeps the route's server connected.
     pub fn start(self) {
-        spawn_local(async move {
-            let active = self.profiles.with_untracked(|profiles| {
-                profiles
-                    .active
-                    .as_deref()
-                    .and_then(|url| profiles.server(url))
-                    .filter(|server| server.user.is_some())
-                    .cloned()
-            });
-            match active {
-                Some(server) => self.resume(server).await,
-                None => self.screen.set(Screen::Servers),
+        let hash = platform::location_hash();
+        let route = if hash.is_empty() || hash == "#" {
+            self.saved
+                .with_untracked(|saved| saved.route.clone())
+                .filter(|route| !matches!(route, Route::Window { .. }))
+                .unwrap_or(Route::Servers)
+        } else {
+            Route::parse(&hash).unwrap_or_else(|| {
+                self.banner
+                    .set(Some(format!("“{hash}” is not a page of Overseer.")));
+                Route::Servers
+            })
+        };
+        self.popout.set_value(matches!(route, Route::Window { .. }));
+        self.replace_route(route);
+        let listener = window_event_listener(leptos::ev::hashchange, move |_| {
+            let hash = platform::location_hash();
+            let route = Route::parse(&hash).unwrap_or(Route::Servers);
+            if self.route.get_untracked() != route {
+                self.route.set(route);
             }
         });
+        // The app lives as long as the page.
+        std::mem::forget(listener);
+        Effect::new(move |_| {
+            let route = self.route.get();
+            self.follow_route(&route);
+        });
+    }
+
+    /// Shows `route` as a new history entry.
+    pub fn navigate(self, route: Route) {
+        if self.route.get_untracked() == route {
+            return;
+        }
+        platform::push_hash(&route.hash());
+        self.route.set(route);
+    }
+
+    /// Shows `route` in place of the current history entry (camera-driven changes, resolved
+    /// shards).
+    pub fn replace_route(self, route: Route) {
+        platform::replace_hash(&route.hash());
+        if self.route.get_untracked() != route {
+            self.route.set(route);
+        }
+    }
+
+    /// Saves the route and connects its server.
+    fn follow_route(self, route: &Route) {
+        if !self.is_popout() && !matches!(route, Route::Window { .. }) {
+            self.update_saved(|saved| saved.route = Some(route.clone()));
+        }
+        let Some(slug) = route.server() else {
+            return;
+        };
+        let Some(server) = self.server_by_slug(slug) else {
+            // The route's screen says the server is unknown.
+            self.screen.set(Screen::Ready);
+            return;
+        };
+        let live = self
+            .session
+            .with_untracked(|session| session.as_ref().map(|session| session.server.clone()));
+        if live.as_deref() == Some(server.url.as_str())
+            || self.resuming.get_value().as_deref() == Some(server.url.as_str())
+        {
+            return;
+        }
+        if server.user.is_some() {
+            spawn_local(async move { self.resume(server).await });
+        } else {
+            let showing_form = self.screen.with_untracked(|screen| match screen {
+                Screen::SignIn { server: url, .. } | Screen::Register { server: url } => {
+                    *url == server.url
+                }
+                _ => false,
+            });
+            if !showing_form {
+                self.screen.set(Screen::SignIn {
+                    server: server.url,
+                    message: None,
+                });
+            }
+        }
     }
 
     /// The saved server with base URL `url`.
     pub fn server(self, url: &str) -> Option<Server> {
         self.profiles
             .with_untracked(|profiles| profiles.server(url).cloned())
+    }
+
+    /// The saved server whose route slug is `slug`.
+    pub fn server_by_slug(self, slug: &str) -> Option<Server> {
+        self.profiles
+            .with_untracked(|profiles| profiles.by_slug(slug).cloned())
+    }
+
+    /// The route slug of the saved server with base URL `url`.
+    pub fn slug(self, url: &str) -> Option<String> {
+        self.profiles.with_untracked(|profiles| profiles.slug(url))
     }
 
     /// The server of the live session.
@@ -144,91 +247,109 @@ impl AppState {
         self.server(&url)
     }
 
-    /// Changes the saved profiles and saves them.
+    /// Changes the saved profiles and saves them (not in a popped-out window).
     pub fn update_profiles(self, change: impl FnOnce(&mut Profiles)) {
         self.profiles.update(change);
+        if self.is_popout() {
+            return;
+        }
         if let Err(error) = self.profiles.with_untracked(platform::save_profiles) {
             self.banner
                 .set(Some(format!("Could not save the server list: {error}")));
         }
     }
 
-    /// Opens a server from the list: its live session, its saved session, or its sign-in.
-    pub fn open_server(self, url: &str) {
-        let live = self.session.with_untracked(|session| {
-            session
-                .as_ref()
-                .is_some_and(|session| session.server == url)
-        });
-        if live {
-            self.screen.set(Screen::Profile);
+    /// Changes the saved state and saves it (not in a popped-out window).
+    pub fn update_saved(self, change: impl FnOnce(&mut Saved)) {
+        if self.is_popout() {
             return;
         }
-        let Some(server) = self.server(url) else {
+        self.saved.update(change);
+        // Saving is best effort: losing a camera position is harmless, and a full storage is
+        // reported by the profiles already.
+        let _ = self.saved.with_untracked(platform::save_saved);
+    }
+
+    /// Connects the route's server again after a failure.
+    pub fn retry(self) {
+        let route = self.route.get_untracked();
+        self.follow_route(&route);
+    }
+
+    /// Opens a server: its world (resuming or signing in as needed).
+    pub fn open_server(self, url: &str) {
+        let Some(slug) = self.slug(url) else {
             return;
         };
-        if server.user.is_some() {
-            spawn_local(async move { self.resume(server).await });
-        } else {
-            self.screen.set(Screen::SignIn {
-                server: server.url,
-                message: None,
-            });
-        }
+        self.navigate(Route::World {
+            server: slug,
+            shard: None,
+            room: None,
+        });
     }
 
     /// Resumes the saved session of `server` with its stored token. A rejected token returns
-    /// to the sign-in form (name filled); other failures keep the token and show the list.
+    /// to the sign-in form (name filled); other failures keep the token and show an error.
     async fn resume(self, server: Server) {
+        self.resuming.set_value(Some(server.url.clone()));
         self.disconnect().await;
         self.screen
             .set(Screen::Starting(format!("Connecting to {}…", server.name)));
+        let outcome = self.connect_saved(&server).await;
+        self.resuming.set_value(None);
+        match outcome {
+            Ok(overseer) => self.begin(&server.url, overseer, None),
+            Err(screen) => self.screen.set(screen),
+        }
+        // The route may have moved on meanwhile.
+        let route = self.route.get_untracked();
+        if route.server() != self.slug(&server.url).as_deref() {
+            self.follow_route(&route);
+        }
+    }
+
+    /// Connects with the stored token of `server`, or says which screen to show instead.
+    async fn connect_saved(self, server: &Server) -> Result<Overseer, Screen> {
         let platform = self.platform();
+        let sign_in = |message: Option<&str>| Screen::SignIn {
+            server: server.url.clone(),
+            message: message.map(str::to_owned),
+        };
         let token = match platform.secret_get(&token_key(&server.url)).await {
             Ok(Some(token)) => token,
             Ok(None) => {
                 self.forget_user(&server.url);
-                self.screen.set(Screen::SignIn {
-                    server: server.url,
-                    message: None,
-                });
-                return;
+                return Err(sign_in(None));
             }
             Err(error) => {
-                self.screen.set(Screen::Servers);
                 self.banner
                     .set(Some(format!("Could not read the stored token: {error}")));
-                return;
+                return Err(sign_in(None));
             }
         };
         let auth = Auth::Token(overseer::core::Token::new(token));
         match session::connect(&platform, &server.url, auth, None).await {
-            Ok(overseer) => self.begin(&server.url, overseer, None),
+            Ok(overseer) => Ok(overseer),
             Err(Failure::Unauthorized) => {
-                let _ = platform.secret_delete(&token_key(&server.url)).await;
-                self.forget_user(&server.url);
-                self.screen.set(Screen::SignIn {
-                    server: server.url,
-                    message: Some(EXPIRED.to_owned()),
-                });
+                if !self.is_popout() {
+                    let _ = platform.secret_delete(&token_key(&server.url)).await;
+                    self.forget_user(&server.url);
+                }
+                Err(sign_in(Some(EXPIRED)))
             }
-            Err(Failure::ServerPassword) => self.screen.set(Screen::SignIn {
-                server: server.url,
-                message: Some("This server needs its server password.".to_owned()),
+            Err(Failure::ServerPassword) => {
+                Err(sign_in(Some("This server needs its server password.")))
+            }
+            Err(Failure::Other(error)) => Err(Screen::Failed {
+                server: server.url.clone(),
+                message: format!("Could not connect to {}: {error}", server.name),
             }),
-            Err(Failure::Other(error)) => {
-                self.screen.set(Screen::Servers);
-                self.banner.set(Some(format!(
-                    "Could not connect to {}: {error}",
-                    server.name
-                )));
-            }
         }
     }
 
     /// Starts using a connected session on the server with base URL `url`: saves who signed
     /// in (and the `login` name used), persists every token, follows the connection and
-    /// notices, and shows the profile (or the username form).
+    /// notices, and shows the route's content (or the username form).
     pub fn begin(self, url: &str, overseer: Overseer, login: Option<String>) {
         let epoch = self.epoch.get_value() + 1;
         self.epoch.set_value(epoch);
@@ -244,7 +365,6 @@ impl AppState {
         self.banner.set(None);
         let user_id = overseer.user_id().map(str::to_owned);
         self.update_profiles(|profiles| {
-            profiles.active = Some(url.to_owned());
             if let Some(server) = profiles.server_mut(url) {
                 if login.is_some() {
                     server.login = login;
@@ -256,18 +376,22 @@ impl AppState {
         self.follow_tokens(epoch, url, &overseer);
         self.follow_status(epoch, &overseer);
         self.follow_notices(epoch, &overseer);
+        // Signing in from the server list opens the server.
+        if self.route.get_untracked().server() != self.slug(url).as_deref() {
+            self.open_server(url);
+        }
         let url = url.to_owned();
         spawn_local(async move {
             match overseer.account().me().await {
                 Ok(me) if me.username.is_none() => self.screen.set(Screen::SetUsername),
                 Ok(me) => {
                     self.remember_username(&url, me.username.clone());
-                    self.screen.set(Screen::Profile);
+                    self.screen.set(Screen::Ready);
                 }
                 Err(error) => {
-                    self.screen.set(Screen::Profile);
+                    self.screen.set(Screen::Ready);
                     self.banner.set(Some(format!(
-                        "Could not load the profile: {}",
+                        "Could not load the account: {}",
                         session::describe(&error)
                     )));
                 }
@@ -353,17 +477,23 @@ impl AppState {
                 }
                 match notice {
                     Notice::AuthFailed => {
-                        self.end(true, Some(EXPIRED.to_owned())).await;
+                        self.end(!self.is_popout(), Some(EXPIRED.to_owned())).await;
                         break;
                     }
                     Notice::ServerMessage(message) => self.banner.set(Some(message)),
                     Notice::ServerDown => self
                         .banner
                         .set(Some("The server is down for maintenance.".to_owned())),
+                    // Refused live rooms show in their room control.
+                    Notice::ChannelError {
+                        channel: overseer::core::socket::Channel::Room { .. },
+                        ..
+                    }
+                    | Notice::Undecodable(_)
+                    | Notice::Lagged { .. } => {}
                     Notice::ChannelError { channel, message } => {
                         self.banner.set(Some(format!("{channel}: {message}")));
                     }
-                    Notice::Undecodable(_) | Notice::Lagged { .. } => {}
                 }
             }
         });
@@ -449,9 +579,6 @@ impl AppState {
         self.update_profiles(|profiles| {
             if let Some(server) = profiles.server_mut(url) {
                 server.user = None;
-            }
-            if profiles.active.as_deref() == Some(url) {
-                profiles.active = None;
             }
         });
     }

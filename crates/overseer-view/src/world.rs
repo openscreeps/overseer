@@ -1,0 +1,375 @@
+//! The world as drawn, without the GPU: overview cells, terrain atlas, minimaps and detail
+//! scenes, each recording which of its GPU data changed so that updates only touch the
+//! rooms that changed.
+
+mod atlas;
+mod cells;
+mod minimap;
+
+use std::ops::Range;
+
+use glam::Vec2;
+use overseer::RoomSnapshot;
+use overseer::core::api::Terrain;
+use overseer::map::{RoomCoord, RoomMap, RoomRect, RoomStat};
+
+pub use atlas::{Atlas, LEVEL0, LEVEL1};
+pub use cells::Cells;
+pub use minimap::{Minimaps, POINTS};
+
+use crate::camera::{room_centre, room_origin};
+use crate::scene::{Frame, Scene};
+
+/// Detail scenes kept at once: the rooms of [`DETAIL_ROOMS`](crate::DETAIL_ROOMS) plus room
+/// for those the interest is moving away from.
+pub const DETAIL_SLOTS: usize = 4;
+/// How long a detail scene fades in after its first snapshot, in milliseconds.
+const ARRIVAL_MS: f64 = 300.0;
+
+/// Where the camera is, for the nearest-first policies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Focus {
+    /// The scope's rooms.
+    pub bounds: RoomRect,
+    /// The rooms in view (inside the bounds).
+    pub visible: RoomRect,
+    /// The ground point looked at (world X, Z).
+    pub centre: Vec2,
+}
+
+impl Focus {
+    /// Distance from the camera's centre to a room's centre; infinite outside the bounds.
+    pub fn distance(&self, room: RoomCoord) -> f32 {
+        if self.bounds.contains(room) {
+            room_centre(room).distance(self.centre)
+        } else {
+            f32::INFINITY
+        }
+    }
+}
+
+/// Indices whose GPU copy is stale.
+#[derive(Debug, Default)]
+pub struct Dirty {
+    all: bool,
+    items: Vec<u32>,
+}
+
+impl Dirty {
+    /// Marks one index.
+    pub fn mark(&mut self, index: u32) {
+        if !self.all {
+            self.items.push(index);
+        }
+    }
+
+    /// Marks everything.
+    pub fn mark_all(&mut self) {
+        self.all = true;
+        self.items.clear();
+    }
+
+    /// Hands the marked indices below `len` as merged runs and clears the marks.
+    pub fn drain(&mut self, len: usize, mut run: impl FnMut(Range<usize>)) {
+        if std::mem::take(&mut self.all) {
+            if len > 0 {
+                run(0..len);
+            }
+            self.items.clear();
+            return;
+        }
+        self.items.sort_unstable();
+        self.items.dedup();
+        let mut current: Option<Range<usize>> = None;
+        for &index in &self.items {
+            let index = index as usize;
+            if index >= len {
+                break;
+            }
+            current = match current {
+                Some(range) if range.end == index => Some(range.start..index + 1),
+                Some(range) => {
+                    run(range);
+                    Some(index..index + 1)
+                }
+                None => Some(index..index + 1),
+            };
+        }
+        if let Some(range) = current {
+            run(range);
+        }
+        self.items.clear();
+    }
+
+    /// The marks, as `(everything, sorted indices)`.
+    #[cfg(test)]
+    pub fn marks(&self) -> (bool, Vec<u32>) {
+        let mut items = self.items.clone();
+        items.sort_unstable();
+        items.dedup();
+        (self.all, items)
+    }
+}
+
+/// A room drawn in full detail.
+#[derive(Debug)]
+pub struct Detail {
+    /// Unique per detail scene created (GPU resources follow it).
+    pub id: u64,
+    /// The room.
+    pub room: RoomCoord,
+    /// The scene, in room-local tiles.
+    pub scene: Scene,
+    /// When the first snapshot arrived (ms).
+    since: f64,
+    /// The latest frame of the scene.
+    pub frame: Frame,
+}
+
+impl Detail {
+    /// Fade-in after the first snapshot, `0..=1`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a fraction in 0..=1 fits f32"
+    )]
+    pub fn arrival(&self, now: f64) -> f32 {
+        ((now - self.since) / ARRIVAL_MS).clamp(0.0, 1.0) as f32
+    }
+}
+
+/// The drawn world.
+#[derive(Debug)]
+pub struct World {
+    me: Option<String>,
+    focus: Focus,
+    /// Overview cells.
+    pub cells: Cells,
+    /// Terrain store and atlas.
+    pub atlas: Atlas,
+    /// Minimaps.
+    pub minimaps: Minimaps,
+    details: Vec<Option<Detail>>,
+    next_id: u64,
+    /// The focus or bounds changed, or the previous refresh left rooms to place.
+    refresh: bool,
+}
+
+impl World {
+    /// An empty world over `bounds` with an atlas of `atlas_per_row²` slots.
+    pub fn new(bounds: RoomRect, atlas_per_row: u32) -> Self {
+        Self {
+            me: None,
+            focus: Focus {
+                bounds,
+                visible: bounds,
+                centre: room_centre(bounds.min),
+            },
+            cells: Cells::new(bounds),
+            atlas: Atlas::new(atlas_per_row),
+            minimaps: Minimaps::default(),
+            details: (0..DETAIL_SLOTS).map(|_| None).collect(),
+            next_id: 1,
+            refresh: true,
+        }
+    }
+
+    /// The scope's rooms.
+    pub const fn bounds(&self) -> RoomRect {
+        self.focus.bounds
+    }
+
+    /// Lays the world over new bounds.
+    pub fn set_bounds(&mut self, bounds: RoomRect) {
+        if bounds == self.focus.bounds {
+            return;
+        }
+        self.focus.bounds = bounds;
+        let me = self.me.as_deref();
+        self.cells.set_bounds(bounds, me);
+        let cells = &self.cells;
+        self.atlas
+            .set_bounds(&self.focus, |room| cells.tint(room, me));
+        self.refresh = true;
+    }
+
+    /// Sets what is in view and where the camera looks.
+    pub fn set_focus(&mut self, visible: RoomRect, centre: Vec2) {
+        if visible != self.focus.visible || centre != self.focus.centre {
+            self.focus.visible = visible;
+            self.focus.centre = centre;
+            self.refresh = true;
+        }
+    }
+
+    /// Brings the terrain of the rooms in view into the atlas (after the focus changed).
+    /// Returns whether rooms remain (call again next frame).
+    pub fn refresh(&mut self) -> bool {
+        if !std::mem::take(&mut self.refresh) {
+            return false;
+        }
+        let me = self.me.as_deref();
+        let cells = &self.cells;
+        self.refresh = self.atlas.refresh(&self.focus, |room| cells.tint(room, me));
+        self.refresh
+    }
+
+    /// Sets the signed-in user: recolours cells, tints, minimaps and scenes.
+    pub fn set_user(&mut self, user: Option<String>) {
+        if self.me == user {
+            return;
+        }
+        self.me = user;
+        let me = self.me.as_deref();
+        self.cells.recolor(me);
+        let cells = &self.cells;
+        self.atlas
+            .set_bounds(&self.focus, |room| cells.tint(room, me));
+        self.minimaps.recolor(me);
+        for detail in self.details.iter_mut().flatten() {
+            detail.scene.set_user(self.me.clone());
+        }
+    }
+
+    /// Stores a room's terrain.
+    pub fn set_terrain(&mut self, room: RoomCoord, terrain: &Terrain) {
+        let tint = self.cells.tint(room, self.me.as_deref());
+        self.atlas.set_terrain(room, terrain, &self.focus, tint);
+    }
+
+    /// Sets (`None`: forgets) a room's overview.
+    pub fn set_stat(&mut self, room: RoomCoord, stat: Option<&RoomStat>) {
+        let me = self.me.as_deref();
+        if self.cells.set_stat(room, stat, me) {
+            self.atlas.set_tint(room, self.cells.tint(room, me));
+        }
+    }
+
+    /// Shows (`Some`) or removes (`None`) a room's minimap.
+    pub fn set_minimap(&mut self, room: RoomCoord, map: Option<&RoomMap>) {
+        self.minimaps
+            .set(room, map, self.me.as_deref(), &self.focus);
+    }
+
+    /// Shows a snapshot as the detail scene of its room (and stores its terrain). Returns
+    /// `false` for rooms without world coordinates (they are not shown).
+    pub fn set_room(&mut self, snapshot: &RoomSnapshot, now: f64) -> bool {
+        let Ok(room) = snapshot.room.parse::<RoomCoord>() else {
+            return false;
+        };
+        if !self.atlas.has_terrain(room) {
+            self.set_terrain(room, &snapshot.terrain);
+        }
+        let index = self
+            .details
+            .iter()
+            .position(|detail| detail.as_ref().is_some_and(|detail| detail.room == room))
+            .or_else(|| self.details.iter().position(Option::is_none))
+            .or_else(|| {
+                // Every slot taken: replace the scene farthest from the camera.
+                self.details
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, detail)| {
+                        Some((self.focus.distance(detail.as_ref()?.room), index))
+                    })
+                    .max_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, index)| index)
+            });
+        let Some(index) = index else {
+            return false;
+        };
+        let slot = &mut self.details[index];
+        if slot.as_ref().is_none_or(|detail| detail.room != room) {
+            let mut scene = Scene::default();
+            scene.set_user(self.me.clone());
+            *slot = Some(Detail {
+                id: self.next_id,
+                room,
+                scene,
+                since: now,
+                frame: Frame::default(),
+            });
+            self.next_id += 1;
+        }
+        if let Some(detail) = slot {
+            detail.scene.set_room(snapshot, now);
+        }
+        true
+    }
+
+    /// Removes a room's detail scene.
+    pub fn clear_room(&mut self, room: RoomCoord) {
+        for slot in &mut self.details {
+            if slot.as_ref().is_some_and(|detail| detail.room == room) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// The detail scene of a room.
+    pub fn detail(&self, room: RoomCoord) -> Option<&Detail> {
+        self.details
+            .iter()
+            .flatten()
+            .find(|detail| detail.room == room)
+    }
+
+    /// The detail slots.
+    pub fn details(&self) -> &[Option<Detail>] {
+        &self.details
+    }
+
+    /// Advances the detail scenes to `now` (ms). Returns the objects drawn and whether any
+    /// is still moving or fading in.
+    pub fn frame(&mut self, now: f64) -> (usize, bool) {
+        let (mut objects, mut animating) = (0, false);
+        for detail in self.details.iter_mut().flatten() {
+            if !self.focus.bounds.contains(detail.room) {
+                continue;
+            }
+            detail.frame = detail.scene.frame(now);
+            objects += detail.scene.object_count();
+            animating |= detail.frame.animating || detail.arrival(now) < 1.0;
+        }
+        (objects, animating)
+    }
+
+    /// The column height of a world tile: the detail scene's terrain where there is one,
+    /// the ground elsewhere; `None` outside the bounds.
+    pub fn height(&self, tile: (i32, i32)) -> Option<f32> {
+        let (room, x, y) = split(tile);
+        if !self.focus.bounds.contains(room) {
+            return None;
+        }
+        Some(
+            self.detail(room)
+                .map_or(0.0, |detail| detail.scene.tile_height(x, y)),
+        )
+    }
+
+    /// The terrain tint of a room.
+    pub fn tint(&self, room: RoomCoord) -> [u8; 4] {
+        self.cells.tint(room, self.me.as_deref())
+    }
+
+    /// The current focus.
+    #[cfg(test)]
+    pub const fn focus(&self) -> &Focus {
+        &self.focus
+    }
+}
+
+/// A world tile as its room and room-local tile.
+pub fn split(tile: (i32, i32)) -> (RoomCoord, u8, u8) {
+    let room = RoomCoord {
+        x: tile.0.div_euclid(50),
+        y: tile.1.div_euclid(50),
+    };
+    let local = |value: i32| u8::try_from(value.rem_euclid(50)).unwrap_or(0);
+    (room, local(tile.0), local(tile.1))
+}
+
+/// The world position (X, Z) of a tile's north-west corner.
+pub fn tile_origin(room: RoomCoord, x: u8, y: u8) -> Vec2 {
+    room_origin(room) + Vec2::new(f32::from(x), f32::from(y))
+}

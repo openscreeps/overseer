@@ -5,8 +5,10 @@
 //! | Servers | through the shell's proxy (`proxy_url`) | directly, or the page's own `overseer-proxy` ([`crate::connect`]) |
 //! | Secrets (tokens, server passwords) | OS credential store (`secret_*` commands) | `localStorage` under `overseer.secret.<key>`, readable by anything running on the page's origin |
 //! | External links | system browser (`tauri-plugin-opener`) | new tab |
+//! | Popped-out rooms | a native window per route (`open_window`, size and position remembered) | `window.open` popup per route |
 //!
-//! Saved profiles ([`crate::profiles`]) are in `localStorage` on both.
+//! Saved profiles ([`crate::profiles`]) and state ([`crate::saved`]) are in `localStorage`
+//! on both, the terrain cache ([`crate::terrain_cache`]) in `IndexedDB`.
 
 use js_sys::{Function, Object, Promise, Reflect};
 use overseer::core::ServerUrl;
@@ -15,7 +17,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use crate::connect::{ConnectTarget, PageProxy, connect_target};
-use crate::profiles::{Profiles, STORAGE_KEY};
+use crate::profiles::{self, Profiles};
+use crate::saved::{self, Saved};
 
 /// `localStorage` prefix of secrets in browsers.
 const SECRET_PREFIX: &str = "overseer.secret.";
@@ -117,6 +120,54 @@ impl Platform {
         }
     }
 
+    /// Shows the app at `route` (a URL hash) in a window of its own titled `title`: a native
+    /// window in the shell, a popup in a browser (the same route reuses its window).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the window cannot be opened (a blocked popup).
+    pub async fn open_window(&self, route: &str, title: &str) -> Result<(), String> {
+        if self.tauri {
+            invoke(
+                "open_window",
+                &object(&[("route", route), ("title", title)]),
+            )
+            .await?;
+            return Ok(());
+        }
+        let window = web_sys::window().ok_or_else(|| "no window".to_owned())?;
+        let location = window.location();
+        let page = format!(
+            "{}{}",
+            location.origin().map_err(|error| js_message(&error))?,
+            location.pathname().map_err(|error| js_message(&error))?
+        );
+        let name: String = route
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let opened = window
+            .open_with_url_and_target_and_features(
+                &format!("{page}{route}"),
+                &format!("overseer{name}"),
+                "popup,width=640,height=640",
+            )
+            .map_err(|error| js_message(&error))?;
+        match opened {
+            Some(opened) => {
+                let _ = opened.focus();
+                Ok(())
+            }
+            None => Err("the browser blocked the window; allow popups for this page".to_owned()),
+        }
+    }
+
     /// Opens `url` outside the app: the system browser in the shell, a new tab otherwise.
     ///
     /// # Errors
@@ -137,8 +188,50 @@ impl Platform {
 
 /// The saved profiles.
 pub fn load_profiles() -> Profiles {
-    let json = local_storage().and_then(|storage| storage.get_item(STORAGE_KEY).ok().flatten());
+    let json =
+        local_storage().and_then(|storage| storage.get_item(profiles::STORAGE_KEY).ok().flatten());
     Profiles::parse(json.as_deref())
+}
+
+/// The saved state.
+pub fn load_saved() -> Saved {
+    let json =
+        local_storage().and_then(|storage| storage.get_item(saved::STORAGE_KEY).ok().flatten());
+    Saved::parse(json.as_deref())
+}
+
+/// Saves the state.
+///
+/// # Errors
+///
+/// Returns a message when `localStorage` is unavailable or full.
+pub fn save_saved(saved: &Saved) -> Result<(), String> {
+    local_storage()
+        .ok_or_else(|| "localStorage is unavailable".to_owned())?
+        .set_item(saved::STORAGE_KEY, &saved.to_json())
+        .map_err(|error| js_message(&error))
+}
+
+/// The page's URL hash (`#…`, or empty).
+pub fn location_hash() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .unwrap_or_default()
+}
+
+/// Sets the URL hash as a new history entry (no `hashchange` reaches the app: it follows
+/// the route itself).
+pub fn push_hash(hash: &str) {
+    if let Some(history) = web_sys::window().and_then(|window| window.history().ok()) {
+        let _ = history.push_state_with_url(&JsValue::NULL, "", Some(hash));
+    }
+}
+
+/// Replaces the URL hash of the current history entry.
+pub fn replace_hash(hash: &str) {
+    if let Some(history) = web_sys::window().and_then(|window| window.history().ok()) {
+        let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(hash));
+    }
 }
 
 /// Saves the profiles.
@@ -149,7 +242,7 @@ pub fn load_profiles() -> Profiles {
 pub fn save_profiles(profiles: &Profiles) -> Result<(), String> {
     local_storage()
         .ok_or_else(|| "localStorage is unavailable".to_owned())?
-        .set_item(STORAGE_KEY, &profiles.to_json())
+        .set_item(profiles::STORAGE_KEY, &profiles.to_json())
         .map_err(|error| js_message(&error))
 }
 
@@ -198,7 +291,7 @@ fn object(properties: &[(&str, &str)]) -> JsValue {
 }
 
 /// The message of a JavaScript error value.
-fn js_message(error: &JsValue) -> String {
+pub fn js_message(error: &JsValue) -> String {
     if let Some(message) = error.as_string() {
         return message;
     }

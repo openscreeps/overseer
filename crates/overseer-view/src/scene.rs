@@ -1,7 +1,7 @@
-//! The drawn room: terrain mesh, objects with their movement interpolation, ownership colours,
-//! the selection and the per-frame instance list.
+//! The drawn room of a detail scene, in room-local tile coordinates: terrain mesh, objects
+//! with their movement interpolation, ownership colours and the per-frame instance list.
 
-mod style;
+pub mod style;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -14,9 +14,6 @@ use overseer::core::api::{Terrain, Tile};
 use crate::MOVE_DURATION_MS;
 use crate::mesh::{self, Instance, Mesh, Shape, TerrainVertex};
 use style::{Owner, Style};
-
-/// Colour (sRGB) of the selection frame.
-const SELECTION: u32 = 0xff_eb_3b;
 
 /// An object of the room as drawn.
 #[derive(Clone, Debug)]
@@ -89,18 +86,15 @@ pub struct Scene {
     parts: Vec<Part>,
     /// Range of `parts` per shape.
     part_ranges: [Range<usize>; 3],
-    selected: Option<(u8, u8)>,
     /// The instances of the latest frame (reused: no allocation per frame).
     instances: Vec<Instance>,
 }
 
 /// What [`Scene::frame`] produced.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
-    /// Instance range per [`Shape`] (in [`Shape::ALL`] order), selection excluded.
+    /// Instance range per [`Shape`] (in [`Shape::ALL`] order).
     pub ranges: [Range<u32>; 3],
-    /// Index of the selection frame instance (a [`Shape::Ring`]).
-    pub selection: Option<u32>,
     /// Whether an object is still moving.
     pub animating: bool,
 }
@@ -179,11 +173,6 @@ impl Scene {
         }
     }
 
-    /// Highlights a tile.
-    pub const fn select(&mut self, tile: Option<(u8, u8)>) {
-        self.selected = tile;
-    }
-
     /// Rebuilds the shapes of the objects, grouped by shape, and reserves the instances of
     /// a frame.
     fn build_parts(&mut self) {
@@ -205,9 +194,9 @@ impl Scene {
             *range = start..self.parts.len();
             start = self.parts.len();
         }
-        // Every part plus the selection: `frame` never grows the list.
+        // Every part: `frame` never grows the list.
         self.instances
-            .reserve((self.parts.len() + 1).saturating_sub(self.instances.len()));
+            .reserve(self.parts.len().saturating_sub(self.instances.len()));
     }
 
     /// Fills the instances of the frame at `now` (ms).
@@ -227,19 +216,6 @@ impl Scene {
                 color: part.color,
             });
         }
-        let selection = self.selected.map(|tile| {
-            let position = tile_vec(tile);
-            let base = self.height_at(position);
-            (position, base)
-        });
-        let selection = selection.map(|(position, base)| {
-            self.instances.push(Instance {
-                offset: [position.x + 0.5, base, position.y + 0.5],
-                scale: [1.08, 0.12, 1.08],
-                color: mesh::linear(SELECTION),
-            });
-            count(self.instances.len() - 1)
-        });
         let range = |range: &Range<usize>| count(range.start)..count(range.end);
         Frame {
             ranges: [
@@ -247,13 +223,12 @@ impl Scene {
                 range(&self.part_ranges[1]),
                 range(&self.part_ranges[2]),
             ],
-            selection,
             animating,
         }
     }
 
     /// Terrain height under a position in tile coordinates (of its nearest tile).
-    fn height_at(&self, position: Vec2) -> f32 {
+    pub fn height_at(&self, position: Vec2) -> f32 {
         let tile = position.round();
         if !(0.0..50.0).contains(&tile.x) || !(0.0..50.0).contains(&tile.y) {
             return 0.0;
@@ -296,7 +271,7 @@ impl Scene {
 
     /// Instances needed by a frame.
     pub const fn instance_capacity(&self) -> usize {
-        self.parts.len() + 1
+        self.parts.len()
     }
 
     /// Number of objects shown.
@@ -307,16 +282,6 @@ impl Scene {
     /// The terrain mesh and its version (bumped on every rebuild; 0 before any terrain).
     pub const fn terrain(&self) -> (&Mesh<TerrainVertex>, u64) {
         (&self.terrain_mesh, self.terrain_version)
-    }
-
-    /// The world position of a tile's centre on top of its terrain.
-    #[cfg(test)]
-    pub fn tile_centre(&self, x: u8, y: u8) -> glam::Vec3 {
-        glam::Vec3::new(
-            f32::from(x) + 0.5,
-            self.tile_height(x, y),
-            f32::from(y) + 0.5,
-        )
     }
 }
 

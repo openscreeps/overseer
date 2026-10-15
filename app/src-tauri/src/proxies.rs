@@ -28,6 +28,26 @@ pub struct Proxies {
 }
 
 impl Proxies {
+    /// The URL of the proxy forwarding to `upstream`, started on first use (one per base URL).
+    async fn url(&self, upstream: &str) -> Result<String, String> {
+        let upstream = upstream_base(upstream)?;
+        let mut running = self.running.lock().await;
+        if let Some(proxy) = running.get(&upstream) {
+            return Ok(proxy.url().into());
+        }
+        let proxy = Proxy::start(ProxyConfig {
+            upstream: upstream.clone(),
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            static_dir: None,
+            allowed_origins: APP_ORIGINS.map(str::to_owned).to_vec(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        let url = proxy.url().into();
+        running.insert(upstream, proxy);
+        Ok(url)
+    }
+
     /// Stops every proxy.
     pub async fn shutdown(&self) {
         let proxies: Vec<_> = self
@@ -53,22 +73,7 @@ pub async fn proxy_url(
     upstream: String,
     proxies: tauri::State<'_, Proxies>,
 ) -> Result<String, String> {
-    let upstream = upstream_base(&upstream)?;
-    let mut running = proxies.running.lock().await;
-    if let Some(proxy) = running.get(&upstream) {
-        return Ok(proxy.url().into());
-    }
-    let proxy = Proxy::start(ProxyConfig {
-        upstream: upstream.clone(),
-        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-        static_dir: None,
-        allowed_origins: APP_ORIGINS.map(str::to_owned).to_vec(),
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-    let url = proxy.url().into();
-    running.insert(upstream, proxy);
-    Ok(url)
+    proxies.url(&upstream).await
 }
 
 /// `input` as an http(s) base URL with a trailing `/`: the key of its proxy.
@@ -86,7 +91,7 @@ fn upstream_base(input: &str) -> Result<Url, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::upstream_base;
+    use super::{Proxies, upstream_base};
 
     #[test]
     fn upstreams_are_keyed_by_their_base() {
@@ -96,5 +101,20 @@ mod tests {
         );
         assert!(upstream_base("ftp://screeps.com/").is_err());
         assert!(upstream_base("screeps.com").is_err());
+    }
+
+    #[test]
+    fn one_loopback_proxy_per_server() {
+        tauri::async_runtime::block_on(async {
+            let proxies = Proxies::default();
+            let a = proxies.url("http://127.0.0.1:9/a").await.unwrap();
+            assert!(a.starts_with("http://127.0.0.1:"), "{a}");
+            assert_eq!(proxies.url("http://127.0.0.1:9/a/").await.unwrap(), a);
+            let b = proxies.url("http://127.0.0.1:9/b/").await.unwrap();
+            assert_ne!(a, b);
+            assert!(proxies.url("ftp://127.0.0.1/").await.is_err());
+            proxies.shutdown().await;
+            assert!(proxies.running.lock().await.is_empty());
+        });
     }
 }

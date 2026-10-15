@@ -152,8 +152,27 @@ impl Rooms {
             .client()
             .terrain(shard.as_deref(), room)
             .await?;
+        self.watch_terrain(shard.as_deref(), room, terrain)
+    }
+
+    /// Watches `room` on `shard` (`None`: the default shard) whose terrain the caller already
+    /// has: subscribes without any request. A room already watched keeps the terrain of its
+    /// first watch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`] without a signed-in user and [`Error::Closed`] after
+    /// [`Overseer::shutdown`](crate::Overseer::shutdown).
+    pub(crate) fn watch_terrain(
+        &self,
+        shard: Option<&str>,
+        room: &str,
+        terrain: Arc<Terrain>,
+    ) -> Result<Watch<RoomSnapshot>, Error> {
+        self.overseer.ensure_open()?;
+        self.overseer.require_user()?;
         let channel = Channel::Room {
-            shard,
+            shard: self.overseer.resolve_shard(shard),
             room: room.to_owned(),
         };
         let (registration, receiver) = self.overseer.registry().acquire(channel, |entry| {
