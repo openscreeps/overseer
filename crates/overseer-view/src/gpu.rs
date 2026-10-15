@@ -4,8 +4,10 @@
 //! (faded out under their room's detail scene) flat on the ground without depth; then each
 //! detail scene: raised walls and object prisms (perspective only) with depth, shadows and
 //! object tokens (blended, far to near), action effects (added), bot visuals (polygon fills,
-//! shapes, text); the selection frame over everything.
+//! shapes, text); the overlay (portal arcs and marks, badges, the hover outline, labels:
+//! see `gpu/overlay.rs`); the selection frame over everything.
 
+mod overlay;
 mod pipelines;
 
 use std::ops::Range;
@@ -24,6 +26,7 @@ use crate::text::ATLAS_SIDE;
 use crate::view::{Fades, View};
 use crate::world::terrain::{LAYER_HEIGHT, LAYER_WIDTH};
 use crate::world::{DETAIL_SLOTS, Detail, POINTS, Upload, World};
+use overlay::{OverlayDraw, OverlayGpu};
 use pipelines::Pipelines;
 
 /// Depth buffer format (supported, with multisampling, by WebGPU and WebGL2).
@@ -72,6 +75,8 @@ pub struct Draw {
     pub fades: Fades,
     /// The selection frame.
     pub selection: Option<Instance>,
+    /// The overlay's camera, fades and hover outline.
+    pub overlay: OverlayDraw,
     /// Frame time (ms), for fades and animations.
     pub now: f64,
 }
@@ -86,6 +91,18 @@ impl Draw {
             perspective: eye.perspective,
             fades: view.fades(),
             selection: view.selection(),
+            overlay: OverlayDraw {
+                px_per_room: view.camera.px_per_room(),
+                tiles_per_px: view.camera.tiles_per_px(),
+                size: view.camera.size().to_array(),
+                fades: view.overlay_fades(),
+                hover: view.world.overlay.hover(view.world.bounds()),
+                target_w: {
+                    let target = view.camera.target();
+                    (view.camera.view_projection() * glam::Vec4::new(target.x, 0.0, target.y, 1.0))
+                        .w
+                },
+            },
             now,
         }
     }
@@ -218,6 +235,7 @@ pub struct Gpu {
     /// Locals of minimaps without a detail scene: nothing covers them.
     no_detail_group: wgpu::BindGroup,
     targets: Option<Targets>,
+    overlay: OverlayGpu,
 }
 
 impl Gpu {
@@ -327,6 +345,7 @@ impl Gpu {
         };
         let world_group = locals_group(&device, &pipelines, &locals("world locals", 1.0));
         let no_detail_group = locals_group(&device, &pipelines, &locals("no detail", 0.0));
+        let overlay = OverlayGpu::new(&device, &pipelines);
         Self {
             device,
             queue,
@@ -353,6 +372,7 @@ impl Gpu {
             world_group,
             no_detail_group,
             targets: None,
+            overlay,
         }
     }
 
@@ -366,6 +386,12 @@ impl Gpu {
     /// world's needs.
     pub fn sync(&mut self, world: &mut World) {
         self.sync_rooms(world);
+        self.overlay.sync(
+            &self.device,
+            &self.queue,
+            &self.pipelines,
+            &mut world.overlay,
+        );
         self.sync_textures(world);
         let stride = size_of::<PointInstance>();
         let (queue, points) = (&self.queue, &self.points);
@@ -622,6 +648,7 @@ impl Gpu {
             self.queue
                 .write_buffer(&gpu.locals, 0, bytemuck::bytes_of(&locals));
         }
+        self.overlay.prepare(&self.queue, draw, world);
         if let Some(selection) = &draw.selection {
             self.queue
                 .write_buffer(&self.selection, 0, bytemuck::bytes_of(selection));
@@ -672,6 +699,8 @@ impl Gpu {
             pass.set_bind_group(0, &self.globals_group, &[]);
             self.draw_flat(&mut pass, draw, world);
             self.draw_details(&mut pass, draw, world);
+            self.overlay
+                .draw(&mut pass, &self.pipelines, &self.atlas_group);
             if draw.selection.is_some() {
                 pass.set_pipeline(&self.pipelines.overlay);
                 pass.set_bind_group(1, &self.world_group, &[]);

@@ -170,30 +170,48 @@ impl Atlas {
             Align::Center => anchor.0 - width / 2.0,
             Align::Right => anchor.0 - width,
         };
-        let scale = style.size / FONT_PX;
-        #[expect(clippy::cast_precision_loss, reason = "a cell is 64 texels")]
-        let side = CELL as f32 * scale;
         // The outline in distance-field units: half its width outside the glyph.
         let stroke_width = if style.stroke[3] > 0 {
-            (style.stroke_width / 2.0 / scale / (2.0 * SPREAD)).clamp(0.0, 0.5)
+            (style.stroke_width / 2.0 / (style.size / FONT_PX) / (2.0 * SPREAD)).clamp(0.0, 0.5)
         } else {
             0.0
         };
-        let mut pen = left;
+        self.shape(text, style.size, |rect, uv| {
+            out.push(GlyphInstance {
+                rect: [left + rect[0], anchor.1 + rect[1], rect[2], rect[3]],
+                uv,
+                color: style.color,
+                stroke: style.stroke,
+                stroke_width,
+            });
+        });
+        (left, left + width)
+    }
+
+    /// Lays out one line of `text` at `size` units per em, the pen starting at `0` on the
+    /// baseline `0` (y down): hands each drawn glyph's rectangle (left, top, width, height,
+    /// in the same units) and atlas rectangle to `glyph`; returns the line's width.
+    pub fn shape(
+        &mut self,
+        text: &str,
+        size: f32,
+        mut glyph: impl FnMut([f32; 4], [f32; 4]),
+    ) -> f32 {
+        let scale = size / FONT_PX;
+        #[expect(clippy::cast_precision_loss, reason = "a cell is 64 texels")]
+        let extent = CELL as f32 * scale;
+        let mut pen = 0.0;
         for c in text.chars() {
             let entry = self.entry(c);
             if let Some(cell) = entry.cell {
-                out.push(GlyphInstance {
-                    rect: [pen - PEN * scale, anchor.1 - BASELINE * scale, side, side],
-                    uv: cell_uv(cell),
-                    color: style.color,
-                    stroke: style.stroke,
-                    stroke_width,
-                });
+                glyph(
+                    [pen - PEN * scale, -BASELINE * scale, extent, extent],
+                    cell_uv(cell),
+                );
             }
-            pen += entry.advance * style.size;
+            pen += entry.advance * size;
         }
-        (left, left + width)
+        pen
     }
 
     /// Hands the cells drawn since the last flush to `upload` (texel origin, field bytes of

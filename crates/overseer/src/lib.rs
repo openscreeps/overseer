@@ -119,7 +119,7 @@
 //! | [`Overseer::memory`] | Memory by path, segments, live path watches |
 //! | [`Overseer::rooms`] | live typed room snapshots, room information and actions: flags, construction sites, intents, spawn placement |
 //! | [`Overseer::history`] | room history playback |
-//! | [`Overseer::map`] | the continuous world map ([`Map::world`]: overviews, terrain, live minimaps and live rooms of what the view needs, within the server's limits), map views, map statistics, batch terrain, room status, map visuals |
+//! | [`Overseer::map`] | the continuous world map ([`Map::world`]: overviews with owner and reserver badges, terrain, portals, live minimaps and live rooms of what the view needs, within the server's limits), map views, map statistics, batch terrain, portals of a room, player badges, room status, map visuals |
 //! | [`Overseer::messages`] | conversations, sending, read state, live new messages |
 //! | [`Overseer::market`] | orders, own orders, price statistics, money history |
 //! | [`Overseer::users`] | user lookup, rooms of a user, leaderboards, badges |

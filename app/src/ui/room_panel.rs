@@ -1,7 +1,8 @@
 //! The room control: one room in its own viewer ([`Scope::Room`], [`RoomPreview`]), what is
 //! known of it ([`RoomData`], kept live by [`RoomData::watch`]) and its facts ([`RoomInfo`]:
 //! status, owner and controller level with progress, safe mode, reservation, energy for
-//! spawning, sources, mineral, creeps and structures by owner, last update).
+//! spawning, sources, mineral, creeps and structures by owner, last update, and where its
+//! portals lead, with "Go to" in the drawer).
 //!
 //! The drawer shows the preview and facts on its Room tab; a popped-out room window shows the
 //! whole [`RoomPanel`] (preview, facts and the room's objects). A live room that the server
@@ -14,10 +15,14 @@ use std::sync::Arc;
 use leptos::prelude::*;
 use overseer::RoomSnapshot;
 use overseer::core::api::types::GameRoomObject;
-use overseer::map::{DetailState, Interest, RoomCoord, RoomRect, RoomStat, RoomStatus, WorldEvent};
+use overseer::map::{
+    DetailState, Interest, Portal, PortalDestination, RoomCoord, RoomRect, RoomStat, RoomStatus,
+    WorldEvent,
+};
 use overseer_view::{Scope, Viewer};
 
 use crate::feed::{Feed, Reach, Subscription};
+use crate::portals::{destination_text, destinations};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, number, ticks};
 use crate::ui::objects::{ObjectsPanel, Selection};
@@ -31,6 +36,8 @@ pub struct RoomData {
     pub stat: RwSignal<Option<Arc<RoomStat>>, LocalStorage>,
     /// The live state.
     pub detail: RwSignal<Option<DetailState>, LocalStorage>,
+    /// The room's portals, once it was scanned (empty: none).
+    pub portals: RwSignal<Option<Arc<[Portal]>>, LocalStorage>,
 }
 
 impl RoomData {
@@ -39,6 +46,7 @@ impl RoomData {
         Self {
             stat: RwSignal::new_local(None),
             detail: RwSignal::new_local(None),
+            portals: RwSignal::new_local(None),
         }
     }
 
@@ -69,6 +77,7 @@ impl RoomData {
             subscription.set_value(None);
             self.stat.set(None);
             self.detail.set(None);
+            self.portals.set(None);
             let (Some(feed), Some(room)) = (feed, room) else {
                 return;
             };
@@ -80,6 +89,7 @@ impl RoomData {
                 terrain: Vec::new(),
                 minimaps: Vec::new(),
                 detail: vec![room],
+                portals: Some(RoomRect::new(room, room)),
             });
             subscription.set_value(Some(watched));
         });
@@ -103,6 +113,9 @@ impl RoomData {
             }
             WorldEvent::DetailGone(at) if *at == room => {
                 self.detail.try_set(None);
+            }
+            WorldEvent::Portals(at, portals) if *at == room => {
+                self.portals.try_set(Some(Arc::clone(portals)));
             }
             _ => {}
         }
@@ -176,6 +189,7 @@ pub fn RoomPreview(
             tile.set(selected);
             viewer.select(selected);
         }),
+        hover: None,
     });
     Effect::new(move |_| {
         let room = room.get();
@@ -456,7 +470,11 @@ pub fn RoomInfo(
     /// Shown between the header and the facts (the drawer's room preview).
     #[prop(optional)]
     children: Option<Children>,
+    /// Takes the user through a portal ("Go to" next to each destination; none without).
+    #[prop(optional)]
+    go_to: Option<Callback<PortalDestination>>,
 ) -> impl IntoView {
+    let map = MapState::expect();
     let user = StoredValue::new(user);
     let title = move || room.get().map(|room| room.to_string()).unwrap_or_default();
     let live = move || {
@@ -504,6 +522,15 @@ pub fn RoomInfo(
             snapshot.game_time,
         ))
     };
+    let portals = move || {
+        let portals = data.portals.get().filter(|portals| !portals.is_empty())?;
+        let shard = map.shard.get();
+        Some(portal_rows(
+            &portals,
+            shard.as_ref().and_then(|shard| shard.name()),
+            go_to,
+        ))
+    };
     view! {
         <section class="room-info" aria-labelledby="room-info-title">
             <header class="room-head">
@@ -520,8 +547,60 @@ pub fn RoomInfo(
             <dl class="facts">
                 {overview}
                 {live_facts}
+                {portals}
             </dl>
         </section>
+    }
+}
+
+/// The portals' rows: each destination (seen from `shard`, the shard shown) with how many
+/// portal tiles lead there, when they decay, and "Go to" when `go_to` takes the user there.
+fn portal_rows(
+    portals: &[Portal],
+    shard: Option<&str>,
+    go_to: Option<Callback<PortalDestination>>,
+) -> impl IntoView + use<> {
+    let rows = destinations(portals)
+        .into_iter()
+        .map(|found| {
+            let name = destination_text(&found.to, shard);
+            let mut notes = vec![counted(found.tiles, "tile", "tiles")];
+            if let Some(at) = found.expires_at {
+                notes.push(format!("decays from {}", date(at)));
+            }
+            if let Some(tick) = found.decay_time {
+                notes.push(format!("gone at tick {tick}"));
+            }
+            let destination = found.to;
+            let button = go_to.map(|go_to| {
+                view! {
+                    <button
+                        type="button"
+                        class="chip"
+                        aria-label=format!("Go to {name}")
+                        on:click=move |_| go_to.run(destination.clone())
+                    >
+                        "Go to"
+                    </button>
+                }
+            });
+            view! {
+                <li>
+                    <span class="portal-to">{format!("→ {name}")}</span>
+                    <span class="muted">{notes.join(" · ")}</span>
+                    {button}
+                </li>
+            }
+        })
+        .collect_view();
+    let label = if portals.len() == 1 {
+        "Portal"
+    } else {
+        "Portals"
+    };
+    view! {
+        <dt>{label}</dt>
+        <dd><ul class="portal-list" aria-label="Portal destinations">{rows}</ul></dd>
     }
 }
 

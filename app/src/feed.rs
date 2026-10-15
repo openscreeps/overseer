@@ -8,10 +8,10 @@
 //! subscriber ([`merge`]) into the world's. A new subscriber first gets what the world already
 //! has for its reach (terrain, overviews, minimaps, live rooms), then every event.
 //!
-//! The task also hands what the world fetched (terrain, rooms without terrain, overviews) to
-//! the app's cache and reports the world's loading progress ([`progress_label`] for the
-//! status bar, including when the rate limit holds overviews back); after the user lifted the
-//! limit, [`Feed::recheck_rate_limit`] resumes them.
+//! The task also hands what the world fetched (terrain, rooms without terrain, overviews,
+//! scanned portals) to the app's cache and reports the world's loading progress
+//! ([`progress_label`] for the status bar, including when the rate limit holds overviews
+//! back); after the user lifted the limit, [`Feed::recheck_rate_limit`] resumes them.
 //!
 //! The task ends when the feed and every subscription are dropped or the session closes;
 //! dropping the `WorldMap` then ends its subscriptions.
@@ -215,6 +215,9 @@ fn replay(world: &WorldMap, reach: Reach, deliver: &Deliver) {
         if let Some(stat) = world.stat(room) {
             stats.push((room, stat));
         }
+        if let Some(portals) = world.portals(room) {
+            deliver(&WorldEvent::Portals(room, portals));
+        }
         if let Some(minimap) = world.minimap(room) {
             deliver(&WorldEvent::Minimap(room, minimap));
         }
@@ -231,7 +234,7 @@ fn replay(world: &WorldMap, reach: Reach, deliver: &Deliver) {
 ///
 /// - overviews: the world subscribers' rectangle (a room control's room is then normally in
 ///   it, and its overview cached); without one, the rectangle around the room controls'
-///   rooms;
+///   rooms; portals likewise;
 /// - terrain and minimaps: the world subscribers' rooms, then the room controls';
 /// - live rooms: the world's first (the room under the map's centre), then the room
 ///   controls'. The map's other rooms stay minimaps: the server caps live rooms per player
@@ -252,21 +255,23 @@ pub fn merge(interests: &[(Reach, &Interest)]) -> Interest {
             .filter(|(reach, _)| *reach != Reach::World)
             .map(|(_, interest)| *interest)
     };
-    let mut stats = world().filter_map(|interest| interest.stats).reduce(union);
-    if stats.is_none() {
-        stats = interests
-            .iter()
-            .filter_map(|(reach, interest)| match reach {
-                Reach::Room(room) => Some(interest.stats.unwrap_or(RoomRect {
-                    min: *room,
-                    max: *room,
-                })),
-                Reach::World => None,
-            })
-            .reduce(union);
-    }
+    let rect = |pick: fn(&Interest) -> Option<RoomRect>| {
+        world().filter_map(pick).reduce(union).or_else(|| {
+            interests
+                .iter()
+                .filter_map(|(reach, interest)| match reach {
+                    Reach::Room(room) => Some(pick(interest).unwrap_or(RoomRect {
+                        min: *room,
+                        max: *room,
+                    })),
+                    Reach::World => None,
+                })
+                .reduce(union)
+        })
+    };
     let mut merged = Interest {
-        stats,
+        stats: rect(|interest| interest.stats),
+        portals: rect(|interest| interest.portals),
         ..Interest::default()
     };
     let (mut terrain, mut minimaps, mut detail) =
@@ -313,7 +318,7 @@ impl Unique {
 }
 
 /// The status bar's loading progress at `now` (milliseconds since the Unix epoch), such as
-/// `Terrain 12 345 / 25 000 · Owners 2 500 / 25 000`, with
+/// `Terrain 12 345 / 25 000 · Owners 2 500 / 25 000 · Portals 40 / 331`, with
 /// `waiting for the rate limit, resumes in 12 min` while the rate limit holds overviews back;
 /// `None` once everything wanted is known.
 pub fn progress_label(progress: &WorldProgress, now: u64) -> Option<String> {
@@ -335,11 +340,18 @@ pub fn progress_label(progress: &WorldProgress, now: u64) -> Option<String> {
             grouped(progress.stats_wanted)
         )
     });
+    let portals = (progress.portals_wanted > 0).then(|| {
+        format!(
+            "Portals {} / {}",
+            grouped(progress.portals_scanned.min(progress.portals_wanted)),
+            grouped(progress.portals_wanted)
+        )
+    });
     let waiting = progress
         .stats_paused_until
         .map(|until| crate::rate_limits::waiting_label(until, now));
     Some(
-        [terrain, owners, waiting]
+        [terrain, owners, portals, waiting]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
@@ -388,12 +400,14 @@ mod tests {
             terrain: rooms(&["W3N3", "W2N3"]),
             minimaps: rooms(&["W3N3"]),
             detail: rooms(&["W3N3", "W2N3", "W4N3"]),
+            portals: Some(rect("W5N5", "W1N1")),
         };
         let control = Interest {
             stats: None,
             terrain: rooms(&["W9N9"]),
             minimaps: rooms(&["W9N9"]),
             detail: rooms(&["W9N9"]),
+            portals: Some(rect("W9N9", "W9N9")),
         };
         let same = Interest {
             detail: rooms(&["W3N3"]),
@@ -405,6 +419,7 @@ mod tests {
             (Reach::Room(room("W3N3")), &same),
         ]);
         assert_eq!(merged.stats, Some(rect("W5N5", "W1N1")));
+        assert_eq!(merged.portals, Some(rect("W5N5", "W1N1")));
         assert_eq!(merged.terrain, rooms(&["W3N3", "W2N3", "W9N9"]));
         assert_eq!(merged.minimaps, rooms(&["W3N3", "W9N9"]));
         assert_eq!(merged.detail, rooms(&["W3N3", "W9N9"]));
@@ -425,6 +440,8 @@ mod tests {
             (Reach::Room(room("E1S1")), &b),
         ]);
         assert_eq!(merged.stats, Some(rect("W1N1", "E1S1")));
+        // Portals likewise: around the room controls' rooms when the map wants none.
+        assert_eq!(merged.portals, Some(rect("W1N1", "E1S1")));
         assert_eq!(merged.detail, rooms(&["W1N1", "E1S1"]));
         assert_eq!(merge(&[]), Interest::default());
     }
@@ -458,6 +475,8 @@ mod tests {
             stats_known: 2_500,
             stats_wanted: 25_000,
             stats_paused_until: None,
+            portals_scanned: 0,
+            portals_wanted: 0,
         };
         assert_eq!(
             progress_label(&loading, now).as_deref(),
@@ -485,6 +504,17 @@ mod tests {
             ..owners_left
         };
         assert_eq!(progress_label(&done, now), None);
+        let portals = WorldProgress {
+            portals_scanned: 40,
+            portals_wanted: 331,
+            ..done
+        };
+        assert_eq!(
+            progress_label(&portals, now).as_deref(),
+            Some(
+                "Terrain 25\u{202f}000 / 25\u{202f}000 · Owners 25\u{202f}000 / 25\u{202f}000 · Portals 40 / 331"
+            )
+        );
         assert_eq!(progress_label(&WorldProgress::default(), now), None);
         let small = WorldProgress {
             terrain_known: 7,

@@ -1,5 +1,5 @@
-//! The status bar: connection · shard and tick · zoom level · loading progress … frame time,
-//! graphics backend and platform.
+//! The status bar: connection · shard and tick · zoom level · hovered room · loading progress
+//! … frame time, graphics backend and platform.
 //!
 //! An item shows only once its value is known (no "—" placeholders). While a map is shown its
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
@@ -13,6 +13,7 @@ use overseer_view::Lod;
 use crate::platform::Platform;
 use crate::route::Shard;
 use crate::state::AppState;
+use crate::ui::hover::{MapRooms, place_text};
 use crate::ui::rate_limits::{RateLimitsUi, StatusReset};
 use crate::ui::topbar::status_class;
 use crate::ui::world::{MapState, Phase};
@@ -85,6 +86,8 @@ struct Facts {
     frame_ms: Option<f32>,
     /// Graphics backend.
     backend: Option<&'static str>,
+    /// The room (and tile) under a hovering pointer ([`crate::ui::hover::place_text`]).
+    hover: Option<String>,
 }
 
 /// The map items of the status bar, from what is known.
@@ -92,6 +95,7 @@ struct Facts {
 struct MapItems {
     place: Slot,
     level: Slot,
+    hover: Slot,
     frame: Slot,
     backend: Slot,
 }
@@ -106,6 +110,7 @@ impl MapItems {
         Self {
             place: Slot::of(place, facts.map),
             level: Slot::of(facts.lod.map(|lod| level_name(lod).to_owned()), facts.map),
+            hover: Slot::of(on_map(facts.hover.clone()), facts.map),
             frame: Slot::of(
                 on_map(facts.frame_ms.map(|ms| format!("frame {ms:.2} ms"))),
                 false,
@@ -137,6 +142,7 @@ fn item(slot: Memo<Slot>, class: &'static str, title: &'static str) -> impl Into
 pub fn StatusBar() -> impl IntoView {
     let state = AppState::expect();
     let map = MapState::expect();
+    let rooms = MapRooms::expect();
     let limits = RateLimitsUi::expect();
     let items = Memo::new(move |_| {
         MapItems::of(&Facts {
@@ -149,10 +155,15 @@ pub fn StatusBar() -> impl IntoView {
             lod: map.lod.get(),
             frame_ms: map.frame_ms.get(),
             backend: map.backend.get(),
+            hover: rooms
+                .hover
+                .get()
+                .map(|hovered| place_text(&hovered, map.lod.get())),
         })
     });
     let place = Memo::new(move |_| items.with(|items| items.place.clone()));
     let level = Memo::new(move |_| items.with(|items| items.level.clone()));
+    let hover = Memo::new(move |_| items.with(|items| items.hover.clone()));
     let frame = Memo::new(move |_| items.with(|items| items.frame.clone()));
     let backend = Memo::new(move |_| items.with(|items| items.backend.clone()));
     let connection_title = move || match state.status.get() {
@@ -192,6 +203,7 @@ pub fn StatusBar() -> impl IntoView {
             </span>
             {item(place, "status-item status-place", "Game tick")}
             {item(level, "status-item status-level", "Zoom level")}
+            {item(hover, "status-item status-hover", "Room under the pointer")}
             {progress}
             <span class="status-end">
                 {item(frame, "status-item status-frame", "CPU time of the last frame")}
@@ -230,6 +242,7 @@ mod tests {
             MapItems {
                 place: Slot::Hidden,
                 level: Slot::Hidden,
+                hover: Slot::Hidden,
                 frame: Slot::Hidden,
                 backend: Slot::Hidden,
             }
@@ -253,6 +266,11 @@ mod tests {
         assert_eq!(items.place, Slot::Reserved);
         assert_eq!(items.level, Slot::Reserved);
         assert_eq!(
+            items.hover,
+            Slot::Reserved,
+            "nothing hovered: the slot keeps its width"
+        );
+        assert_eq!(
             (items.frame, items.backend),
             (Slot::Hidden, Slot::Hidden),
             "nothing drawn yet"
@@ -269,6 +287,14 @@ mod tests {
         assert_eq!(items.level, Slot::Shown("Sectors".to_owned()));
         assert_eq!(items.frame, Slot::Shown("frame 0.23 ms".to_owned()));
         assert_eq!(items.backend, Slot::Shown("WebGPU".to_owned()));
+        let hovering = Facts {
+            hover: Some("W3N4".to_owned()),
+            ..drawn.clone()
+        };
+        assert_eq!(
+            MapItems::of(&hovering).hover,
+            Slot::Shown("W3N4".to_owned())
+        );
 
         let live = Facts {
             game_time: Some(1234),

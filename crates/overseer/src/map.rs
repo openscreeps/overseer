@@ -1,7 +1,8 @@
-//! The world map: the continuous [`WorldMap`], room map views, map statistics, terrain, world
-//! size and map visuals.
+//! The world map: the continuous [`WorldMap`], room map views, map statistics, terrain,
+//! portals, player badges, world size and map visuals.
 
 mod coord;
+mod portal;
 mod rect;
 mod stat;
 mod view;
@@ -10,12 +11,14 @@ mod world;
 pub use coord::RoomCoord;
 pub use overseer_net::core::api::Terrain;
 pub use overseer_net::core::socket::types::RoomMap;
+pub use portal::{Portal, PortalDestination, may_have_portals};
 pub use rect::RoomRect;
 pub use stat::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
 pub use view::{MapView, ViewChange};
 pub use world::{
-    DetailState, Interest, MINIMAP_CAP, STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL,
-    STATS_TTL, TERRAIN_BATCH, TERRAIN_IN_FLIGHT, WorldEvent, WorldMap, WorldProgress,
+    DetailState, Interest, MINIMAP_CAP, PORTAL_DECAYING_TTL, PORTAL_GAP, PORTAL_SCAN_TIMEOUT,
+    PORTAL_TTL, STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_TTL, TERRAIN_BATCH,
+    TERRAIN_IN_FLIGHT, WorldEvent, WorldMap, WorldProgress,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,8 +54,8 @@ impl MapStat {
     }
 }
 
-/// The world map: the continuous [`WorldMap`], room map views, map statistics, terrain, world
-/// size and map visuals.
+/// The world map: the continuous [`WorldMap`], room map views, map statistics, terrain,
+/// portals, player badges, world size and map visuals.
 ///
 /// Created by [`Overseer::map`]; cheap to clone. `shard` names a shard (`None`: the default
 /// shard); it is ignored by single-world servers. Room status is part of [`Self::stats`]
@@ -142,6 +145,37 @@ impl Map {
             shard: self.overseer.resolve_shard(shard),
         };
         self.overseer.send(&request).await
+    }
+
+    /// The badge of the user named `username` as an SVG document, optionally with a border
+    /// (`GET /api/user/badge-svg`): the icon of a room's [`RoomOwner`] or
+    /// [`RoomReservation`], whose `badge` parameters tell when it changed. Badges are public;
+    /// same as [`Users::badge_svg`](crate::Users::badge_svg).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
+    /// [`Error::Net`] when the request fails (for example HTTP 404 for an unknown user).
+    pub async fn badge_svg(&self, username: &str, border: bool) -> Result<String, Error> {
+        self.overseer.ensure_open()?;
+        self.overseer.users().badge_svg(username, border).await
+    }
+
+    /// The portals of `room` with their destinations, from one snapshot of its objects
+    /// (`GET /api/game/room-objects`); empty when it has none. [`WorldMap`] finds the rooms
+    /// with portals and asks for those.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
+    /// [`Error::Net`] when the request fails.
+    pub async fn portals(&self, room: &str, shard: Option<&str>) -> Result<Vec<Portal>, Error> {
+        let objects = self.overseer.rooms().objects(room, shard).await?;
+        Ok(objects
+            .objects
+            .iter()
+            .filter_map(Portal::from_object)
+            .collect())
     }
 
     /// The signed-in user's map visuals of the previous tick (`Game.map.visual`), parsed into

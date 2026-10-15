@@ -174,6 +174,75 @@ pub struct PointInstance {
     pub color: [u8; 4],
 }
 
+/// Kinds of [`MarkInstance`] (`overlay.wgsl` draws each).
+pub mod mark {
+    /// An owner's badge, centred in their room.
+    pub const BADGE: u32 = 0;
+    /// A reserving user's badge, small and faded.
+    pub const RESERVED: u32 = 1;
+    /// The portals of a room leading within the shard.
+    pub const PORTAL: u32 = 2;
+    /// The portals of a room leading to another shard.
+    pub const SHARD_PORTAL: u32 = 3;
+    /// The outline of the hovered room.
+    pub const HOVER: u32 = 4;
+}
+
+/// A mark of the overlay: a disc (badge, portal) or square (hover) centred on a ground
+/// point, sized in tiles within a range of CSS pixels.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct MarkInstance {
+    /// World X and Z of the centre.
+    pub centre: [f32; 2],
+    /// Radius in tiles, then its least and greatest size in CSS pixels.
+    pub radius: [f32; 3],
+    /// Badge atlas rectangle: corner and side (`0..1`), and the layer.
+    pub uv: [f32; 4],
+    /// sRGB colour and opacity.
+    pub color: [u8; 4],
+    /// One of [`mark`].
+    pub kind: u32,
+}
+
+/// A thin arc of the overlay on the ground between two points (linked portals).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct ArcInstance {
+    /// World X and Z of one end.
+    pub from: [f32; 2],
+    /// World X and Z of the other end.
+    pub to: [f32; 2],
+    /// sRGB colour and opacity.
+    pub color: [u8; 4],
+    /// How far the middle bows out, as a share of the length (to the left of `from` →
+    /// `to`).
+    pub bend: f32,
+}
+
+/// A glyph of an overlay label: a rectangle of the glyph atlas at a CSS-pixel offset from
+/// a ground point, so that labels keep their size at every zoom.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct LabelGlyph {
+    /// World X and Z of the label's anchor.
+    pub anchor: [f32; 2],
+    /// Rectangle from the anchor in CSS pixels (y down): left, top, width, height.
+    pub rect: [f32; 4],
+    /// Atlas rectangle: corner and size (`0..1`).
+    pub uv: [f32; 4],
+    /// Text colour (sRGB, alpha = opacity).
+    pub color: [u8; 4],
+    /// Halo colour (sRGB, alpha = opacity).
+    pub halo: [u8; 4],
+    /// Halo width in distance-field units (`0..0.5`).
+    pub halo_width: f32,
+    /// Room size (CSS pixels) from which the label is shown.
+    pub appear: f32,
+    /// Label class: its fade (`labels` in `overlay.wgsl`).
+    pub class: u32,
+}
+
 /// sRGB `0xRRGGBB` with an alpha byte, as vertex bytes.
 pub const fn rgba(rgb: u32, alpha: u8) -> [u8; 4] {
     let [_, r, g, b] = rgb.to_be_bytes();

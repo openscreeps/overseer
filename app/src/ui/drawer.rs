@@ -1,7 +1,8 @@
 //! The right drawer of the world screen: resizable (drag or arrow keys on its edge, width
 //! saved), collapsible (its button or the top bar's), with three tabs (the last one saved):
 //!
-//! - Room: the room in focus as a room control (viewer) and its facts, "Pop out room";
+//! - Room: the room in focus as a room control (viewer) and its facts, "Pop out room", and
+//!   "Go to" through its portals (to the destination room, on its shard);
 //! - Objects: the room's objects and the inspector, selection shared with the map;
 //! - Console: the account's console, "Pop out console".
 //!
@@ -9,8 +10,10 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use overseer::map::PortalDestination;
 use web_sys::{KeyboardEvent, PointerEvent};
 
+use crate::portals::GoTo;
 use crate::profiles::Server;
 use crate::route::{Route, Shard, WindowView};
 use crate::saved::{DRAWER_WIDTH, DrawerTab};
@@ -100,6 +103,26 @@ pub fn Drawer(server: Server) -> impl IntoView {
     let centre = Callback::new(move |(room, x, y)| {
         map.with_viewer(|viewer| viewer.look_at(room, Some((x, y)), true));
     });
+    // A portal's "Go to": its room on this shard, else the room on the other shard.
+    let go_to = Callback::new(move |destination: PortalDestination| {
+        let shard = map.shard.get_untracked();
+        match GoTo::of(&destination, shard.as_ref().and_then(Shard::name)) {
+            GoTo::Room(room) => map.go_to(room),
+            GoTo::Shard(shard, room) => {
+                let Some(slug) = state
+                    .route
+                    .with_untracked(|route| route.server().map(str::to_owned))
+                else {
+                    return;
+                };
+                state.navigate(Route::World {
+                    server: slug,
+                    shard: Some(Shard::Named(shard)),
+                    room: Some(room),
+                });
+            }
+        }
+    });
 
     // The console runs while the world is shown.
     let console = state
@@ -175,7 +198,7 @@ pub fn Drawer(server: Server) -> impl IntoView {
                     }
                 >
                     <div class="room-tab">
-                        <RoomInfo room=map.room data user=user.get_value() pop_out=pop_out_room>
+                        <RoomInfo room=map.room data user=user.get_value() pop_out=pop_out_room go_to>
                             {preview}
                         </RoomInfo>
                     </div>

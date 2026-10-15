@@ -5,6 +5,11 @@
 //! a resize) and for as long as the viewer reports [`FrameStats::animating`], so an idle view
 //! costs nothing. After a frame whose camera or size changed, the viewer's interest goes to
 //! the feed at most every [`INTEREST_INTERVAL_MS`] (the last change always arrives).
+//!
+//! A mouse or pen moving over the canvas without a button pressed hovers it: the
+//! [`Hooks::hover`] hook learns the point at most once per animation frame, and again when
+//! the camera moves under a resting pointer; it learns `None` when the pointer leaves, presses
+//! (dragging hides the hover) or is a touch.
 
 use std::rc::Rc;
 
@@ -27,6 +32,10 @@ pub const INTEREST_INTERVAL_MS: f64 = 200.0;
 /// Called with the viewer: once created, after each frame, on a click.
 type Hook<T> = Rc<dyn Fn(&mut Viewer, T)>;
 
+/// Called with the viewer and the hovered CSS point (`None`: nothing hovered); returns
+/// whether the view changed and needs a frame.
+pub type HoverHook = Rc<dyn Fn(&mut Viewer, Option<(f32, f32)>) -> bool>;
+
 /// What the owner of a surface does at each step.
 pub struct Hooks {
     /// The viewer was created (set its scope, camera, mode, user).
@@ -35,6 +44,8 @@ pub struct Hooks {
     pub frame: Hook<FrameStats>,
     /// A click on the canvas (a press released without dragging).
     pub pick: Hook<Pick>,
+    /// The hovered point changed (see the module docs); `None` ignores hovering.
+    pub hover: Option<HoverHook>,
 }
 
 /// One viewer canvas; `Copy` handles for event handlers and tasks.
@@ -52,6 +63,10 @@ pub struct Surface {
     /// Camera and size of the last interest sent, when it was sent, and whether a trailing
     /// send is pending.
     interest: StoredValue<InterestClock>,
+    /// Where a resting mouse or pen hovers, in CSS pixels.
+    pointer: StoredValue<Option<(f32, f32)>>,
+    /// A hover update is requested, and the camera of the last one.
+    hover: StoredValue<(bool, Option<CameraState>)>,
     canvas: NodeRef<Canvas>,
     /// Why the view cannot be drawn.
     pub error: RwSignal<Option<String>>,
@@ -81,6 +96,8 @@ impl Surface {
             scheduled: StoredValue::new(false),
             size: StoredValue::new((0.0, 0.0, 0.0)),
             interest: StoredValue::new(InterestClock::default()),
+            pointer: StoredValue::new(None),
+            hover: StoredValue::new((false, None)),
             canvas: NodeRef::new(),
             error: RwSignal::new(None),
             ready: RwSignal::new(false),
@@ -183,11 +200,15 @@ impl Surface {
     }
 
     /// Sends the interest when the camera or size changed, at most every
-    /// [`INTEREST_INTERVAL_MS`]; schedules a trailing send otherwise.
+    /// [`INTEREST_INTERVAL_MS`]; schedules a trailing send otherwise. A camera that moved
+    /// under a hovering pointer updates the hover.
     fn after_frame(self) {
         let Some(camera) = self.with_viewer_quiet(Viewer::camera) else {
             return;
         };
+        if self.pointer.get_value().is_some() && self.hover.get_value().1 != Some(camera) {
+            self.request_hover();
+        }
         let Some(clock) = self.interest.try_get_value() else {
             return;
         };
@@ -207,6 +228,60 @@ impl Surface {
             )]
             let wait = std::time::Duration::from_millis((INTEREST_INTERVAL_MS - elapsed) as u64);
             set_timeout(move || self.send_interest(), wait);
+        }
+    }
+
+    /// Sets where the pointer hovers (`None`: nowhere) and requests a hover update; nothing
+    /// without a hover hook.
+    fn set_pointer(self, point: Option<(f32, f32)>) {
+        let hovers = self
+            .hooks
+            .try_with_value(|hooks| hooks.as_ref().is_some_and(|hooks| hooks.hover.is_some()));
+        if hovers != Some(true) || (point.is_none() && self.pointer.get_value().is_none()) {
+            return;
+        }
+        self.pointer.try_set_value(point);
+        self.request_hover();
+    }
+
+    /// Requests a hover update on the next animation frame unless one is pending.
+    fn request_hover(self) {
+        if self
+            .hover
+            .try_get_value()
+            .is_none_or(|(requested, _)| requested)
+        {
+            return;
+        }
+        self.hover.update_value(|hover| hover.0 = true);
+        request_animation_frame(move || self.update_hover());
+    }
+
+    /// Tells the hover hook where the pointer hovers; draws a frame when the view changed.
+    fn update_hover(self) {
+        let Some(point) = self.pointer.try_get_value() else {
+            return;
+        };
+        let Some(hook) = self
+            .hooks
+            .try_get_value()
+            .flatten()
+            .and_then(|hooks| hooks.hover.clone())
+        else {
+            return;
+        };
+        let changed = self
+            .viewer
+            .try_update_value(|viewer| {
+                let viewer = viewer.as_mut()?;
+                let changed = hook(viewer, point);
+                Some((changed, viewer.camera()))
+            })
+            .flatten();
+        let camera = changed.map(|(_, camera)| camera);
+        self.hover.try_set_value((false, camera));
+        if changed.is_some_and(|(changed, _)| changed) {
+            self.request();
         }
     }
 
@@ -236,6 +311,12 @@ impl Surface {
             .try_with_value(|viewer| viewer.as_ref().map(read))
             .flatten()
     }
+
+    /// The canvas size in CSS pixels, as last given to the viewer.
+    pub fn css_size(self) -> (f32, f32) {
+        let (width, height, _) = self.size.try_get_value().unwrap_or_default();
+        (width, height)
+    }
 }
 
 /// Applies a feed event to `viewer`.
@@ -254,6 +335,7 @@ pub fn apply(viewer: &mut Viewer, event: &WorldEvent) {
         WorldEvent::Detail(room, DetailState::Refused(_)) | WorldEvent::DetailGone(room) => {
             viewer.clear_room(*room);
         }
+        WorldEvent::Portals(room, portals) => viewer.set_portals(*room, portals),
         // Pauses show in the status bar (the world's progress).
         WorldEvent::Detail(_, DetailState::Pending) | WorldEvent::StatsPaused(_) => {}
     }
@@ -282,6 +364,7 @@ pub fn SurfaceCanvas(
     let canvas = surface.canvas;
     let pointer_down = move |event: PointerEvent| {
         event.prevent_default();
+        surface.set_pointer(None);
         if let Some(element) = canvas.get_untracked() {
             let _ = element.focus();
             let _ = element.set_pointer_capture(event.pointer_id());
@@ -298,10 +381,14 @@ pub fn SurfaceCanvas(
         });
     };
     let pointer_move = move |event: PointerEvent| {
+        let (x, y) = position(&event);
         if event.buttons() == 0 {
+            // A mouse or pen resting over the map hovers it; touches never hover.
+            let hovering = event.pointer_type() != "touch";
+            surface.set_pointer(hovering.then_some((x, y)));
             return;
         }
-        let (x, y) = position(&event);
+        surface.set_pointer(None);
         surface.with_viewer(|viewer| viewer.pointer_move(event.pointer_id(), x, y));
     };
     // Every release and cancel reaches the viewer, whatever the hooks: a pointer it still
@@ -348,6 +435,7 @@ pub fn SurfaceCanvas(
             aria-describedby=description_id.clone()
             on:pointerdown=pointer_down
             on:pointermove=pointer_move
+            on:pointerleave=move |_| surface.set_pointer(None)
             on:pointerup=pointer_up
             on:pointercancel=pointer_cancel
             on:lostpointercapture=pointer_cancel

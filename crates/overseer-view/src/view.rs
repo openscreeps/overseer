@@ -6,6 +6,7 @@ use overseer::map::{Interest, RoomCoord, RoomRect};
 
 use crate::camera::{self, Camera, room_at, room_centre};
 use crate::mesh::{Instance, WALL_HEIGHT, linear};
+use crate::overlay;
 use crate::scene::Eye;
 use crate::world::{self, Limits, World, tile_origin};
 use crate::{
@@ -581,12 +582,14 @@ impl View {
                 terrain: vec![room],
                 minimaps: vec![room],
                 detail: vec![room],
+                portals: Some(RoomRect::new(room, room)),
             };
         }
         let lod = self.lod();
         let visible = self.visible_rooms();
         let mut interest = Interest {
             stats: Some(visible),
+            portals: Some(visible),
             ..Interest::default()
         };
         // Terrain for every room in view at every level of detail: rooms stay resident once
@@ -614,14 +617,20 @@ impl View {
         interest
     }
 
-    /// The tile under a CSS point (raised walls of detail scenes included) and its
-    /// objects, topmost first; `None` outside the scope.
-    pub fn pick(&self, point: Vec2) -> Option<Pick> {
+    /// The room and tile under a CSS point (raised walls of detail scenes included);
+    /// `None` outside the scope.
+    pub fn room_at(&self, point: Vec2) -> Option<(RoomCoord, u8, u8)> {
         let (origin, direction) = self.camera.ray(point);
         let tile = camera::cast(origin, direction, WALL_HEIGHT, |x, y| {
             self.world.height((x, y))
         })?;
-        let (room, x, y) = world::split(tile);
+        Some(world::split(tile))
+    }
+
+    /// The tile under a CSS point (raised walls of detail scenes included) and its
+    /// objects, topmost first; `None` outside the scope.
+    pub fn pick(&self, point: Vec2) -> Option<Pick> {
+        let (room, x, y) = self.room_at(point)?;
         let objects = self
             .world
             .detail(room)
@@ -638,6 +647,35 @@ impl View {
     /// Highlights a tile.
     pub const fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
         self.selected = tile;
+    }
+
+    /// Outlines a room (`None`: none).
+    pub const fn set_hover(&mut self, room: Option<RoomCoord>) {
+        self.world.overlay.set_hover(room);
+    }
+
+    /// What the overlay's labels are made for.
+    pub fn overlay_frame(&self) -> overlay::Frame {
+        overlay::Frame {
+            bounds: self.scope.bounds(),
+            visible: self.visible_rooms(),
+            px_per_room: self.camera.px_per_room(),
+            world: matches!(self.scope, Scope::World(_)),
+        }
+    }
+
+    /// The opacities of the overlay's parts.
+    pub fn overlay_fades(&self) -> overlay::Fades {
+        match self.scope {
+            Scope::Room(_) => overlay::Fades::ROOM,
+            Scope::World(_) => overlay::Fades::at(self.camera.px_per_room(), self.fades().detail),
+        }
+    }
+
+    /// Brings the overlay up to date with the camera.
+    pub fn update_overlay(&mut self) {
+        let frame = self.overlay_frame();
+        self.world.update_overlay(&frame);
     }
 
     /// Where the camera looks from, for the detail scenes.

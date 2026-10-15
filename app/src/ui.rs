@@ -8,6 +8,7 @@
 mod console;
 mod drawer;
 mod form;
+mod hover;
 mod icon;
 mod inspector;
 mod objects;
@@ -76,6 +77,7 @@ pub fn App(
     provide_context(state);
     let map = MapState::new();
     provide_context(map);
+    provide_context(hover::MapRooms::new());
     let limits = rate_limits::RateLimitsUi::new();
     provide_context(limits);
     limits.listen(map);

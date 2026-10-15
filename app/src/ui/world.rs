@@ -11,6 +11,12 @@
 //! in focus follows clicks, the room search (which frames the whole room and hands the
 //! keyboard back to the map) and, once zoomed into the live level, the room under the centre;
 //! it is kept in the route and the saved state.
+//!
+//! A mouse resting over the map names the room under it: a tooltip next to the pointer
+//! ([`HoverTip`]: room, owner and level, reservation, status, portal destinations), the
+//! status bar's room item, and an outline of the room on the map. Owners' and reservers'
+//! badges are drawn on their rooms: the badges of the rooms in view, nearest first, go to the
+//! viewer as they load ([`crate::badges`]), and only while the zoom draws them.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -28,9 +34,10 @@ use crate::saved::{BOUNDS_MAX_AGE_MS, Bounds};
 use crate::session;
 use crate::state::AppState;
 use crate::ui::drawer::Drawer;
+use crate::ui::hover::{HoverTip, Hovered, MapRooms};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
-use crate::ui::surface::{Hooks, Surface, SurfaceCanvas};
+use crate::ui::surface::{Hooks, HoverHook, Surface, SurfaceCanvas};
 
 /// Keyboard pan step, in CSS pixels.
 const PAN_STEP: f32 = 80.0;
@@ -232,6 +239,9 @@ pub async fn open_world(
             for (room, stat) in loaded.stats {
                 world.insert_stats(room, stat);
             }
+            for (room, portals, scanned_at) in loaded.portals {
+                world.insert_portals(room, portals, scanned_at);
+            }
         }
         return Ok(Feed::start(
             world,
@@ -288,6 +298,8 @@ pub fn WorldScreen(
 ) -> impl IntoView {
     let state = AppState::expect();
     let map = MapState::expect();
+    let rooms = MapRooms::expect();
+    rooms.clear();
     let attempt = RwSignal::new(0_u32);
     let url = server.url.clone();
     let shard_key = shard.to_string();
@@ -306,6 +318,8 @@ pub fn WorldScreen(
     map.generation.set_value(generation);
     let camera_saver = CameraSaver::new(state, url.clone(), shard_key.clone());
     let user = overseer.user_id().map(str::to_owned);
+    #[cfg(target_arch = "wasm32")]
+    let badges = BadgeWants::new(rooms, &overseer, &server);
     // The viewer shows the world (its scope is set): before, its camera means nothing.
     let scoped = StoredValue::new(false);
     let surface = Surface::new(Hooks {
@@ -330,6 +344,8 @@ pub fn WorldScreen(
             }
             map.frame_ms.set(Some(stats.cpu_ms));
             camera_saver.changed(viewer.camera());
+            #[cfg(target_arch = "wasm32")]
+            badges.frame(viewer);
         }),
         pick: Rc::new(move |viewer: &mut Viewer, pick| {
             // Setting the same room again would restart everything that follows the room
@@ -347,10 +363,16 @@ pub fn WorldScreen(
             map.tile.set(tile);
             viewer.select(tile);
         }),
+        hover: Some(hover_hook(rooms)),
     });
     map.surface.set_value(Some(surface));
     on_cleanup(move || {
         camera_saver.flush();
+        #[cfg(target_arch = "wasm32")]
+        badges.stop();
+        if map.generation.try_get_value() == Some(generation) {
+            rooms.clear();
+        }
         map.clear(generation);
     });
     Effect::new(move |_| map.backend.set(surface.backend.get()));
@@ -409,6 +431,7 @@ pub fn WorldScreen(
         });
         let subscription = feed.subscribe(Reach::World, move |event| {
             surface.apply(event);
+            rooms.learn(event);
             if let WorldEvent::Detail(_, DetailState::Live(snapshot)) = event
                 && snapshot.game_time.is_some()
             {
@@ -463,22 +486,7 @@ pub fn WorldScreen(
 
     keyboard(map);
 
-    let label = Signal::derive(move || {
-        let shard = map.shard.get().map(|shard| shard.to_string());
-        let room = map.room.get();
-        let place = match (shard.as_deref(), room) {
-            (Some("-") | None, Some(room)) => format!("World map, at {room}"),
-            (Some("-") | None, None) => "World map".to_owned(),
-            (Some(shard), Some(room)) => format!("Map of {shard}, at {room}"),
-            (Some(shard), None) => format!("Map of {shard}"),
-        };
-        match map.tile.get() {
-            Some((tile_room, x, y)) if Some(tile_room) == room => {
-                format!("{place}, tile {x},{y} selected")
-            }
-            _ => place,
-        }
-    });
+    let label = map_label(map);
     view! {
         <div class="world">
             <div class="stage">
@@ -486,8 +494,9 @@ pub fn WorldScreen(
                     surface
                     testid="world-map"
                     label
-                    description="Drag to pan (or orbit in 3D), scroll or pinch to zoom, click a room or tile to select it. Arrow keys or WASD pan, plus and minus zoom, Escape zooms out, slash searches a room."
+                    description="Drag to pan (or orbit in 3D), scroll or pinch to zoom, click a room or tile to select it; point at a room to see its name, owner and portals. Arrow keys or WASD pan, plus and minus zoom, Escape zooms out, slash searches a room."
                 />
+                <HoverTip />
                 <WorldOverlay surface attempt />
                 <MapControls />
             </div>
@@ -690,6 +699,164 @@ impl CameraSaver {
         self.state.update_saved(|saved| {
             saved.place_mut(&url).cameras.insert(shard, camera);
         });
+    }
+}
+
+/// The map canvas's accessible name: the shard, the room in focus and the selected tile.
+fn map_label(map: MapState) -> Signal<String> {
+    Signal::derive(move || {
+        let shard = map.shard.get().map(|shard| shard.to_string());
+        let room = map.room.get();
+        let place = match (shard.as_deref(), room) {
+            (Some("-") | None, Some(room)) => format!("World map, at {room}"),
+            (Some("-") | None, None) => "World map".to_owned(),
+            (Some(shard), Some(room)) => format!("Map of {shard}, at {room}"),
+            (Some(shard), None) => format!("Map of {shard}"),
+        };
+        match map.tile.get() {
+            Some((tile_room, x, y)) if Some(tile_room) == room => {
+                format!("{place}, tile {x},{y} selected")
+            }
+            _ => place,
+        }
+    })
+}
+
+/// The world map's hover hook: the room and tile under the pointer go to [`MapRooms::hover`]
+/// and the viewer outlines the room (a frame only when the room changes).
+fn hover_hook(rooms: MapRooms) -> HoverHook {
+    Rc::new(move |viewer: &mut Viewer, point| {
+        let hovered = point.and_then(|(x, y)| {
+            let (room, tile_x, tile_y) = viewer.room_at(x, y)?;
+            Some(Hovered {
+                room,
+                tile: (tile_x, tile_y),
+                point: (x, y),
+            })
+        });
+        let Some(before) = rooms.hover.try_get_untracked() else {
+            return false;
+        };
+        if before != hovered {
+            rooms.hover.set(hovered);
+        }
+        let room = hovered.map(|hovered| hovered.room);
+        if before.map(|before| before.room) == room {
+            return false;
+        }
+        viewer.set_hover(room);
+        true
+    })
+}
+
+/// How long the view must rest before the badges in view are asked for again.
+#[cfg(target_arch = "wasm32")]
+const BADGE_DELAY: Duration = Duration::from_millis(300);
+
+/// Asks the badge loader ([`crate::badges`]) for the badges of the owners and reservers in
+/// view, nearest the centre first, once the view (or what is known of its rooms) rests for
+/// [`BADGE_DELAY`]; for none while badges are too small to be drawn.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct BadgeWants {
+    /// The map's surface (its viewer gets the badges).
+    surface: StoredValue<Option<Surface>, LocalStorage>,
+    rooms: MapRooms,
+    /// The rooms in view, whether badges are drawn and the revision of what is known, when
+    /// the loader was last asked.
+    asked: StoredValue<Option<(RoomRect, bool, u64)>>,
+    /// An ask is scheduled.
+    scheduled: StoredValue<bool>,
+    loader: StoredValue<crate::badges::Badges, LocalStorage>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BadgeWants {
+    /// Badges of `server` (`overseer` connected to it) for the map's viewer, from what
+    /// `rooms` knows.
+    fn new(rooms: MapRooms, overseer: &Overseer, server: &Server) -> Self {
+        let surface = MapState::expect().surface;
+        let loader = crate::badges::Badges::new(
+            overseer.clone(),
+            &server.url,
+            crate::badges::request_interval(server.kind),
+            move |user, pixels| {
+                if let Some(surface) = surface.try_get_value().flatten() {
+                    surface.with_viewer(|viewer| {
+                        viewer.set_badge(user, pixels, crate::badges::BADGE_SIZE);
+                    });
+                }
+            },
+        );
+        Self {
+            surface,
+            rooms,
+            asked: StoredValue::new(None),
+            scheduled: StoredValue::new(false),
+            loader: StoredValue::new_local(loader),
+        }
+    }
+
+    /// The map drew a frame with `viewer`.
+    fn frame(self, viewer: &Viewer) {
+        if self.asked.try_get_value() == Some(Some(self.view(viewer)))
+            || self.scheduled.try_get_value() != Some(false)
+        {
+            return;
+        }
+        self.scheduled.set_value(true);
+        set_timeout(
+            move || {
+                // `None`: the screen is still there.
+                if self.scheduled.try_set_value(false).is_none()
+                    && let Some(surface) = self.surface.try_get_value().flatten()
+                {
+                    surface.with_viewer(|viewer| self.ask(viewer));
+                }
+            },
+            BADGE_DELAY,
+        );
+    }
+
+    /// What the badges in view depend on.
+    fn view(self, viewer: &Viewer) -> (RoomRect, bool, u64) {
+        (
+            viewer.visible_rooms(),
+            viewer.badges_visible(),
+            self.rooms.revision.get_untracked(),
+        )
+    }
+
+    /// Asks the loader for the badges in view now.
+    fn ask(self, viewer: &Viewer) {
+        let view = self.view(viewer);
+        self.asked.set_value(Some(view));
+        let (rooms, visible, _) = view;
+        let wants = if visible {
+            #[expect(clippy::cast_precision_loss, reason = "room coordinates are small")]
+            let centre = (
+                (rooms.min.x + rooms.max.x) as f32 / 2.0,
+                (rooms.min.y + rooms.max.y) as f32 / 2.0,
+            );
+            self.rooms.known.with_value(|known| {
+                crate::badges::wanted(
+                    known
+                        .stats
+                        .iter()
+                        .filter(|(room, _)| rooms.contains(**room))
+                        .map(|(room, stat)| (*room, stat.as_ref())),
+                    centre,
+                )
+            })
+        } else {
+            Vec::new()
+        };
+        self.loader.with_value(|loader| loader.want(wants));
+    }
+
+    /// The screen left: no more badges.
+    fn stop(self) {
+        self.loader.try_with_value(crate::badges::Badges::stop);
     }
 }
 

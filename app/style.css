@@ -1061,6 +1061,11 @@ main.popout {
   color: var(--text);
 }
 
+.status-hover {
+  min-width: 6.5em;
+  color: var(--text);
+}
+
 .status-progress {
   flex: 0 1 auto;
   min-width: 0;
@@ -1593,6 +1598,49 @@ canvas.surface {
 
 canvas.surface:focus-visible {
   outline-offset: -3px;
+}
+
+/* The hovered room's tooltip, next to the pointer (flipped near the map's edges). */
+
+.map-tip {
+  position: absolute;
+  z-index: var(--z-popover);
+  max-width: 18rem;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-tight);
+  color: var(--text);
+  pointer-events: none;
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-1);
+}
+
+.map-tip-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-tip-tile {
+  font-weight: normal;
+  color: var(--muted);
+}
+
+.map-tip-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+}
+
+.map-tip-rows:not(:empty) {
+  margin-top: var(--space-1);
 }
 
 /* Focus handed back to the map (after a search): no ring, the user did not tab there. */

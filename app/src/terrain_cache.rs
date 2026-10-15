@@ -1,13 +1,15 @@
 //! What the world map learned, kept across restarts in `IndexedDB`: room terrain (it never
-//! changes, so a room fetched once is never fetched again), rooms without terrain, and room
-//! overviews (owner, level, status) with when they were fetched, so a reopened world shows
-//! them at once and asks again only for the stale ones.
+//! changes, so a room fetched once is never fetched again), rooms without terrain, room
+//! overviews (owner, level, status, the players' badge parameters) with when they were
+//! fetched, so a reopened world shows them at once and asks again only for the stale ones, the
+//! rooms scanned for portals with their portals and scan time, and the players' rasterized
+//! badges.
 //!
 //! # Storage
 //!
-//! Database `overseer-terrain` (schema version 2) with three object stores, all
-//! keyed per room by `<FORMAT>|<server URL>|<shard>|<room>` ([`room_key`]; `<shard>` is `-` on
-//! single-world servers):
+//! Database `overseer-terrain` (schema version 3) with five object stores. The world stores
+//! are keyed per room by `<FORMAT>|<server URL>|<shard>|<room>` ([`room_key`]; `<shard>` is
+//! `-` on single-world servers):
 //!
 //! - `terrain`: the terrain packed 2 bits per tile ([`Terrain::packed`],
 //!   [`Terrain::PACKED_LEN`] = 625 bytes), or no bytes when the server has no terrain for the
@@ -15,28 +17,41 @@
 //! - `stats`: the overview as a JSON string ([`stat_json`], read by [`parse_stat`]), with its
 //!   own version (`"v"`, [`STAT_VERSION`]); overviews older than [`STAT_MAX_AGE_MS`] are not
 //!   used.
+//! - `portals`: a scanned room's portals and scan time as a JSON string
+//!   ([`crate::portals::portals_json`], read by [`crate::portals::parse_portals`]); the
+//!   `WorldMap` rescans stale ones.
 //! - `worlds`: per `<FORMAT>|<server URL>|<shard>|` prefix ([`world_key`]) when it was last
 //!   opened, in milliseconds since the epoch.
 //!
-//! Schema version 1 had `terrain` and `worlds` only: upgrading adds the missing stores and
-//! keeps the records ([`missing_stores`]). The record format is versioned by [`FORMAT`] in the
-//! key: records of another format are deleted when the cache opens.
+//! The `badges` store is per server: `<FORMAT>|<server URL>|~badge|<user id>|<hash>`
+//! ([`badge_key`]; the hash of the badge's parameters, so a changed badge is fetched again)
+//! holds the badge rasterized to [`crate::badges::BADGE_SIZE`]² premultiplied RGBA pixels
+//! (16 KiB).
+//!
+//! Schema version 1 had `terrain` and `worlds` only, version 2 added `stats`: upgrading adds
+//! the missing stores and keeps the records ([`missing_stores`]). The record format is
+//! versioned by [`FORMAT`] in the key: records of another format are deleted when the cache
+//! opens.
 //!
 //! # Bound
 //!
 //! At most [`MAX_ROOMS`] terrain records (150 000: four full screeps.com shards of 182 × 182
 //! rooms) are kept: about 670 bytes each with the key, so 100 MB of terrain, plus about
-//! 150 bytes per overview (at most one per room, 22 MB). Past the bound, whole worlds
-//! (terrain and overviews) are evicted, least recently opened first and never the open one,
-//! down to [`TARGET_ROOMS`] ([`plan_eviction`]); when the open world alone fills the bound,
-//! its further terrain is not stored ([`writable`]).
+//! 150 bytes per overview (at most one per room, 22 MB) and a few hundred bytes per portal
+//! room (a few hundred per shard). Past the bound, whole worlds (terrain, overviews and
+//! portals) are evicted, least recently opened first and never the open one, down to
+//! [`TARGET_ROOMS`] ([`plan_eviction`]); when the open world alone fills the bound, its
+//! further terrain is not stored ([`writable`]). Badges are bounded apart: past
+//! [`MAX_BADGES`] (64 MiB) the badge store is emptied when a cache opens (badges are fetched
+//! again as they are needed).
 //!
 //! On a world's start the app loads all its cached rooms and hands them to the `WorldMap`
-//! (`insert_terrain`, `insert_no_terrain`, `insert_stats`), which the viewers get them from;
-//! what the library fetches later (`WorldEvent::Terrain`, `NoTerrain`, `Stats`) is written in
-//! batches (`TerrainCache::store`, browsers only).
+//! (`insert_terrain`, `insert_no_terrain`, `insert_stats`, `insert_portals`), which the
+//! viewers get them from; what the library fetches later (`WorldEvent::Terrain`, `NoTerrain`,
+//! `Stats`, `Portals`) is written in batches (`TerrainCache::store`, browsers only).
 
 use overseer::core::api::Terrain;
+use overseer::core::api::types::UserBadge;
 use overseer::map::{RoomCoord, RoomOwner, RoomReservation, RoomStat, RoomStatus};
 use serde_json::{Map, Value, json};
 
@@ -46,6 +61,8 @@ pub const FORMAT: u32 = 1;
 pub const MAX_ROOMS: u32 = 150_000;
 /// Terrain records kept after an eviction.
 pub const TARGET_ROOMS: u32 = 135_000;
+/// Most badge records kept (64 MiB of pixels).
+pub const MAX_BADGES: u32 = 4096;
 
 /// Rooms of a screeps.com shard (182 × 182).
 const SHARD_ROOMS: u32 = 182 * 182;
@@ -62,8 +79,18 @@ pub const TERRAIN: &str = "terrain";
 pub const STATS: &str = "stats";
 /// Store of the worlds' last-opened times.
 pub const WORLDS: &str = "worlds";
+/// Store of the scanned rooms' portals.
+pub const PORTALS: &str = "portals";
+/// Store of the rasterized badges.
+pub const BADGES: &str = "badges";
 /// Every store of the current schema.
-pub const STORES: [&str; 3] = [TERRAIN, STATS, WORLDS];
+pub const STORES: [&str; 5] = [TERRAIN, STATS, WORLDS, PORTALS, BADGES];
+
+/// The key of the badge of user `user` with parameter hash `hash`
+/// ([`crate::badges::badge_hash`]) on the server with base URL `server`.
+pub fn badge_key(server: &str, user: &str, hash: u64) -> String {
+    format!("{FORMAT}|{server}|~badge|{user}|{hash:016x}")
+}
 
 /// The key prefix of the world `shard` (`None` on single-world servers) of the server with
 /// base URL `server`.
@@ -126,16 +153,14 @@ pub fn stat_json(stat: &RoomStat) -> String {
         record.insert("until".to_owned(), json!(until));
     }
     if let Some(owner) = &stat.owner {
-        record.insert(
-            "owner".to_owned(),
-            json!({"id": owner.id, "name": owner.username, "level": owner.level}),
-        );
+        let mut entry = json!({"id": owner.id, "name": owner.username, "level": owner.level});
+        insert_badge(&mut entry, owner.badge.as_ref());
+        record.insert("owner".to_owned(), entry);
     }
     if let Some(reservation) = &stat.reservation {
-        record.insert(
-            "reservation".to_owned(),
-            json!({"id": reservation.id, "name": reservation.username}),
-        );
+        let mut entry = json!({"id": reservation.id, "name": reservation.username});
+        insert_badge(&mut entry, reservation.badge.as_ref());
+        record.insert("reservation".to_owned(), entry);
     }
     if stat.safe_mode {
         record.insert("safe".to_owned(), json!(true));
@@ -147,6 +172,20 @@ pub fn stat_json(stat: &RoomStat) -> String {
         record.insert("density".to_owned(), json!(density));
     }
     Value::Object(record).to_string()
+}
+
+/// Adds `badge` (when known) to a user `entry` of an overview record.
+fn insert_badge(entry: &mut Value, badge: Option<&UserBadge>) {
+    if let (Some(entry), Some(badge)) = (entry.as_object_mut(), badge)
+        && let Ok(badge) = serde_json::to_value(badge)
+    {
+        entry.insert("badge".to_owned(), badge);
+    }
+}
+
+/// The badge of a user entry of an overview record; a malformed one is left out.
+fn read_badge(entry: &Value) -> Option<UserBadge> {
+    serde_json::from_value(entry.get("badge")?.clone()).ok()
 }
 
 /// Reads an overview record of [`stat_json`] at `now` (milliseconds since the epoch): `None`
@@ -176,6 +215,7 @@ pub fn parse_stat(record: &str, now: u64) -> Option<RoomStat> {
             id: text(owner, "id")?,
             username: text(owner, "name"),
             level: u8::try_from(owner.get("level")?.as_u64()?).ok()?,
+            badge: read_badge(owner),
         }),
     };
     let reservation = match value.get("reservation") {
@@ -183,6 +223,7 @@ pub fn parse_stat(record: &str, now: u64) -> Option<RoomStat> {
         Some(reservation) => Some(RoomReservation {
             id: text(reservation, "id")?,
             username: text(reservation, "name"),
+            badge: read_badge(reservation),
         }),
     };
     Some(RoomStat {
@@ -239,7 +280,7 @@ pub const fn writable(stored: u32, wanted: u32) -> u32 {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use idb::TerrainCache;
+pub use idb::{BadgeStore, TerrainCache};
 
 /// The `IndexedDB` side (browsers only).
 #[cfg(target_arch = "wasm32")]
@@ -251,7 +292,7 @@ mod idb {
 
     use js_sys::{Array, Function, Promise, Uint8Array};
     use overseer::core::api::Terrain;
-    use overseer::map::{RoomCoord, RoomStat, WorldEvent};
+    use overseer::map::{Portal, RoomCoord, RoomStat, WorldEvent};
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
@@ -261,15 +302,18 @@ mod idb {
     };
 
     use super::{
-        Cached, FORMAT, STATS, STORES, TERRAIN, WORLDS, WorldEntry, key_room, missing_stores,
-        parse_stat, plan_eviction, room_key, stat_json, terrain_record, world_key, writable,
+        BADGES, Cached, FORMAT, MAX_BADGES, PORTALS, STATS, STORES, TERRAIN, WORLDS, WorldEntry,
+        badge_key, key_room, missing_stores, parse_stat, plan_eviction, room_key, stat_json,
+        terrain_record, world_key, writable,
     };
+    use crate::badges::BADGE_BYTES;
+    use crate::portals::{parse_portals, portals_json};
 
     /// `IndexedDB` database name.
     const DB_NAME: &str = "overseer-terrain";
     /// `IndexedDB` schema version (object stores): 1 had `terrain` and `worlds`, 2 adds
-    /// `stats`.
-    const DB_VERSION: u32 = 2;
+    /// `stats`, 3 adds `portals` and `badges`.
+    const DB_VERSION: u32 = 3;
     /// How long records wait to be written with those arriving after them.
     const FLUSH_DELAY: Duration = Duration::from_secs(1);
 
@@ -282,6 +326,8 @@ mod idb {
         pub no_terrain: Vec<RoomCoord>,
         /// Rooms and their overview, with when it was fetched.
         pub stats: Vec<(RoomCoord, Arc<RoomStat>)>,
+        /// Rooms scanned for portals, their portals and when they were scanned.
+        pub portals: Vec<(RoomCoord, Arc<[Portal]>, u64)>,
     }
 
     /// A record waiting to be written.
@@ -290,6 +336,8 @@ mod idb {
         Terrain(RoomCoord, Option<Arc<Terrain>>),
         /// An overview record.
         Stat(RoomCoord, Arc<RoomStat>),
+        /// A scanned room's portals and when it was scanned.
+        Portals(RoomCoord, Arc<[Portal]>, u64),
     }
 
     /// The cache of one world; cheap to clone.
@@ -332,7 +380,8 @@ mod idb {
         ///
         /// Returns a message when `IndexedDB` fails.
         pub async fn load(&self) -> Result<Loaded, String> {
-            let transaction = self.transaction(&[TERRAIN, STATS], IdbTransactionMode::Readonly)?;
+            let transaction =
+                self.transaction(&[TERRAIN, STATS, PORTALS], IdbTransactionMode::Readonly)?;
             let mut loaded = Loaded::default();
             let mut buffer = [0; Terrain::PACKED_LEN];
             for (room, value) in self.records(&transaction, TERRAIN).await? {
@@ -355,15 +404,18 @@ mod idb {
                     None => {}
                 }
             }
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "the epoch time in milliseconds is a non-negative integer far below u64::MAX"
-            )]
-            let now = js_sys::Date::now() as u64;
+            let now = now_ms();
             for (room, value) in self.records(&transaction, STATS).await? {
                 if let Some(stat) = value.as_string().and_then(|json| parse_stat(&json, now)) {
                     loaded.stats.push((room, Arc::new(stat)));
+                }
+            }
+            for (room, value) in self.records(&transaction, PORTALS).await? {
+                if let Some((portals, scanned_at)) = value
+                    .as_string()
+                    .and_then(|json| parse_portals(&json, room))
+                {
+                    loaded.portals.push((room, portals.into(), scanned_at));
                 }
             }
             Ok(loaded)
@@ -390,9 +442,10 @@ mod idb {
                 .collect())
         }
 
-        /// Stores what `event` brought: a terrain, a room without terrain, or overviews.
-        /// Records arriving within [`FLUSH_DELAY`] are written in one transaction. Best
-        /// effort: a record that fails to be written is fetched again next time.
+        /// Stores what `event` brought: a terrain, a room without terrain, overviews, or a
+        /// scanned room's portals (scanned now). Records arriving within [`FLUSH_DELAY`] are
+        /// written in one transaction. Best effort: a record that fails to be written is
+        /// fetched again next time.
         pub fn store(&self, event: &WorldEvent) {
             let first = {
                 let mut pending = self.pending.borrow_mut();
@@ -407,6 +460,9 @@ mod idb {
                             .iter()
                             .map(|(room, stat)| Write::Stat(*room, Arc::clone(stat))),
                     ),
+                    WorldEvent::Portals(room, portals) => {
+                        pending.push(Write::Portals(*room, Arc::clone(portals), now_ms()));
+                    }
                     _ => {}
                 }
                 before == 0 && !pending.is_empty()
@@ -433,9 +489,11 @@ mod idb {
                 u32::try_from(terrain_count).unwrap_or(u32::MAX),
             );
             let written = allowed;
-            let transaction = self.transaction(&[TERRAIN, STATS], IdbTransactionMode::Readwrite)?;
+            let transaction =
+                self.transaction(&[TERRAIN, STATS, PORTALS], IdbTransactionMode::Readwrite)?;
             let terrain = transaction.object_store(TERRAIN).map_err(js_message)?;
             let stats = transaction.object_store(STATS).map_err(js_message)?;
+            let portals = transaction.object_store(PORTALS).map_err(js_message)?;
             for write in &writes {
                 match write {
                     Write::Terrain(room, record) => {
@@ -448,6 +506,10 @@ mod idb {
                     }
                     Write::Stat(room, stat) => {
                         self.put(&stats, *room, &JsValue::from_str(&stat_json(stat)))?;
+                    }
+                    Write::Portals(room, list, scanned_at) => {
+                        let record = portals_json(list, *scanned_at);
+                        self.put(&portals, *room, &JsValue::from_str(&record))?;
                     }
                 }
             }
@@ -502,11 +564,12 @@ mod idb {
         }
 
         /// Counts the terrain records of every world and deletes the worlds [`plan_eviction`]
-        /// picks (their terrain and overviews).
+        /// picks (their terrain, overviews and portals).
         async fn evict(&self) -> Result<(), String> {
             let transaction = self.transaction(&STORES, IdbTransactionMode::Readwrite)?;
             let terrain = transaction.object_store(TERRAIN).map_err(js_message)?;
             let stats = transaction.object_store(STATS).map_err(js_message)?;
+            let portals = transaction.object_store(PORTALS).map_err(js_message)?;
             let worlds = transaction.object_store(WORLDS).map_err(js_message)?;
             let keys = Array::from(&request(&worlds.get_all_keys().map_err(js_message)?).await?);
             let opened = Array::from(&request(&worlds.get_all().map_err(js_message)?).await?);
@@ -538,6 +601,7 @@ mod idb {
             for key in &evicted {
                 terrain.delete(&prefix_range(key)?).map_err(js_message)?;
                 stats.delete(&prefix_range(key)?).map_err(js_message)?;
+                portals.delete(&prefix_range(key)?).map_err(js_message)?;
                 worlds.delete(&JsValue::from_str(key)).map_err(js_message)?;
                 if let Some(entry) = entries.iter().find(|entry| &entry.key == key) {
                     stored -= entry.rooms;
@@ -559,6 +623,87 @@ mod idb {
                 .transaction_with_str_sequence_and_mode(&names, mode)
                 .map_err(js_message)
         }
+    }
+
+    /// The rasterized badges of one server; cheap to clone.
+    #[derive(Clone)]
+    pub struct BadgeStore {
+        db: IdbDatabase,
+        server: Rc<str>,
+    }
+
+    impl BadgeStore {
+        /// Opens the badges of the server with base URL `server`; empties the badge store
+        /// when it holds more than [`MAX_BADGES`] records.
+        ///
+        /// # Errors
+        ///
+        /// Returns a message when `IndexedDB` is unavailable or fails.
+        pub async fn open(server: &str) -> Result<Self, String> {
+            let store = Self {
+                db: open_db().await?,
+                server: server.into(),
+            };
+            let transaction = store.transaction(IdbTransactionMode::Readwrite)?;
+            let badges = transaction.object_store(BADGES).map_err(js_message)?;
+            let count = request(&badges.count().map_err(js_message)?).await?;
+            if count.as_f64().unwrap_or(0.0) > f64::from(MAX_BADGES) {
+                badges.clear().map_err(js_message)?;
+            }
+            done(&transaction).await?;
+            Ok(store)
+        }
+
+        /// The pixels of `user`'s badge with parameter hash `hash`, if cached.
+        ///
+        /// # Errors
+        ///
+        /// Returns a message when `IndexedDB` fails.
+        pub async fn get(&self, user: &str, hash: u64) -> Result<Option<Vec<u8>>, String> {
+            let transaction = self.transaction(IdbTransactionMode::Readonly)?;
+            let badges = transaction.object_store(BADGES).map_err(js_message)?;
+            let key = JsValue::from_str(&badge_key(&self.server, user, hash));
+            let value = request(&badges.get(&key).map_err(js_message)?).await?;
+            Ok(value
+                .dyn_ref::<Uint8Array>()
+                .filter(|bytes| bytes.length() as usize == BADGE_BYTES)
+                .map(Uint8Array::to_vec))
+        }
+
+        /// Stores the pixels of `user`'s badge with parameter hash `hash`.
+        ///
+        /// # Errors
+        ///
+        /// Returns a message when `IndexedDB` fails.
+        pub async fn put(&self, user: &str, hash: u64, pixels: &[u8]) -> Result<(), String> {
+            let transaction = self.transaction(IdbTransactionMode::Readwrite)?;
+            transaction
+                .object_store(BADGES)
+                .map_err(js_message)?
+                .put_with_key(
+                    &Uint8Array::from(pixels),
+                    &JsValue::from_str(&badge_key(&self.server, user, hash)),
+                )
+                .map_err(js_message)?;
+            done(&transaction).await
+        }
+
+        /// A transaction on the badge store.
+        fn transaction(&self, mode: IdbTransactionMode) -> Result<IdbTransaction, String> {
+            self.db
+                .transaction_with_str_and_mode(BADGES, mode)
+                .map_err(js_message)
+        }
+    }
+
+    /// `Date.now()` in milliseconds since the epoch.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the epoch time in milliseconds is a non-negative integer far below u64::MAX"
+    )]
+    fn now_ms() -> u64 {
+        js_sys::Date::now() as u64
     }
 
     /// Deletes everything cached of the server with base URL `server` (all its worlds).
@@ -681,9 +826,11 @@ mod tests {
     use overseer::map::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
 
     use super::{
-        Cached, MAX_ROOMS, STAT_MAX_AGE_MS, STORES, WorldEntry, key_room, missing_stores,
-        parse_stat, plan_eviction, room_key, stat_json, terrain_record, world_key, writable,
+        Cached, MAX_BADGES, MAX_ROOMS, STAT_MAX_AGE_MS, STORES, WorldEntry, badge_key, key_room,
+        missing_stores, parse_stat, plan_eviction, room_key, stat_json, terrain_record, world_key,
+        writable,
     };
+    use crate::badges::test_badge;
 
     fn terrain() -> Terrain {
         let digits: String = (0..2500)
@@ -716,6 +863,22 @@ mod tests {
     }
 
     #[test]
+    fn badge_keys_are_per_server_user_and_parameters() {
+        // The documented bound: 16 KiB per badge, 64 MiB in all.
+        assert_eq!(crate::badges::BADGE_BYTES, 16 * 1024);
+        assert_eq!(MAX_BADGES as usize * crate::badges::BADGE_BYTES, 64 << 20);
+        assert_eq!(crate::badges::BADGE_SIZE, 64);
+        let key = badge_key("https://screeps.com/", "u1", 0xabc);
+        assert_eq!(key, "1|https://screeps.com/|~badge|u1|0000000000000abc");
+        // Forgetting the server (its `<FORMAT>|<url>|` prefix) forgets its badges; no world
+        // of it holds them.
+        assert!(key.starts_with("1|https://screeps.com/|"));
+        let world = world_key("https://screeps.com/", Some("shard3"));
+        assert_eq!(key_room(&world, &key), None);
+        assert!(!key.starts_with(&world));
+    }
+
+    #[test]
     fn terrain_records_are_packed_or_empty() {
         let terrain = terrain();
         let packed = terrain.packed();
@@ -735,7 +898,13 @@ mod tests {
     fn upgrades_add_the_missing_stores_only() {
         assert_eq!(missing_stores(&[]), STORES);
         let schema_1 = ["terrain".to_owned(), "worlds".to_owned()];
-        assert_eq!(missing_stores(&schema_1), ["stats"]);
+        assert_eq!(missing_stores(&schema_1), ["stats", "portals", "badges"]);
+        let schema_2 = [
+            "terrain".to_owned(),
+            "worlds".to_owned(),
+            "stats".to_owned(),
+        ];
+        assert_eq!(missing_stores(&schema_2), ["portals", "badges"]);
         let current = STORES.map(str::to_owned);
         assert_eq!(missing_stores(&current), Vec::<&str>::new());
     }
@@ -750,10 +919,12 @@ mod tests {
                 id: "u1".to_owned(),
                 username: Some("Alice".to_owned()),
                 level: 8,
+                badge: Some(test_badge(3)),
             }),
             reservation: Some(RoomReservation {
                 id: "u2".to_owned(),
                 username: None,
+                badge: None,
             }),
             safe_mode: true,
             mineral: Some("H".to_owned()),
@@ -783,6 +954,14 @@ mod tests {
             serde_json::json!({"v": 1, "at": 1_800_000_000_000_u64, "status": "out of borders"})
         );
         assert_eq!(parse_stat(&record, NOW), Some(plain));
+        // Records written before badges were kept read without them; a malformed badge is
+        // left out, the overview kept.
+        let old = r#"{"v":1,"at":1800000000000,"status":"normal","owner":{"id":"u1","name":"Alice","level":3}}"#;
+        let read = parse_stat(old, NOW).unwrap();
+        assert_eq!(read.owner.unwrap().badge, None);
+        let malformed = r#"{"v":1,"at":1800000000000,"status":"normal","owner":{"id":"u1","level":3,"badge":{"type":1}}}"#;
+        let read = parse_stat(malformed, NOW).unwrap();
+        assert_eq!(read.owner.unwrap().badge, None);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub use overview::Overview;
 pub use terrain::TerrainStore;
 
 use crate::camera::{room_centre, room_origin};
+use crate::overlay::{self, Overlay};
 use crate::scene::motion::TickClock;
 use crate::scene::{Eye, Features, Frame, Scene, Timing};
 use crate::text::Atlas;
@@ -216,6 +217,8 @@ pub struct World {
     clock: TickClock,
     /// Glyphs of room visual text.
     pub atlas: Atlas,
+    /// Badges, portals, labels and the hover outline.
+    pub overlay: Overlay,
     features: Features,
 }
 
@@ -239,6 +242,7 @@ impl World {
             next_id: 1,
             clock: TickClock::default(),
             atlas: Atlas::browser(),
+            overlay: Overlay::new(limits.array_layers),
             features: Features::default(),
         }
     }
@@ -299,12 +303,27 @@ impl World {
     pub fn mark_no_terrain(&mut self, room: RoomCoord) {
         if self.terrain.mark_absent(room) {
             self.cells.set_terrain(room, terrain::state::ABSENT);
+            self.overlay.room_changed(room);
         }
     }
 
     /// Sets (`None`: forgets) a room's overview.
     pub fn set_stat(&mut self, room: RoomCoord, stat: Option<&RoomStat>) {
-        self.cells.set_stat(room, stat, self.me.as_deref());
+        if self.cells.set_stat(room, stat, self.me.as_deref()) {
+            self.overlay.owners_changed();
+        }
+    }
+
+    /// Brings the overlay up to date for `frame` (labels for the view, badges and portal
+    /// marks for what changed).
+    pub fn update_overlay(&mut self, frame: &overlay::Frame) {
+        let terrain = &self.terrain;
+        self.overlay.update(
+            frame,
+            &self.cells,
+            |room| terrain.state(room) == terrain::state::ABSENT,
+            &mut self.atlas,
+        );
     }
 
     /// Shows (`Some`) or removes (`None`) a room's minimap.

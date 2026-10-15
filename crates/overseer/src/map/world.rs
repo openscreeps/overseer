@@ -2,9 +2,11 @@
 //! the view moves.
 
 mod detail;
+mod portals;
 mod stats;
 mod terrain;
 
+pub use portals::{PORTAL_DECAYING_TTL, PORTAL_GAP, PORTAL_SCAN_TIMEOUT, PORTAL_TTL};
 pub use stats::{STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_TTL};
 pub use terrain::{TERRAIN_BATCH, TERRAIN_IN_FLIGHT};
 
@@ -21,11 +23,12 @@ use overseer_net::rt::{self, Instant, Sleep};
 use tokio::sync::watch;
 
 use super::rect::Sides;
-use super::{Map, MapView, RoomCoord, RoomRect, RoomStat};
+use super::{Map, MapView, Portal, RoomCoord, RoomRect, RoomStat};
 use crate::refresh::closed;
 use crate::{Closed, ConnectionStatus, Error, Overseer, RoomSnapshot};
 
 use detail::Details;
+use portals::Portals;
 use stats::Stats;
 use terrain::Terrains;
 
@@ -50,6 +53,9 @@ pub struct Interest {
     pub minimaps: Vec<RoomCoord>,
     /// Rooms wanted live in full detail, most important first.
     pub detail: Vec<RoomCoord>,
+    /// Rooms whose portals are wanted: those of its rooms that [may have
+    /// portals](super::may_have_portals) are scanned (see [`WorldMap`]).
+    pub portals: Option<RoomRect>,
 }
 
 /// The live state of a room wanted in detail.
@@ -81,6 +87,10 @@ pub enum WorldEvent {
     /// [`WorldProgress::stats_paused_until`], which carries no data of its own. See
     /// [`WorldMap::recheck_rate_limit`].
     StatsPaused(Option<u64>),
+    /// The portals of a room, newly scanned (not seeded with [`WorldMap::insert_portals`]):
+    /// empty when it has none. Reported again when the room is scanned again (see
+    /// [`WorldMap`]); the app persists it with the time it arrived.
+    Portals(RoomCoord, Arc<[Portal]>),
     /// The latest minimap of a room.
     Minimap(RoomCoord, Arc<RoomMap>),
     /// A room's minimap is no longer live (it left [`Interest::minimaps`]).
@@ -109,25 +119,34 @@ pub struct WorldProgress {
     /// or only the near share left while far rooms are wanted): when it resets, in
     /// milliseconds since the Unix epoch. `None` when not paused.
     pub stats_paused_until: Option<u64>,
+    /// Rooms of [`Interest::portals`] that [may have portals](super::may_have_portals) whose
+    /// portals (or their absence) are known, possibly stale.
+    pub portals_scanned: usize,
+    /// Rooms of [`Interest::portals`] inside the world that may have portals, while a user is
+    /// signed in, else none.
+    pub portals_wanted: usize,
 }
 
 impl WorldProgress {
-    /// Whether every wanted terrain and overview is known (or known not to exist).
+    /// Whether every wanted terrain, overview and portal room is known (or known not to
+    /// exist).
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.terrain_known + self.terrain_absent >= self.terrain_wanted
             && self.stats_known >= self.stats_wanted
+            && self.portals_scanned >= self.portals_wanted
     }
 }
 
-/// The world of one shard as one continuous map: the overview, terrain, live minimap and live
-/// detail of the rooms the UI needs, as the view moves.
+/// The world of one shard as one continuous map: the overview, terrain, portals, live minimap
+/// and live detail of the rooms the UI needs, as the view moves.
 ///
 /// Created by [`Map::world`] or [`Map::world_with_bounds`]. The app tells it what it needs with
 /// [`Self::set_interest`] (usually from the renderer's camera), which never blocks: it diffs
 /// subscriptions and queues requests, and the work happens while the app awaits
 /// [`Self::next`], which returns every change. The latest data stays readable with
-/// [`Self::terrain`], [`Self::stat`], [`Self::minimap`] and [`Self::detail`].
+/// [`Self::terrain`], [`Self::stat`], [`Self::portals`], [`Self::minimap`] and
+/// [`Self::detail`].
 ///
 /// # Policies
 ///
@@ -166,6 +185,32 @@ impl WorldProgress {
 ///   paused.
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
+/// - **Portals**: no endpoint lists a world's portals, and only some rooms have them: the
+///   generators of screeps.com and `OpenScreeps` place them in sector centres (`W5N5`:
+///   intra-shard) and highway crossroads (`W10N0`: inter-shard on screeps.com), see
+///   [`may_have_portals`](super::may_have_portals). Sampled on screeps.com `shard3`
+///   (October 2026): of 1 600 rooms around `W8S2`, the 30 with portals were all such rooms.
+///   The candidates of [`Interest::portals`] whose portals are not known (or stale) are
+///   scanned nearest its centre first, without any HTTP request: each is subscribed to
+///   `roomMap2`, whose first update (sent as soon as the server processes the subscription)
+///   lists portal positions (`p`), and released when it arrives (or after
+///   [`PORTAL_SCAN_TIMEOUT`], 30 s; scanned again 30 s later). Scans and live minimaps
+///   together stay within [`MINIMAP_CAP`] subscriptions (scans wait while the minimaps take
+///   them all). A live minimap counts as a scan of its room, of any room of
+///   [`Interest::portals`] (candidate or not) whose portals appear or vanish. A room without
+///   portals is reported with none; for a room with portals, one `GET /api/game/room-objects`
+///   brings their destinations ([`Portal`]), nearest the centre first, one request at a time
+///   and at least [`PORTAL_GAP`] (2 s) apart: 30 per minute at most, a quarter of
+///   screeps.com's server-wide 120 (the endpoint has no limit of its own there); once the
+///   endpoint's limit reports no request left, after its reset; after HTTP 429 after the
+///   endpoint's reset (60 s when the server-wide limit refused it), after other failures
+///   30 s. Measured on `shard3` around `W8S2` (51 × 51 rooms): 61 candidates scanned at once,
+///   44 with portals, all destinations known after 44 requests and 93 s. Each scan is
+///   reported ([`WorldEvent::Portals`]) and used for [`PORTAL_TTL`] (24 hours),
+///   [`PORTAL_DECAYING_TTL`] (1 hour) for a room with a decaying portal, or until a portal
+///   becomes unstable ([`Portal::expires_at`]), before the room is scanned again;
+///   [`Self::insert_portals`] seeds scans from the app's cache, stale after the same time
+///   since they were made.
 /// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order.
 ///   Their terrain comes from the terrain above (they are wanted first, ahead of
 ///   [`Interest::terrain`]), so a seeded or fetched room subscribes without any request; a
@@ -187,8 +232,9 @@ impl WorldProgress {
 ///   starts a new barrier. Should a server never answer, rooms are never released for its
 ///   refusals and the server keeps choosing which ones to skip.
 ///
-/// Overviews, minimaps and detail need a signed-in user: without one, [`Interest::stats`] and
-/// [`Interest::minimaps`] are ignored and detail rooms are refused.
+/// Overviews, portals, minimaps and detail need a signed-in user: without one,
+/// [`Interest::stats`], [`Interest::portals`] and [`Interest::minimaps`] are ignored and
+/// detail rooms are refused.
 ///
 /// Works natively and in browsers: requests and timers run on [`net::rt`](crate::net::rt).
 pub struct WorldMap {
@@ -210,6 +256,7 @@ struct Work {
     events: VecDeque<WorldEvent>,
     terrain: Terrains,
     stats: Stats,
+    portals: Portals,
     details: Details,
     /// Whether to plan again: something changed since the last plan.
     dirty: bool,
@@ -224,6 +271,7 @@ impl Work {
             events: VecDeque::new(),
             terrain: Terrains::default(),
             stats: Stats::new(bounds),
+            portals: Portals::default(),
             details: Details::default(),
             dirty: false,
             timer: None,
@@ -238,6 +286,7 @@ impl Work {
     ) -> Poll<Result<(), Closed>> {
         let mut changed = self.terrain.poll(cx, &mut self.events)?;
         changed |= self.stats.poll(cx, client, &mut self.events)?;
+        changed |= self.portals.poll(cx, &mut self.events)?;
         changed |= self.details.poll(cx, &self.terrain, &mut self.events)?;
         if let Some((_, sleep)) = &mut self.timer
             && sleep.as_mut().poll(cx).is_ready()
@@ -284,8 +333,8 @@ impl WorldMap {
     }
 
     /// Makes `interest` what the UI needs. Never blocks: subscribes and releases minimaps and
-    /// detail rooms, and queues terrain and overview requests; [`Self::next`] does the work and
-    /// reports the changes (including the [`WorldEvent::MinimapGone`],
+    /// detail rooms, and queues terrain, overview and portal work; [`Self::next`] does the
+    /// work and reports the changes (including the [`WorldEvent::MinimapGone`],
     /// [`WorldEvent::DetailGone`] and [`DetailState::Pending`] this queues).
     pub fn set_interest(&mut self, interest: &Interest) {
         if *interest == self.interest {
@@ -306,8 +355,13 @@ impl WorldMap {
             work.terrain.want(interest.terrain.iter().copied());
         }
         let minimaps = unique(&interest.minimaps);
-        work.stats
-            .set_near(&minimaps[..minimaps.len().min(MINIMAP_CAP)]);
+        let live = minimaps.len().min(MINIMAP_CAP);
+        work.stats.set_near(&minimaps[..live]);
+        work.portals.rect = interest
+            .portals
+            .filter(|_| user && self.minimaps.is_some())
+            .and_then(|rect| rect.intersection(&self.bounds));
+        work.portals.set_minimaps(live);
         if let Some(view) = &mut self.minimaps {
             let rooms = minimaps;
             let change = view.set_rooms(rooms.iter().take(MINIMAP_CAP).map(ToString::to_string));
@@ -352,6 +406,15 @@ impl WorldMap {
         self.work.dirty = true;
     }
 
+    /// Seeds the portals of `room` (empty: it has none) scanned at `scanned_at` (milliseconds
+    /// since the Unix epoch, when its [`WorldEvent::Portals`] arrived) from the app's
+    /// persistent cache: no [`WorldEvent::Portals`] reports them, and the room is scanned
+    /// again once they are stale (see [`WorldMap`]). Ignored when a newer scan is known.
+    pub fn insert_portals(&mut self, room: RoomCoord, portals: Arc<[Portal]>, scanned_at: u64) {
+        self.work.portals.insert(room, portals, scanned_at);
+        self.work.dirty = true;
+    }
+
     /// After the user lifted the overviews' rate limit (screeps.com's reset page): while
     /// overview loading is paused ([`WorldProgress::stats_paused_until`]), forgets the stale
     /// limit ([`net::Client::forget_rate_limit`](crate::net::Client::forget_rate_limit)) and
@@ -372,6 +435,7 @@ impl WorldMap {
     pub fn progress(&self) -> WorldProgress {
         let (terrain_known, terrain_absent, terrain_wanted) = self.work.terrain.progress();
         let (stats_known, stats_wanted) = self.work.stats.progress();
+        let (portals_scanned, portals_wanted) = self.work.portals.progress();
         WorldProgress {
             terrain_known,
             terrain_absent,
@@ -379,6 +443,8 @@ impl WorldMap {
             stats_known,
             stats_wanted,
             stats_paused_until: self.work.stats.paused(),
+            portals_scanned,
+            portals_wanted,
         }
     }
 
@@ -423,7 +489,8 @@ impl WorldMap {
                     let (room, map) = changed?;
                     if let Ok(room) = room.parse() {
                         shown.insert(room);
-                        work.events.push_back(WorldEvent::Minimap(room, map));
+                        work.events.push_back(WorldEvent::Minimap(room, Arc::clone(&map)));
+                        work.dirty |= work.portals.minimap(room, &map, &mut work.events);
                     }
                 }
             }
@@ -444,10 +511,8 @@ impl WorldMap {
         let stats = work
             .stats
             .plan(&self.map, client, shard, now, &mut work.events);
-        let due = match (terrain, stats) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (due, None) | (None, due) => due,
-        };
+        let portals = work.portals.plan(&self.map, &self.overseer, shard, now);
+        let due = [terrain, stats, portals].into_iter().flatten().min();
         match due {
             Some(due) if work.timer.as_ref().is_none_or(|(at, _)| *at != due) => {
                 work.timer = Some((due, Box::pin(rt::sleep_until(due))));
@@ -474,6 +539,12 @@ impl WorldMap {
     #[must_use]
     pub fn stat(&self, room: RoomCoord) -> Option<Arc<RoomStat>> {
         self.work.stats.get(room)
+    }
+
+    /// The portals of `room` (empty: it has none), when scanned or seeded.
+    #[must_use]
+    pub fn portals(&self, room: RoomCoord) -> Option<Arc<[Portal]>> {
+        self.work.portals.get(room)
     }
 
     /// The latest minimap of `room`, from its first [`WorldEvent::Minimap`] until its

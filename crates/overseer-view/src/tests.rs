@@ -29,6 +29,7 @@ mod effects;
 mod kinds;
 mod look;
 mod motion;
+mod overlay;
 mod terrain_shape;
 mod visuals;
 
@@ -116,6 +117,7 @@ fn stat(status: RoomStatus, owner: Option<(&str, u8)>) -> RoomStat {
             id: id.to_owned(),
             username: None,
             level,
+            badge: None,
         }),
         reservation: None,
         safe_mode: false,
@@ -1524,6 +1526,36 @@ fn frames_render_through_the_noop_backend() {
             .set_room(&snapshot_of("W0N1", &terrain, objects), 0.0);
         view.world.mark_no_terrain(room("W2N2"));
         view.select(Some((room("W1N1"), 7, 7)));
+        // The overlay: badges (more than the atlas first holds), portals, the hover outline.
+        for user in 0..150 {
+            let id = if user == 0 {
+                ME.to_owned()
+            } else {
+                format!("u{user}")
+            };
+            view.world.overlay.set_badge(&id, &[200; 64 * 64 * 4], 64);
+        }
+        let portal = |at: &str, to: &str, shard: Option<&str>| overseer::map::Portal {
+            room: room(at),
+            x: 25,
+            y: 25,
+            destination: overseer::map::PortalDestination {
+                room: room(to),
+                shard: shard.map(str::to_owned),
+                x: Some(25),
+                y: Some(25),
+            },
+            expires_at: None,
+            decay_time: None,
+        };
+        view.world
+            .overlay
+            .set_portals(room("W5N5"), &[portal("W5N5", "E5S5", None)]);
+        view.world.overlay.set_portals(
+            room("W10N10"),
+            &[portal("W10N10", "W10N10", Some("shard1"))],
+        );
+        view.set_hover(Some(room("W1N1")));
         for (mode, px_per_room) in [
             (ViewMode::Perspective, 2.0),
             (ViewMode::TopDown, 2.0),
@@ -1540,9 +1572,18 @@ fn frames_render_through_the_noop_backend() {
                 let detail = view.world.detail(room("W1N1")).unwrap();
                 assert!(!detail.scene.sides().is_empty(), "prisms in perspective");
             }
+            view.update_overlay();
             gpu.sync(&mut view.world);
             gpu.draw(&output, &Draw::of(&view, 600.0), &view.world);
         }
+        let overlay = &view.world.overlay;
+        assert!(
+            !overlay.overview_glyphs.items.is_empty(),
+            "sector labels drawn"
+        );
+        assert!(!overlay.room_glyphs.items.is_empty(), "room labels drawn");
+        assert_eq!(overlay.badges.layers(), 4, "the badge atlas grew");
+        assert!(!overlay.marks.items.is_empty() && !overlay.arcs.items.is_empty());
         let detail = view.world.detail(room("W1N1")).unwrap();
         assert!(!detail.scene.effects().is_empty(), "effects drawn");
         assert!(!detail.scene.visuals().glyphs.is_empty(), "text drawn");

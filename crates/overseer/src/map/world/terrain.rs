@@ -243,7 +243,7 @@ impl Terrains {
 
 /// A rate-limit reset (seconds since the Unix epoch, plus a second for clock skew) as an
 /// [`Instant`].
-fn reset_at(reset: u64, now: Instant) -> Instant {
+pub(super) fn reset_at(reset: u64, now: Instant) -> Instant {
     let reset = UNIX_EPOCH + Duration::from_secs(reset.saturating_add(1));
     now + reset
         .duration_since(SystemTime::now())

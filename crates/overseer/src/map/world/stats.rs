@@ -397,7 +397,7 @@ const fn sector(room: RoomCoord) -> (i32, i32) {
 }
 
 /// Now, in milliseconds since the Unix epoch.
-fn epoch_millis() -> u64 {
+pub(super) fn epoch_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

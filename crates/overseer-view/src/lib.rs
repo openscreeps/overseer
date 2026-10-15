@@ -151,23 +151,57 @@
 //! Up to four rooms keep a scene at once. Ambient animations (portal swirl, nuke and
 //! spawning pulses) only advance while frames are drawn.
 //!
+//! # Overlay
+//!
+//! Over the rooms and detail scenes, sized in CSS pixels so that it reads the same at every
+//! zoom, each part fading by level of detail (zooming changes no data, only the shader's
+//! fades):
+//!
+//! | part | shown | drawn |
+//! |---|---|---|
+//! | sector labels | [`Lod::Overview`], fading out from 18 to 24 pixels per room | the highway crossroads' names (`W10N20`) above their centre |
+//! | room labels | from [`Lod::Terrain`] (24 to 30 pixels per room) | each room's name in its north-west corner |
+//! | badges ([`Viewer::set_badge`]) | from [`BADGE_PX_PER_ROOM`] (10, fading in up to 15) until detail scenes fade in (per room as its scene arrives) | the owner's badge centred in owned rooms (60 % of the room, 10 to 40 pixels), a small faded one in reserved rooms |
+//! | portal marks ([`Viewer::set_portals`]) | always (half as strong over detail scenes) | a cyan ring around a room's portals (at least 11 pixels wide); lilac with a second ring and the shards' names below for portals to other shards |
+//! | portal arcs | fading out from 24 to 100 pixels per room | a thin curved line between rooms whose portals link within the shard (once per pair; to where portals arrive while the other room is unknown) |
+//! | hover ([`Viewer::set_hover`]) | always | a white line inside the room's border |
+//!
+//! Labels never overlap and are drawn with a dark halo over any terrain. Sector and shard
+//! labels are placed most important first (shard names, then crossroads on coarser grids:
+//! `E0S0`, then every 160, 80, 40… rooms): each shows from the zoom at which it clears the
+//! labels placed before it. Room labels show on every second, fourth or eighth row and
+//! column until every room's name fits. Labels come from the glyph atlas of bot visuals
+//! (none in native builds).
+//!
+//! Badges are premultiplied RGBA squares (any size, kept at [`BADGE_SIZE`] with mip levels)
+//! in a 2D array texture of 72 badges per layer that doubles its layers when full (to the
+//! device's limit: 18 432 badges on WebGL2), every badge uploaded once (and again when the
+//! texture grows). Instances are rebuilt only when their data changes: badges and portal
+//! marks when an owner, reservation, badge or portal changes, sector labels with the scope
+//! and portals, room labels when the view leaves the rooms (and margin) they were made for
+//! or zooms to another grid. [`Viewer::room_at`] names the room and tile under a point (for
+//! a hover tooltip; [`Viewer::visible_rooms`] and [`Viewer::badges_visible`] tell which
+//! badges are worth fetching).
+//!
 //! # Interest
 //!
 //! [`Viewer::interest`] says what the camera needs; hand it to
 //! `overseer::map::WorldMap::set_interest` (throttled) and feed the world's events back
 //! (`Terrain` → [`Viewer::set_terrain`], `NoTerrain` → [`Viewer::mark_no_terrain`],
 //! `Stats` → [`Viewer::set_stat`], `Minimap` / `MinimapGone` → [`Viewer::set_minimap`],
-//! `Detail(Live)` → [`Viewer::set_room`], `DetailGone` → [`Viewer::clear_room`]). Rooms are
-//! listed nearest to the camera's centre first. In a world scope:
+//! `Detail(Live)` → [`Viewer::set_room`], `DetailGone` → [`Viewer::clear_room`],
+//! `Portals` → [`Viewer::set_portals`]). Rooms are listed nearest to the camera's centre
+//! first. In a world scope:
 //!
 //! - `stats`: the rooms in view, at every level of detail;
 //! - `terrain`: the rooms in view, at every level of detail (the whole shard when zoomed
 //!   out; terrain already given is listed too, the world map does not fetch it again);
 //! - `minimaps`: from [`Lod::Minimap`], at most [`MINIMAP_ROOMS`];
 //! - `detail`: at [`Lod::Detail`], the room under the centre ([`Viewer::focused_room`]) then
-//!   the nearest other, at most [`DETAIL_ROOMS`] (the server's per-user limit).
+//!   the nearest other, at most [`DETAIL_ROOMS`] (the server's per-user limit);
+//! - `portals`: the rooms in view, at every level of detail.
 //!
-//! A room scope wants its room's terrain, minimap and detail, and no stats.
+//! A room scope wants its room's terrain, minimap, detail and portals, and no stats.
 //!
 //! The viewer uploads only what changed: one room instance per changed overview or terrain
 //! state, one terrain block and the overview texels of each new terrain (merged into one
@@ -194,8 +228,10 @@
 //!    (calling `preventDefault`) with `deltaY` in pixels (multiply line-mode deltas by about
 //!    16). Set CSS `touch-action: none` on the canvas so touch gestures reach the viewer,
 //!    and suppress `contextmenu` for right-drag.
-//! 3. Feed the world's data as described under Interest, and the signed-in user id to
-//!    [`Viewer::set_user`].
+//! 3. Feed the world's data as described under Interest, the signed-in user id to
+//!    [`Viewer::set_user`] and users' badges to [`Viewer::set_badge`]. On `pointermove`
+//!    without a pressed button, [`Viewer::room_at`] names what is under the pointer and
+//!    [`Viewer::set_hover`] outlines its room.
 //! 4. Request an animation frame after any of the calls above, and call [`Viewer::render`]
 //!    in it; request another while [`FrameStats::animating`] is `true`. Nothing else
 //!    changes the picture, so an idle view costs no frames.
@@ -229,6 +265,7 @@ mod camera;
 mod clock;
 mod gpu;
 mod mesh;
+mod overlay;
 mod scene;
 mod text;
 mod view;
@@ -240,7 +277,7 @@ mod tests;
 use glam::Vec2;
 use overseer::RoomSnapshot;
 use overseer::core::api::Terrain;
-use overseer::map::{Interest, RoomCoord, RoomMap, RoomRect, RoomStat};
+use overseer::map::{Interest, Portal, RoomCoord, RoomMap, RoomRect, RoomStat};
 
 use crate::gpu::{Draw, Gpu};
 use crate::view::View;
@@ -267,6 +304,11 @@ pub const DETAIL_ROOMS: usize = 2;
 /// Closest zoom: a tile is at most this many CSS pixels on the canvas (at the camera's
 /// target), enough to read every object's details; tiny canvases still show 4 tiles high.
 pub const MAX_PX_PER_TILE: f32 = 64.0;
+/// Side (texels) badges are kept at ([`Viewer::set_badge`] resamples other sizes).
+pub const BADGE_SIZE: u32 = overlay::badges::BADGE;
+/// Room size (CSS pixels) from which owners' badges are drawn (fading in up to 1.5 times
+/// that, out with detail scenes).
+pub const BADGE_PX_PER_ROOM: f32 = 10.0;
 
 /// The camera projection.
 #[derive(
@@ -547,6 +589,26 @@ impl Viewer {
         self.view.world.clear_room(room);
     }
 
+    /// Stores a user's badge: `rgba` is a `size` × `size` square of premultiplied RGBA
+    /// bytes (row major; [`BADGE_SIZE`] needs no resampling). Rooms the user owns show it
+    /// centred, rooms they reserve a small faded copy (see the crate documentation).
+    /// Giving it again replaces it; bytes that do not match `size` are ignored.
+    pub fn set_badge(&mut self, user_id: &str, rgba: &[u8], size: u32) {
+        self.view.world.overlay.set_badge(user_id, rgba, size);
+    }
+
+    /// Sets a room's portals (`WorldEvent::Portals`; empty: none), replacing those given
+    /// before: a mark at every zoom, arcs to the rooms they link within the shard, the
+    /// names of the shards they lead to.
+    pub fn set_portals(&mut self, room: RoomCoord, portals: &[Portal]) {
+        self.view.world.overlay.set_portals(room, portals);
+    }
+
+    /// Outlines a room subtly (`None`: none), e.g. the room under the pointer.
+    pub const fn set_hover(&mut self, room: Option<RoomCoord>) {
+        self.view.set_hover(room);
+    }
+
     /// The camera, to persist.
     #[must_use]
     pub const fn camera(&self) -> CameraState {
@@ -596,6 +658,26 @@ impl Viewer {
     #[must_use]
     pub fn interest(&self) -> Interest {
         self.view.interest()
+    }
+
+    /// The rooms in view, within the scope.
+    #[must_use]
+    pub fn visible_rooms(&self) -> RoomRect {
+        self.view.visible_rooms()
+    }
+
+    /// Whether owners' badges show at the current zoom (a world scope, rooms from
+    /// [`BADGE_PX_PER_ROOM`] wide until detail scenes take over): badges are worth fetching.
+    #[must_use]
+    pub fn badges_visible(&self) -> bool {
+        self.view.overlay_fades().marks[0] > 0.0
+    }
+
+    /// The room and tile under CSS pixel `(x, y)` of the canvas (raised walls of detail
+    /// scenes included), `None` outside the scope: what a click there would pick.
+    #[must_use]
+    pub fn room_at(&self, x: f32, y: f32) -> Option<(RoomCoord, u8, u8)> {
+        self.view.room_at(Vec2::new(x, y))
     }
 
     /// Moves the view by CSS pixels: positive `dx` shows more of the east, positive `dy`
@@ -684,6 +766,7 @@ impl Viewer {
     pub fn render(&mut self) -> Result<FrameStats, ViewError> {
         let start = clock::now();
         let flying = self.view.advance(start);
+        self.view.update_overlay();
         // Detail scenes advance only while shown.
         let (objects, moving) = if self.view.fades().detail > 0.0 {
             let eye = self.view.eye();

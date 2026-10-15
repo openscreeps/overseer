@@ -175,12 +175,21 @@ impl Cells {
         Some(instance)
     }
 
-    /// Sets (`None`: forgets) a room's overview. Returns whether it changed.
+    /// Sets (`None`: forgets) a room's overview. Returns whether its owner or reserving
+    /// user changed.
     pub fn set_stat(&mut self, room: RoomCoord, stat: Option<&RoomStat>, me: Option<&str>) -> bool {
         let stat = stat.map(CellStat::of);
-        if self.stats.get(&room) == stat.as_ref() {
+        let old = self.stats.get(&room);
+        if old == stat.as_ref() {
             return false;
         }
+        let users = |stat: Option<&CellStat>| {
+            stat.map_or((None, None), |stat| {
+                let owner = stat.owner.as_ref().map(|(id, _)| id.clone());
+                (owner, stat.reserved.clone())
+            })
+        };
+        let owners_changed = users(old) != users(stat.as_ref());
         match stat {
             Some(stat) => self.stats.insert(room, stat),
             None => self.stats.remove(&room),
@@ -189,7 +198,7 @@ impl Cells {
         if let Some(instance) = self.instance_mut(room) {
             (instance.overlay, instance.tint) = (overlay, tint);
         }
-        true
+        owners_changed
     }
 
     /// Sets a room's terrain state (its slot, `PENDING` or `ABSENT`).
@@ -207,6 +216,16 @@ impl Cells {
     /// The terrain tint of a room (transparent without an overview), for detail scenes.
     pub fn tint(&self, room: RoomCoord, me: Option<&str>) -> [u8; 4] {
         self.colors(room, me).1
+    }
+
+    /// Every room seen with an owner or a reservation: the owner's and the reserving
+    /// user's ids.
+    pub fn owners(&self) -> impl Iterator<Item = (RoomCoord, Option<&str>, Option<&str>)> {
+        self.stats.iter().filter_map(|(room, stat)| {
+            let owner = stat.owner.as_ref().map(|(id, _)| id.as_str());
+            let reserver = stat.reserved.as_deref();
+            (owner.is_some() || reserver.is_some()).then_some((*room, owner, reserver))
+        })
     }
 
     /// The room instances, row-major over the bounds.

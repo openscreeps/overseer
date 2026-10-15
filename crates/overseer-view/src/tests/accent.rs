@@ -60,6 +60,7 @@ fn accents_keep_the_terrain_readable_for_every_kind_of_room() {
         stat.reservation = Some(RoomReservation {
             id: user.to_owned(),
             username: None,
+            badge: None,
         });
         stat
     };

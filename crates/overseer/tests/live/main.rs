@@ -10,6 +10,7 @@ mod console;
 mod history;
 mod map;
 mod memory;
+mod portals;
 mod rooms;
 mod session;
 mod support;

@@ -1,8 +1,8 @@
 //! Bind group layouts and render pipelines.
 
 use crate::mesh::{
-    EffectInstance, FillVertex, GlyphInstance, Instance, PointInstance, RoomInstance, ShapeVertex,
-    TerrainVertex, Token, VisualInstance,
+    ArcInstance, EffectInstance, FillVertex, GlyphInstance, Instance, LabelGlyph, MarkInstance,
+    PointInstance, RoomInstance, ShapeVertex, TerrainVertex, Token, VisualInstance,
 };
 
 use super::DEPTH;
@@ -40,6 +40,109 @@ pub struct Pipelines {
     pub glyphs: wgpu::RenderPipeline,
     /// Objects drawn over everything (the selection frame).
     pub overlay: wgpu::RenderPipeline,
+    /// The overlay over the world: badges, portals, labels, the hover outline.
+    pub overlays: Overlays,
+}
+
+/// The overlay's pipelines and the layouts of its groups 1 (the overlay's uniforms) and
+/// 3 (the badge atlas); group 2 is the glyph atlas.
+#[derive(Debug)]
+pub struct Overlays {
+    /// Group 1: the overlay's uniforms.
+    pub uniforms_layout: wgpu::BindGroupLayout,
+    /// Group 3: the badge atlas (2D array) and its sampler.
+    pub badges_layout: wgpu::BindGroupLayout,
+    /// Marks: badges, portals, the hover outline.
+    pub marks: wgpu::RenderPipeline,
+    /// Arcs between linked portals.
+    pub arcs: wgpu::RenderPipeline,
+    /// Labels.
+    pub labels: wgpu::RenderPipeline,
+}
+
+impl Overlays {
+    fn new(
+        builder: &Builder<'_>,
+        shader: &wgpu::ShaderModule,
+        globals_layout: &wgpu::BindGroupLayout,
+        atlas_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let device = builder.device;
+        let uniforms_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("overlay"),
+            entries: &[layout_entry(0, UNIFORM)],
+        });
+        let badges_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("badges"),
+            entries: &[
+                layout_entry(
+                    0,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                ),
+                layout_entry(1, SAMPLER),
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("overlay"),
+            bind_group_layouts: &[
+                Some(globals_layout),
+                Some(&uniforms_layout),
+                Some(atlas_layout),
+                Some(&badges_layout),
+            ],
+            immediate_size: 0,
+        });
+        let premultiplied = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let build = |label, entry, buffer: wgpu::VertexBufferLayout<'_>| {
+            builder.build(
+                &Stage {
+                    label,
+                    layout: &layout,
+                    shader,
+                    entry,
+                    buffers: &[Some(buffer)],
+                },
+                Depth::Ignore,
+                premultiplied,
+                None,
+            )
+        };
+        let mark_attributes = wgpu::vertex_attr_array![
+            0 => Float32x2, 1 => Float32x3, 2 => Float32x4, 3 => Unorm8x4, 4 => Uint32
+        ];
+        let marks = build(
+            "overlay marks",
+            ("mark_vertex", "mark_fragment"),
+            instances(size_of::<MarkInstance>(), &mark_attributes),
+        );
+        let arc_attributes =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4, 3 => Float32];
+        let arcs = build(
+            "overlay arcs",
+            ("arc_vertex", "arc_fragment"),
+            instances(size_of::<ArcInstance>(), &arc_attributes),
+        );
+        let label_attributes = wgpu::vertex_attr_array![
+            0 => Float32x2, 1 => Float32x4, 2 => Float32x4, 3 => Unorm8x4, 4 => Unorm8x4,
+            5 => Float32, 6 => Float32, 7 => Uint32
+        ];
+        let labels = build(
+            "overlay labels",
+            ("label_vertex", "label_fragment"),
+            instances(size_of::<LabelGlyph>(), &label_attributes),
+        );
+        Self {
+            uniforms_layout,
+            badges_layout,
+            marks,
+            arcs,
+            labels,
+        }
+    }
 }
 
 /// How a pipeline treats depth.
@@ -252,6 +355,8 @@ impl Pipelines {
             format,
             samples,
         };
+        let overlay_shader = module("overlay", &[include_str!("../overlay.wgsl")]);
+        let overlays = Overlays::new(&builder, &overlay_shader, &globals_layout, &atlas_layout);
         let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let premultiplied = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
 
@@ -429,6 +534,7 @@ impl Pipelines {
             prims,
             glyphs,
             overlay,
+            overlays,
         }
     }
 }
