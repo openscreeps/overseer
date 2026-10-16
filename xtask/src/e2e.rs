@@ -29,14 +29,18 @@
 //!
 //! `--rust-only` and `--ui-only` select one suite. `--screens[=<set>]` captures the reference
 //! screenshots (the `@screens` tests, `proxy` project, `openscreeps` only) into
-//! `e2e/references/<set>/` (default set `current`). The exit code is non-zero when any step
-//! fails; a summary of every step closes the run.
+//! `e2e/references/<set>/` (default set `current`). `--desktop` (Windows only, opt-in, not in
+//! CI) runs the desktop suite instead: the Tauri shell's test build driven over its
+//! `WebView2`'s remote debugging protocol (`e2e/desktop.config.ts`, specs in `e2e/desktop/`), on a
+//! fresh world or, with `--target official`, read-only against screeps.com; see [`desktop`].
+//! The exit code is non-zero when any step fails; a summary of every step closes the run.
 //!
 //! `OVERSEER_E2E_SLOW=<factor>` (e.g. `4`) runs the UI tests the way the CI runner does on a
 //! fast machine: software WebGL (`SwiftShader`), pages whose CPU runs `<factor>` times slower
 //! and whose responses arrive `<factor>` × 125 ms later, and two workers (see
 //! `e2e/playwright.config.ts`).
 
+mod desktop;
 mod official;
 mod world;
 
@@ -71,6 +75,10 @@ impl Target {
 
 /// What to run.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one field per command-line switch, checked against each other in `parse`"
+)]
 struct Options {
     target: Target,
     rust: bool,
@@ -78,6 +86,8 @@ struct Options {
     build: bool,
     /// The reference screenshot set to capture (`--screens`).
     screens: Option<String>,
+    /// The desktop suite alone (`--desktop`).
+    desktop: bool,
     playwright: Vec<String>,
 }
 
@@ -89,6 +99,7 @@ impl Options {
             ui: true,
             build: true,
             screens: None,
+            desktop: false,
             playwright: Vec::new(),
         };
         let mut only = None;
@@ -100,6 +111,7 @@ impl Options {
                 }
                 "--rust-only" | "--ui-only" => only = Some(arg),
                 "--no-build" => options.build = false,
+                "--desktop" => options.desktop = true,
                 "--screens" => options.screens = Some("current".to_owned()),
                 "--target" => {
                     let value = args.next().ok_or("--target needs a value")?;
@@ -124,6 +136,16 @@ impl Options {
             Some("--rust-only") => options.ui = false,
             Some(_) => options.rust = false,
             None => {}
+        }
+        if options.desktop {
+            if only.is_some() || options.screens.is_some() {
+                return Err(
+                    "--desktop runs the desktop suite alone: no --rust-only, --ui-only or --screens"
+                        .into(),
+                );
+            }
+            options.rust = false;
+            options.ui = false;
         }
         if options.screens.is_some() {
             if options.target != Target::OpenScreeps || !options.ui {
@@ -216,7 +238,7 @@ impl Summary {
     }
 }
 
-/// Runs `cargo xtask e2e [--target openscreeps|official] [--rust-only | --ui-only]
+/// Runs `cargo xtask e2e [--target openscreeps|official] [--rust-only | --ui-only | --desktop]
 /// [--screens[=<set>]] [--no-build] [-- <playwright args>]`.
 pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     let options = Options::parse(args)?;
@@ -239,12 +261,13 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Runs [`world::teardown`] when dropped, also while a panic unwinds.
+/// Runs [`world::teardown`] and [`desktop::teardown`] when dropped, also while a panic unwinds.
 struct TeardownOnDrop;
 
 impl Drop for TeardownOnDrop {
     fn drop(&mut self) {
         world::teardown();
+        desktop::teardown();
     }
 }
 
@@ -255,6 +278,8 @@ struct Prepared {
     logs: PathBuf,
     dist: PathBuf,
     proxy: PathBuf,
+    /// The desktop test app (`--desktop`).
+    desktop: PathBuf,
 }
 
 /// Every step; a failed preparation step skips the rest.
@@ -266,8 +291,16 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
         e2e: root.join("e2e"),
         dist: logs.join("dist"),
         proxy: logs.join(format!("overseer-proxy{}", std::env::consts::EXE_SUFFIX)),
+        desktop: logs.join("desktop").join(desktop::EXECUTABLE),
         logs,
     };
+    if options.desktop {
+        if !cfg!(windows) {
+            return Err("the desktop suite (--desktop) runs on Windows only".into());
+        }
+        // Before anything is built: an overlay without an identifier of its own fails at once.
+        desktop::identifier(root)?;
+    }
     // Before anything is built: a missing token fails at once.
     let token = match options.target {
         Target::Official => Some(official::token()?),
@@ -281,7 +314,7 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
         }),
         Target::Official => true,
     };
-    if options.ui {
+    if options.ui || options.desktop {
         if options.build {
             ready =
                 ready && summary.step("web app (trunk build)", || build_app(root, &prepared.dist));
@@ -292,6 +325,8 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
                 format!("{} has no build; drop --no-build", prepared.dist.display()).into(),
             );
         }
+    }
+    if options.ui {
         ready = ready
             && summary.step("overseer-proxy binary", || {
                 build_proxy(root, &target, &prepared.proxy)
@@ -304,6 +339,27 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
                         .current_dir(&prepared.e2e),
                     "playwright install",
                 )
+            });
+    }
+    if options.desktop {
+        if options.build {
+            ready = ready
+                && summary.step("desktop app (cargo build --release)", || {
+                    desktop::build(root, &target, &prepared.dist, &prepared.desktop)
+                });
+        } else if prepared.desktop.is_file() {
+            summary.skip("desktop app (cargo build --release)", "--no-build");
+        } else {
+            return Err(format!(
+                "{} has no build; drop --no-build",
+                prepared.desktop.display()
+            )
+            .into());
+        }
+        // Playwright attaches to the app's WebView2: no browser to install.
+        ready = ready
+            && summary.step("Playwright dependencies", || {
+                npm_ci_if_missing(&prepared.e2e)
             });
     }
     if options.rust {
@@ -328,6 +384,19 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
 
 /// The suites against fresh worlds of `image`.
 fn openscreeps_suites(prepared: &Prepared, options: &Options, image: &str, summary: &mut Summary) {
+    if options.desktop {
+        desktop_suite(prepared, summary, |summary| {
+            on_world(
+                prepared,
+                image,
+                summary,
+                "Playwright desktop",
+                "server-desktop.log",
+                || playwright(prepared, options),
+            );
+        });
+        return;
+    }
     // Each suite gets a fresh world: players and their bots slow a world down as they add up.
     if options.rust {
         on_world(
@@ -393,6 +462,17 @@ fn on_world(
 
 /// The read-only suites against screeps.com.
 fn official_suites(prepared: &Prepared, options: &Options, token: &str, summary: &mut Summary) {
+    if options.desktop {
+        desktop_suite(prepared, summary, |summary| {
+            summary.step("Playwright desktop (read-only)", || {
+                let mut playwright = playwright(prepared, options);
+                common_environment(&mut playwright, prepared)?;
+                official_environment(&mut playwright, token);
+                status(&mut playwright, "Playwright")
+            });
+        });
+        return;
+    }
     if options.rust {
         summary.step("live Rust tests (read-only)", || {
             let mut test = cargo(&prepared.root);
@@ -424,11 +504,47 @@ fn official_suites(prepared: &Prepared, options: &Options, token: &str, summary:
     }
 }
 
-/// `npx playwright test` with the extra arguments.
+/// The desktop suite around `tests`: removes what an earlier run left of the test app first,
+/// then what the tests left, and checks that nothing is left (see [`desktop`]).
+fn desktop_suite(prepared: &Prepared, summary: &mut Summary, tests: impl FnOnce(&mut Summary)) {
+    let mut earlier = Vec::new();
+    let clean = summary.step("desktop app state (before)", || {
+        earlier = desktop::clean(&desktop::identifier(&prepared.root)?, &prepared.desktop)?;
+        Ok(())
+    });
+    if !earlier.is_empty() {
+        summary.notes.push(format!(
+            "desktop: removed what an earlier run left: {}",
+            earlier.join(", ")
+        ));
+    }
+    if clean {
+        tests(summary);
+    }
+    let mut left = Vec::new();
+    if summary.step("desktop app state (after)", || {
+        left = desktop::finish()?;
+        Ok(())
+    }) {
+        summary.notes.push(if left.is_empty() {
+            "desktop: the tests left no process, data directory or credential behind".to_owned()
+        } else {
+            format!("desktop: removed what the tests left: {}", left.join(", "))
+        });
+    }
+}
+
+/// `npx playwright test` with the extra arguments; the desktop suite's configuration and test
+/// app (`OVERSEER_E2E_DESKTOP_APP`) with `--desktop`.
 fn playwright(prepared: &Prepared, options: &Options) -> Command {
     let mut playwright = Command::new(program("npx"));
+    playwright.args(["playwright", "test"]);
+    if options.desktop {
+        playwright
+            .args(["--config", "desktop.config.ts"])
+            .env("OVERSEER_E2E_DESKTOP_APP", &prepared.desktop);
+    }
     playwright
-        .args(["playwright", "test"])
         .args(&options.playwright)
         .current_dir(&prepared.e2e);
     playwright
@@ -529,8 +645,9 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn install_interrupt_handler() -> Result<(), Error> {
     ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
-        eprintln!("\ninterrupted: removing the world");
+        eprintln!("\ninterrupted: removing the world and the desktop test app's state");
         world::teardown();
+        desktop::teardown();
         std::process::exit(130);
     })?;
     Ok(())
@@ -621,5 +738,15 @@ mod tests {
         assert!(Options::parse(&["--screens", "--rust-only"]).is_err());
         assert!(Options::parse(&["--screens=../x"]).is_err());
         assert!(Options::parse(&["--node"]).is_err());
+
+        let desktop =
+            Options::parse(&["--desktop", "--target", "official", "--", "-g", "x"]).unwrap();
+        assert!(desktop.desktop && !desktop.rust && !desktop.ui);
+        assert_eq!(desktop.target, Target::Official);
+        assert_eq!(desktop.playwright, ["-g", "x"]);
+        assert!(!Options::parse(&[]).unwrap().desktop);
+        assert!(Options::parse(&["--desktop", "--ui-only"]).is_err());
+        assert!(Options::parse(&["--desktop", "--rust-only"]).is_err());
+        assert!(Options::parse(&["--desktop", "--screens"]).is_err());
     }
 }

@@ -1,0 +1,24 @@
+{
+  "identifier": "com.openscreeps.overseer.e2e",
+  "app": {
+    "security": {
+      "capabilities": [
+        "default",
+        {
+          "identifier": "e2e-windows",
+          "description": "Desktop end-to-end tests only: the tests move, resize, maximize, minimize and close windows in place of a user dragging or clicking their frames",
+          "windows": ["main", "route-*"],
+          "permissions": [
+            "core:window:allow-set-size",
+            "core:window:allow-set-position",
+            "core:window:allow-maximize",
+            "core:window:allow-unmaximize",
+            "core:window:allow-minimize",
+            "core:window:allow-close"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": { "active": false }
+}

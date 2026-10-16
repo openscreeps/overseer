@@ -12,6 +12,9 @@
 //!
 //! `tauri-plugin-window-state` saves the size, position and maximized state of every window
 //! when it moves, resizes or closes and restores them when a window with the same label opens.
+//!
+//! `tauri.e2e.conf.json` is the overlay of the test build that `cargo xtask e2e --desktop`
+//! drives: another identifier (its own data and credentials) and window controls for the tests.
 
 // No console window behind the app in release builds on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

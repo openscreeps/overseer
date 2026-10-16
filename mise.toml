@@ -53,6 +53,10 @@ run = "cargo xtask e2e"
 description = "Opt-in: the read-only live and UI tests against screeps.com with $SCREEPS_TOKEN (or $SCREEPS_TOKEN_FILE); requests that may change the account are blocked and fail"
 run = "cargo xtask e2e --target official"
 
+[tasks.e2e-desktop]
+description = "Opt-in, Windows: the desktop app's tests (its test build driven by Playwright over WebView2 remote debugging) against a disposable OpenScreeps world; add --target official for the read-only ones against screeps.com"
+run = "cargo xtask e2e --desktop"
+
 [tasks.ci]
 description = "Everything CI runs, in order"
 depends = ["fmt", "codegen", "check", "test", "portable"]
