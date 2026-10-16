@@ -15,18 +15,18 @@ async function openConsole(page: Page, path: string) {
   await selectTab(page, 'Console');
 }
 
-/** The highest `tick N` the output shows. */
-async function lastTick(page: Page): Promise<number> {
-  const text = (await output(page).textContent()) ?? '';
-  const ticks = [...text.matchAll(/tick (\d+)/g)].map((match) => Number(match[1]));
-  return ticks.length ? Math.max(...ticks) : 0;
+/**
+ * The ticks of the bot's `tick N` lines the output shows, read from the rendered text (one
+ * line per output line: the text content runs a line's tick into the next line's time).
+ */
+async function ticks(page: Page): Promise<number[]> {
+  const text = await output(page).evaluate((element) => (element as HTMLElement).innerText);
+  return [...text.matchAll(/tick (\d+)$/gm)].map((match) => Number(match[1]));
 }
 
-/** The lowest `tick N` the output shows. */
-async function firstTick(page: Page): Promise<number> {
-  const text = (await output(page).textContent()) ?? '';
-  const ticks = [...text.matchAll(/tick (\d+)/g)].map((match) => Number(match[1]));
-  return ticks.length ? Math.min(...ticks) : Number.POSITIVE_INFINITY;
+/** The highest `tick N` the output shows. */
+async function lastTick(page: Page): Promise<number> {
+  return Math.max(0, ...(await ticks(page)));
 }
 
 /** Runs `expression` from the console input (Enter). */
@@ -114,8 +114,12 @@ test.describe('console', () => {
       // After the break, on a line of its own: the image tag as text, references decoded.
       const next = log.getByText(/^next-e2e /);
       await expect(next).toHaveText('next-e2e <img src=x onerror="window.e2eInjected=1"> <tag>');
-      const [above, below] = [await red.boundingBox(), await next.boundingBox()];
-      expect(below?.y ?? 0).toBeGreaterThan((above?.y ?? 0) + (above?.height ?? 0) / 2);
+      // Both read at once: the log scrolls as the bot's lines arrive.
+      const gap = await next.evaluate(
+        (below, above) => below.getBoundingClientRect().top - (above?.getBoundingClientRect().bottom ?? 0),
+        await red.elementHandle(),
+      );
+      expect(gap).toBeGreaterThanOrEqual(-1);
       await expect(log.getByRole('img')).toHaveCount(0);
       expect(await page.evaluate(() => 'e2eInjected' in window)).toBe(false);
     });
@@ -164,7 +168,7 @@ test.describe('console', () => {
       const before = await lastTick(page);
       await page.getByRole('button', { name: 'Clear console' }).click();
       await expect(log).not.toContainText('e2e-result-7');
-      expect(await firstTick(page)).toBeGreaterThan(before);
+      expect(Math.min(...(await ticks(page)))).toBeGreaterThan(before);
       await expect(log).toContainText(/tick \d+/, { timeout: 30_000 });
     });
 
@@ -229,14 +233,12 @@ test.describe('console', () => {
       await selectTab(page, 'Console');
       const log = output(page);
       await expect(log).toHaveText(
-        'No output yet: your code’s console.log lines and command results show here.'.replace(
-          '’',
-          "'",
-        ),
+        "No output yet: your code's console.log lines and command results show here.",
       );
+      // A command shows at once, its result only once code runs (the account has no room).
       await run(page, '20 + 22');
       await expect(log).toContainText('20 + 22');
-      await expect(log.getByText('42', { exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(log).not.toContainText('No output yet');
     },
   );
 });

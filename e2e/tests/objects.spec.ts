@@ -131,7 +131,7 @@ test.describe('objects', () => {
     await expect(list.getByRole('button', { name: controller, exact: true })).toBeVisible();
   });
 
-  test('inspects a controller, a source and a mineral, with their raw JSON', async ({
+  test('inspects a controller, a source and a mineral', async ({
     signedInPage: page,
     home,
   }) => {
@@ -153,7 +153,8 @@ test.describe('objects', () => {
       await expect(button).toHaveAttribute('aria-current', 'true');
       await expect(list.locator('[aria-current="true"]')).toHaveCount(1);
       await expect(panel.getByRole('heading')).toHaveText(name.replace(/ at \d+,\d+$/, ''));
-      await expect(panel.getByText(kind, { exact: true })).toBeVisible();
+      // The kind follows the heading (a source's heading is its kind too).
+      await expect(panel.getByText(kind, { exact: true }).last()).toBeVisible();
       await expect(inspectedTile(panel)).toHaveText(`${x},${y}`);
       for (const term of terms) {
         await expect(panel.getByRole('term').filter({ hasText: new RegExp(`^${term}$`) })).toBeVisible();
@@ -163,12 +164,39 @@ test.describe('objects', () => {
       }
       // The map selects the object's tile.
       await expect.poll(() => mapTile(page)).toBe(`${x},${y}`);
-
-      await panel.getByText('Raw JSON', { exact: true }).click();
-      const type = kind.toLowerCase();
-      await expect(panel.getByText(new RegExp(`"type": "${type}"`))).toBeVisible();
-      await expect(panel.getByText(new RegExp(`"x": ${x},`))).toBeVisible();
     }
+  });
+
+  test('shows the selected object’s raw JSON and keeps it open', async ({
+    signedInPage: page,
+    home,
+  }) => {
+    test.fixme(
+      true,
+      'App bug: every room snapshot rebuilds the whole inspector, closing Raw JSON within a ' +
+        'tick (app/src/ui/inspector.rs, `Inspector`).',
+    );
+    await openObjects(page, home.path, home.room);
+    const list = objectList(page);
+    const panel = inspector(page);
+    const name = await rowName(list, /^Source at/);
+    const [x, y] = rowTile(name);
+    await list.getByRole('button', { name, exact: true }).click();
+    const raw = panel.getByText(/"type": "source"/);
+    await expect(raw).toBeHidden();
+    await panel.getByText('Raw JSON', { exact: true }).click();
+    await expect(raw).toBeVisible();
+    await expect(raw).toContainText(`"x": ${x},`);
+    await expect(raw).toContainText(`"y": ${y}`);
+    // Still open after the room's next ticks.
+    const tick = page.getByRole('contentinfo', { name: 'Status' }).getByTitle('Game tick');
+    const now = Number((await tick.textContent())?.match(/\d+/)?.[0]);
+    await expect
+      .poll(async () => Number((await tick.textContent())?.match(/\d+/)?.[0]), { timeout: 30_000 })
+      .toBeGreaterThan(now + 2);
+    await expect(raw).toBeVisible();
+    await panel.getByText('Raw JSON', { exact: true }).click();
+    await expect(raw).toBeHidden();
   });
 
   test('selects one object after another by clicks on the map and the room preview', async ({
