@@ -2,21 +2,26 @@
 //! of it, fresh accounts and players, and raw HTTP access.
 //!
 //! `cargo xtask e2e` starts a disposable world of `openscreeps/server` and sets
-//! `OVERSEER_LIVE_URL` (the server base URL). Tests register their own accounts (through the
-//! proxy) so that none depends on another's state.
+//! `OVERSEER_E2E_TARGET=openscreeps`, `OVERSEER_LIVE_URL` (the server base URL),
+//! `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a player without a spawn). Tests register
+//! their own accounts (through the proxy) so that none depends on another's state.
+//!
+//! `cargo xtask e2e --target official` runs only the `read_only` tests against screeps.com, with
+//! `OVERSEER_E2E_TARGET=official`, `OVERSEER_LIVE_URL` and `OVERSEER_LIVE_TOKEN` (an API token of
+//! an account that owns rooms); [`reader`] is that account on either target.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use overseer_net::core::ServerUrl;
 use overseer_net::core::api::Tile;
 use overseer_net::core::api::endpoints;
 use overseer_net::core::api::types::{
     GameCoordinateInput, GamePlaceSpawnRequest, RegisterSubmitRequest, UserCodeModules,
     UserCodeModulesValue,
 };
+use overseer_net::core::{ServerUrl, Token};
 use overseer_net::{Client, Socket, SocketEvent};
 use overseer_proxy::{Proxy, ProxyConfig};
 use url::Url;
@@ -74,6 +79,57 @@ pub fn via(proxy: &Proxy) -> ServerUrl {
 /// A client without an account.
 pub fn anonymous(server: &ServerUrl) -> Client {
     Client::builder(server.clone()).build().expect("a client")
+}
+
+/// Whether the tests run against screeps.com (`OVERSEER_E2E_TARGET=official`): a sharded world
+/// where [`reader`] owns rooms.
+pub fn official() -> bool {
+    std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "official")
+}
+
+/// The account of the `read_only` tests on `server`: a client holding the API token
+/// `OVERSEER_LIVE_TOKEN` when it is set (it never signs in), else the harness's player
+/// (`OVERSEER_LIVE_USER`, `OVERSEER_LIVE_PASSWORD`: no spawn).
+///
+/// # Panics
+///
+/// Without a token, when the harness's player is not set: run `cargo xtask e2e`.
+pub fn reader(server: &ServerUrl) -> Client {
+    let builder = Client::builder(server.clone());
+    let builder = match std::env::var("OVERSEER_LIVE_TOKEN") {
+        Ok(token) if !token.is_empty() => builder.token(Token::new(token)),
+        _ => {
+            let var = |name: &str| {
+                std::env::var(name)
+                    .unwrap_or_else(|_| panic!("{name} is not set: run `cargo xtask e2e`"))
+            };
+            builder.credentials(var("OVERSEER_LIVE_USER"), var("OVERSEER_LIVE_PASSWORD"))
+        }
+    };
+    builder.build().expect("a client")
+}
+
+/// The start room of `client`'s account (`GET /api/user/world-start-room`) as `(shard, room)`:
+/// sharded servers name it `shard/room`, single-world servers only the room.
+///
+/// # Panics
+///
+/// When the request fails or the server names no room.
+pub async fn start_room(client: &Client) -> (Option<String>, String) {
+    let rooms = client
+        .send(&endpoints::UserWorldStartRoom { shard: None })
+        .await
+        .expect("the start room")
+        .body
+        .room;
+    let room = rooms
+        .into_iter()
+        .next()
+        .expect("the server names a start room");
+    match room.split_once('/') {
+        Some((shard, room)) => (Some(shard.to_owned()), room.to_owned()),
+        None => (None, room),
+    }
 }
 
 /// A registered account (password sign-in).
