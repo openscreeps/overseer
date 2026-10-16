@@ -441,7 +441,8 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
         }
         GameRoomObject::Controller(controller) => {
             fields.text("Level", controller.level.to_string());
-            if let (Some(progress), Some(total)) = (controller.progress, controller.progress_total)
+            if let (Some(progress), Some(total)) =
+                (controller.progress, controller.progress_needed())
             {
                 fields.meter("Progress", progress, total, Tone::Progress);
             }
@@ -678,7 +679,64 @@ pub fn resource_class(resource: &str) -> &'static str {
     }
 }
 
+/// What the inspector shows; recomputed with each room update, and an update that changes
+/// nothing shown changes nothing on screen.
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    /// No object is selected.
+    Nothing,
+    /// The room is not live: its objects are unknown.
+    NotLive,
+    /// The selected object left the room.
+    Gone,
+    /// The selected object.
+    Object(Box<Detail>),
+}
+
+/// Which of [`Shown`] it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Nothing,
+    NotLive,
+    Gone,
+    Object,
+}
+
+impl Shown {
+    const fn state(&self) -> State {
+        match self {
+            Self::Nothing => State::Nothing,
+            Self::NotLive => State::NotLive,
+            Self::Gone => State::Gone,
+            Self::Object(_) => State::Object,
+        }
+    }
+
+    fn detail(&self) -> Option<&Detail> {
+        match self {
+            Self::Object(detail) => Some(detail),
+            _ => None,
+        }
+    }
+}
+
+/// The selected object as shown.
+#[derive(Clone, Debug, PartialEq)]
+struct Detail {
+    inspected: Inspected,
+    /// Its tile (`12,34`).
+    position: String,
+    /// The tile's other objects: `(id, title)`.
+    neighbours: Vec<(String, String)>,
+    /// Its document, pretty-printed.
+    json: String,
+}
+
 /// The selected object of the room, its tile's other objects, and its raw JSON.
+///
+/// While an object is selected the panel is built once and each part follows the room's
+/// updates in place, so an opened "Raw JSON" stays open and focus stays where it is; a field
+/// changes on screen only when its value does.
 #[component]
 pub fn Inspector(
     /// The room's live state.
@@ -695,44 +753,132 @@ pub fn Inspector(
     go_to: Option<Callback<PortalDestination>>,
 ) -> impl IntoView {
     let user = StoredValue::new(user);
-    let content = move || {
+    let shown = Memo::new(move |_| {
         let Some(id) = selected.get() else {
-            return view! {
-                <p class="empty-state">"Select an object in the list or on the map."</p>
-            }
-            .into_any();
+            return Shown::Nothing;
         };
-        let Some(snapshot) = snapshot.get() else {
-            return view! { <p class="empty-state">"The room is not live: its objects are unknown."</p> }
-                .into_any();
-        };
-        let Some(object) = snapshot.objects.iter().find(|object| object.id() == id) else {
-            return view! { <p class="empty-state" role="status">"The object is gone."</p> }
-                .into_any();
-        };
-        let me = user.get_value();
-        let context = Context {
-            game_time: snapshot.game_time,
-            me: me.as_deref(),
-            users: &snapshot.users,
-        };
-        let inspected = inspect(object, &context);
-        let (x, y) = (object.x(), object.y());
-        let neighbours: Vec<(String, String)> = snapshot
-            .objects
-            .iter()
-            .filter(|other| other.x() == x && other.y() == y && other.id() != id)
-            .map(|other| (other.id().to_owned(), title(other)))
-            .collect();
-        let json = serde_json::to_string_pretty(object).unwrap_or_default();
-        let owner = inspected.owner.clone().map(|owner| {
+        snapshot.with(|snapshot| {
+            let Some(snapshot) = snapshot else {
+                return Shown::NotLive;
+            };
+            let Some(object) = snapshot.objects.iter().find(|object| object.id() == id) else {
+                return Shown::Gone;
+            };
+            user.with_value(|me| {
+                let context = Context {
+                    game_time: snapshot.game_time,
+                    me: me.as_deref(),
+                    users: &snapshot.users,
+                };
+                let (x, y) = (object.x(), object.y());
+                Shown::Object(Box::new(Detail {
+                    inspected: inspect(object, &context),
+                    position: format!("{x},{y}"),
+                    neighbours: snapshot
+                        .objects
+                        .iter()
+                        .filter(|other| other.x() == x && other.y() == y && other.id() != id)
+                        .map(|other| (other.id().to_owned(), title(other)))
+                        .collect(),
+                    json: serde_json::to_string_pretty(object).unwrap_or_default(),
+                }))
+            })
+        })
+    });
+    let state = Memo::new(move |_| shown.with(Shown::state));
+    let content = move || match state.get() {
+        State::Nothing => view! {
+            <p class="empty-state">"Select an object in the list or on the map."</p>
+        }
+        .into_any(),
+        State::NotLive => view! {
+            <p class="empty-state">"The room is not live: its objects are unknown."</p>
+        }
+        .into_any(),
+        State::Gone => {
+            view! { <p class="empty-state" role="status">"The object is gone."</p> }.into_any()
+        }
+        State::Object => detail_view(shown, on_select, go_to).into_any(),
+    };
+    view! {
+        <section class="inspector" aria-label="Inspector">
+            {content}
+        </section>
+    }
+}
+
+/// The selected object's header, fields, tile mates and raw JSON, each part following
+/// `shown` in place.
+fn detail_view(
+    shown: Memo<Shown>,
+    on_select: Callback<String>,
+    go_to: Option<Callback<PortalDestination>>,
+) -> impl IntoView {
+    let part = move |read: fn(&Detail) -> String| {
+        Memo::new(move |_| shown.with(|shown| shown.detail().map(read).unwrap_or_default()))
+    };
+    let heading = part(|detail| detail.inspected.title.clone());
+    let kind = part(|detail| detail.inspected.kind.clone());
+    let position = part(|detail| detail.position.clone());
+    let json = part(|detail| detail.json.clone());
+    let owner = Memo::new(move |_| {
+        shown.with(|shown| {
+            let inspected = &shown.detail()?.inspected;
+            Some((inspected.owner.clone()?, inspected.own))
+        })
+    });
+    let neighbours = Memo::new(move |_| {
+        shown.with(|shown| {
+            shown
+                .detail()
+                .map(|detail| detail.neighbours.clone())
+                .unwrap_or_default()
+        })
+    });
+    let fields = Memo::new(move |_| {
+        shown.with(|shown| {
+            shown
+                .detail()
+                .map(|detail| detail.inspected.fields.clone())
+                .unwrap_or_default()
+        })
+    });
+    // Fields keyed by place and label: each keeps its elements while its value is unchanged.
+    let field_keys = move || {
+        fields.with(|fields| {
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| (index, field.label))
+                .collect::<Vec<_>>()
+        })
+    };
+    let field = move |(index, label): (usize, &'static str)| {
+        let value = Memo::new(move |_| {
+            fields.with(|fields| {
+                fields
+                    .get(index)
+                    .filter(|field| field.label == label)
+                    .map(|field| field.value.clone())
+            })
+        });
+        view! {
+            <dt>{label}</dt>
+            <dd>{move || value.get().map(|value| value_view(label, value, go_to))}</dd>
+        }
+    };
+    let owner = move || {
+        owner.get().map(|(owner, own)| {
             view! {
-                <span class:own=inspected.own class="owner">
+                <span class:own=own class="owner">
                     {owner}
                 </span>
             }
-        });
-        let neighbours = (!neighbours.is_empty()).then(|| {
+        })
+    };
+    let neighbours = move || {
+        let neighbours = neighbours.get();
+        (!neighbours.is_empty()).then(|| {
             let chips = neighbours
                 .into_iter()
                 .map(|(id, title)| {
@@ -751,42 +897,36 @@ pub fn Inspector(
                     <ul>{chips}</ul>
                 </div>
             }
-        });
-        let fields = inspected
-            .fields
-            .into_iter()
-            .map(|field| field_view(field, go_to))
-            .collect_view();
-        view! {
-            <header class="inspector-head">
-                <h3>{inspected.title}</h3>
-                <p class="inspector-sub">
-                    <span class="kind">{inspected.kind}</span>
-                    {owner}
-                    <span class="pos">{format!("{x},{y}")}</span>
-                </p>
-            </header>
-            <dl class="fields">{fields}</dl>
-            {neighbours}
-            <details class="raw">
-                <summary>"Raw JSON"</summary>
-                <pre>{json}</pre>
-            </details>
-        }
-        .into_any()
+        })
     };
     view! {
-        <section class="inspector" aria-label="Inspector">
-            {content}
-        </section>
+        <header class="inspector-head">
+            <h3>{move || heading.get()}</h3>
+            <p class="inspector-sub">
+                <span class="kind">{move || kind.get()}</span>
+                {owner}
+                <span class="pos">{move || position.get()}</span>
+            </p>
+        </header>
+        <dl class="fields">
+            <For each=field_keys key=|key| *key children=field />
+        </dl>
+        {neighbours}
+        <details class="raw">
+            <summary>"Raw JSON"</summary>
+            <pre>{move || json.get()}</pre>
+        </details>
     }
 }
 
-/// One field as a term and its description; a portal's destination is a link through it
-/// when `go_to` takes the user there.
-fn field_view(field: Field, go_to: Option<Callback<PortalDestination>>) -> impl IntoView {
-    let label = field.label;
-    let value = match field.value {
+/// A field's value; a portal's destination is a link through it when `go_to` takes the user
+/// there.
+fn value_view(
+    label: &'static str,
+    value: Value,
+    go_to: Option<Callback<PortalDestination>>,
+) -> AnyView {
+    match value {
         Value::Text(text) => view! { <span>{text}</span> }.into_any(),
         Value::Destination { text, to } => match go_to {
             Some(go_to) => {
@@ -871,10 +1011,6 @@ fn field_view(field: Field, go_to: Option<Callback<PortalDestination>>) -> impl 
             }
             .into_any()
         }
-    };
-    view! {
-        <dt>{label}</dt>
-        <dd>{value}</dd>
     }
 }
 

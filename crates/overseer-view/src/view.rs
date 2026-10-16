@@ -538,6 +538,11 @@ impl View {
         }
     }
 
+    /// Whether an animated camera move (`look_at`, `fit`, `frame_room`) is under way.
+    pub const fn is_flying(&self) -> bool {
+        self.flight.is_some()
+    }
+
     /// The level of detail: from the room size in a world scope, always
     /// [`Lod::Detail`] in a room scope.
     pub fn lod(&self) -> Lod {

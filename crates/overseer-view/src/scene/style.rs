@@ -385,9 +385,7 @@ impl Gauges {
             O::Controller(controller) => {
                 gauges.level = u8::try_from(controller.level.min(8)).unwrap_or(0);
                 if let (Some(progress), Some(total)) =
-                    (controller.progress, controller.progress_total)
-                    && controller.level < 8
-                    && total > 0
+                    (controller.progress, controller.progress_needed())
                 {
                     gauges.progress = Some(ratio(progress.min(total), total));
                 }

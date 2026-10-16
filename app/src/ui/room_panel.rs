@@ -363,10 +363,7 @@ pub fn facts(objects: &[GameRoomObject], context: &Context<'_>) -> Facts {
                     owner: user.map(|user| context.name(user)),
                     own: context.is_me(user),
                     level: controller.level,
-                    progress: controller
-                        .progress
-                        .zip(controller.progress_total)
-                        .filter(|(_, total)| *total > 0),
+                    progress: controller.progress.zip(controller.progress_needed()),
                     downgrade_in: controller
                         .downgrade_time
                         .and_then(|tick| context.until(tick))

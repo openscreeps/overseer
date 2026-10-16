@@ -158,6 +158,32 @@ impl MapState {
         self.with_viewer(|viewer| viewer.fit(true));
     }
 
+    /// Keeps the level of detail, the room under the centre and the room in focus in step
+    /// with the camera after a frame. The camera focuses a room when it comes to it at Detail:
+    /// zooming into Detail or panning to another room there. Not while a flight passes over
+    /// rooms, and not again while it stays put: leaving the room for the whole world
+    /// ([`Self::show_world`]) starts at Detail.
+    fn follow_camera(self, viewer: &Viewer) {
+        let lod = viewer.lod();
+        let focused = viewer.focused_room();
+        let (last_lod, last_focused) = (self.lod.get_untracked(), self.focused.get_untracked());
+        if last_lod != Some(lod) {
+            self.lod.set(Some(lod));
+        }
+        if last_focused != focused {
+            self.focused.set(focused);
+        }
+        let arrived = last_lod != Some(lod) || last_focused != focused;
+        if lod == Lod::Detail
+            && arrived
+            && !viewer.is_flying()
+            && focused.is_some()
+            && self.room.get_untracked() != focused
+        {
+            self.room.set(focused);
+        }
+    }
+
     /// Zooms around the centre by `factor` (> 1 zooms in).
     pub fn zoom(self, factor: f32) {
         self.with_viewer(|viewer| viewer.zoom_by(factor));
@@ -338,17 +364,7 @@ pub fn WorldScreen(
             if scoped.try_get_value() != Some(true) {
                 return;
             }
-            let lod = viewer.lod();
-            if map.lod.get_untracked() != Some(lod) {
-                map.lod.set(Some(lod));
-            }
-            let focused = viewer.focused_room();
-            if map.focused.get_untracked() != focused {
-                map.focused.set(focused);
-            }
-            if lod == Lod::Detail && focused.is_some() && map.room.get_untracked() != focused {
-                map.room.set(focused);
-            }
+            map.follow_camera(viewer);
             map.frame_ms.set(Some(stats.cpu_ms));
             camera_saver.changed(viewer.camera());
         }),

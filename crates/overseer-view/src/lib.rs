@@ -667,6 +667,13 @@ impl Viewer {
         self.view.focused_room()
     }
 
+    /// Whether an animated camera move ([`Self::look_at`], [`Self::fit`],
+    /// [`Self::frame_room`]) is under way: the room under the centre then only passes by.
+    #[must_use]
+    pub const fn is_flying(&self) -> bool {
+        self.view.is_flying()
+    }
+
     /// What the camera needs now (see the crate documentation).
     #[must_use]
     pub fn interest(&self) -> Interest {
