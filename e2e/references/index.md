@@ -9,14 +9,12 @@ changes; they are not assertions (the canvases depend on the GPU, accounts and r
 Sets:
 - `before/`: the hand-written stylesheets (`style.css`, `drawer.css`) at 632bc23, before the
   switch to Tailwind.
-- `after/`: the same screens after the switch to Tailwind v4 (on top of 5881d91, whose room tab
-  and inspector also show the controller's upgrade progress).
+- `after/`: the same screens after the switch to Tailwind v4 (on top of 3aa81b2: the room tab and
+  the inspector also show the controller's upgrade progress, and the console keeps following).
 
-Differences between the two, apart from the random rooms and accounts: none visible in the
-page chrome (servers, dialog, sign-in, register, profile, menus, panels, drawer, console,
-windows match within a pixel or two). The console of `11-drawer-console` may show "Paused · N
-new lines" in either set: the console's auto-follow loses a race with fast output (a scroll
-event read after the next line arrived), independent of the styling.
+Differences between the two, apart from the random rooms and accounts and those fixes: none
+visible in the page chrome (servers, dialog, sign-in, register, profile, menus, panels, drawer,
+console, windows match within a pixel or two).
 
 | Image | Shows |
 | --- | --- |
