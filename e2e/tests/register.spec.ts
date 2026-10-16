@@ -166,6 +166,15 @@ test.describe('choosing a username', { tag: '@openscreeps' }, () => {
     await expect(form).toContainText(
       'Your account has no username yet. Choose one to start playing; it cannot be changed later.',
     );
+    // Away to another server and back: the form again, not the world.
+    await page.getByRole('button', { name: `Server: ${SERVER_NAME}` }).click();
+    await page.getByRole('menuitemradio', { name: /^screeps\.com/ }).click();
+    await expect(page.getByRole('region', { name: 'Sign in to screeps.com' })).toBeVisible();
+    await page.getByRole('button', { name: 'Server: screeps.com' }).click();
+    await page.getByRole('menuitemradio', { name: new RegExp(`^${SERVER_NAME}`) }).click();
+    await expect(page.getByRole('region', { name: 'Sign in to screeps.com' })).toHaveCount(0);
+    await expect(form).toBeVisible();
+
     const username = form.getByLabel('Username', { exact: true });
     const email = form.getByLabel('E-mail (optional)');
     const save = form.getByRole('button', { name: 'Save username' });
