@@ -1,9 +1,11 @@
 //! The inspector: the selected room object as typed fields per kind (hits, store contents,
 //! body parts with boosts, ticks to live, fatigue, cooldowns, progress, spawning, controller
-//! level and downgrade, …), the other objects on its tile, then its raw JSON.
+//! level and downgrade, where a portal leads, …), the other objects on its tile, then its raw
+//! JSON.
 //!
 //! [`inspect`] turns an object into [`Field`]s (pure, tested natively); [`Inspector`] shows
-//! them.
+//! them, a portal's destination as a link through it when the inspector can take the user
+//! there.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,6 +14,7 @@ use leptos::prelude::*;
 use overseer::RoomSnapshot;
 use overseer::core::api::types::{GameRoomObject, GameRoomObjectStore};
 use overseer::core::socket::types::RoomUser;
+use overseer::map::{Portal, PortalDestination};
 
 /// What an object's fields are read against.
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +109,13 @@ pub enum Value {
     },
     /// Body parts, in body order.
     Body(Vec<Part>),
+    /// Where a portal leads: its text (`W5N5`, `W5N5 on shard1`) and destination.
+    Destination {
+        /// The text shown.
+        text: String,
+        /// The destination, for a link through the portal.
+        to: PortalDestination,
+    },
 }
 
 /// A labelled value.
@@ -593,11 +603,17 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
         }
         GameRoomObject::Portal(portal) => {
             let destination = &portal.destination;
-            let mut to = destination.room.clone();
+            let mut text = destination.room.clone();
             if let Some(shard) = &destination.shard {
-                to = format!("{to} on {shard}");
+                text = format!("{text} on {shard}");
             }
-            fields.text("Leads to", to);
+            match Portal::new(portal).and_then(|portal| portal.destination) {
+                Some(to) => fields.fields.push(Field {
+                    label: "Leads to",
+                    value: Value::Destination { text, to },
+                }),
+                None => fields.text("Leads to", text),
+            }
             fields.until("Decays", portal.decay_time);
         }
         GameRoomObject::Ruin(ruin) => {
@@ -674,6 +690,9 @@ pub fn Inspector(
     user: Option<String>,
     /// Selects another object (an object of the same tile).
     on_select: Callback<String>,
+    /// Takes the user through a portal (its destination is a link; plain text without).
+    #[prop(optional_no_strip)]
+    go_to: Option<Callback<PortalDestination>>,
 ) -> impl IntoView {
     let user = StoredValue::new(user);
     let content = move || {
@@ -733,7 +752,11 @@ pub fn Inspector(
                 </div>
             }
         });
-        let fields = inspected.fields.into_iter().map(field_view).collect_view();
+        let fields = inspected
+            .fields
+            .into_iter()
+            .map(|field| field_view(field, go_to))
+            .collect_view();
         view! {
             <header class="inspector-head">
                 <h3>{inspected.title}</h3>
@@ -759,11 +782,30 @@ pub fn Inspector(
     }
 }
 
-/// One field as a term and its description.
-fn field_view(field: Field) -> impl IntoView {
+/// One field as a term and its description; a portal's destination is a link through it
+/// when `go_to` takes the user there.
+fn field_view(field: Field, go_to: Option<Callback<PortalDestination>>) -> impl IntoView {
     let label = field.label;
     let value = match field.value {
         Value::Text(text) => view! { <span>{text}</span> }.into_any(),
+        Value::Destination { text, to } => match go_to {
+            Some(go_to) => {
+                let name = format!("Go to {text}");
+                view! {
+                    <button
+                        type="button"
+                        class="link portal-to"
+                        aria-label=name.clone()
+                        title=name
+                        on:click=move |_| go_to.run(to.clone())
+                    >
+                        {text}
+                    </button>
+                }
+                .into_any()
+            }
+            None => view! { <span>{text}</span> }.into_any(),
+        },
         Value::Meter { value, max, tone } => {
             let text = format!("{} / {}", number(value), number(max));
             view! {
@@ -1174,6 +1216,56 @@ mod tests {
         let inspected = inspect(&other, &context);
         assert_eq!(inspected.kind, "Score container");
         assert_eq!(inspected.fields, []);
+    }
+
+    #[test]
+    fn portals_lead_to_their_destination_on_this_or_another_shard() {
+        let users = users();
+        let context = Context {
+            game_time: Some(1000),
+            me: None,
+            users: &users,
+        };
+        let within = object(json!({
+            "_id": "p1", "type": "portal", "room": "W5N5", "x": 20, "y": 21,
+            "destination": {"room": "W0N0", "x": 25, "y": 26}, "decayTime": 1500
+        }));
+        let fields = inspect(&within, &context).fields;
+        let Value::Destination { text, to } = field(&fields, "Leads to") else {
+            panic!("no destination link in {fields:?}");
+        };
+        assert_eq!(text, "W0N0");
+        assert_eq!(to.room.to_string(), "W0N0");
+        assert_eq!(
+            (to.shard.as_deref(), to.x, to.y),
+            (None, Some(25), Some(26))
+        );
+        assert_eq!(
+            field(&fields, "Decays"),
+            &Value::Text("in 500 ticks".to_owned())
+        );
+
+        let across = object(json!({
+            "_id": "p2", "type": "portal", "room": "W0N0", "x": 10, "y": 10,
+            "destination": {"room": "E10S20", "shard": "shard2"}
+        }));
+        let fields = inspect(&across, &context).fields;
+        let Value::Destination { text, to } = field(&fields, "Leads to") else {
+            panic!("no destination link in {fields:?}");
+        };
+        assert_eq!(text, "E10S20 on shard2");
+        assert_eq!((to.shard.as_deref(), to.x), (Some("shard2"), None));
+
+        // A destination that does not parse stays plain text.
+        let broken = object(json!({
+            "_id": "p3", "type": "portal", "room": "W0N0", "x": 10, "y": 10,
+            "destination": {"room": "nowhere"}
+        }));
+        let fields = inspect(&broken, &context).fields;
+        assert_eq!(
+            field(&fields, "Leads to"),
+            &Value::Text("nowhere".to_owned())
+        );
     }
 
     #[test]

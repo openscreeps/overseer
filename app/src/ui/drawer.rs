@@ -214,7 +214,7 @@ pub fn Drawer(server: Server) -> impl IntoView {
                     }
                 }
             >
-                <ObjectsPanel room=map.room snapshot selection user=user.get_value() centre />
+                <ObjectsPanel room=map.room snapshot selection user=user.get_value() centre go_to />
             </Show>
         }
         .into_any(),

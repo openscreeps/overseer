@@ -283,7 +283,7 @@
   color: var(--ok);
 }
 
-/* A room's portals: destination, tiles and decay, "Go to" at the end of the row */
+/* A room's portals: destination (a link through the portal in the drawer), tiles and decay */
 
 .portal-list {
   display: flex;
@@ -301,13 +301,14 @@
   gap: 0 var(--space-2);
 }
 
-.portal-list .chip {
-  margin-left: auto;
-}
-
 .portal-to {
   font-weight: var(--weight-medium);
   color: var(--text);
+}
+
+button.link.portal-to {
+  font-weight: var(--weight-medium);
+  color: var(--focus);
 }
 
 /* Meters: a bar and its numbers */

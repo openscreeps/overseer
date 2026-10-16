@@ -2,7 +2,7 @@
 //! known of it ([`RoomData`]: what the world knows of it, and its live state) and its facts
 //! ([`RoomInfo`]: status, owner and controller level with progress, safe mode, reservation,
 //! energy for spawning, sources, mineral, creeps and structures by owner, last update, and
-//! where its portals lead, with "Go to" in the drawer).
+//! where its portals lead; in the drawer each destination room is a link through the portal).
 //!
 //! The drawer shows the preview and facts on its Room tab; a popped-out room window shows the
 //! whole [`RoomPanel`] (preview, facts and the room's objects). A live room that the server
@@ -462,7 +462,7 @@ pub fn RoomInfo(
     /// Shown between the header and the facts (the drawer's room preview).
     #[prop(optional)]
     children: Option<Children>,
-    /// Takes the user through a portal ("Go to" next to each destination; none without).
+    /// Takes the user through a portal (each destination room is a link; plain text without).
     #[prop(optional)]
     go_to: Option<Callback<PortalDestination>>,
 ) -> impl IntoView {
@@ -546,8 +546,8 @@ pub fn RoomInfo(
 }
 
 /// The portals' rows: each destination (seen from `shard`, the shard shown) with how many
-/// portal tiles lead there, when they decay, and "Go to" when `go_to` takes the user there;
-/// `→ …` for the portals whose destination is not known yet.
+/// portal tiles lead there and when they decay; the destination is a link through the portal
+/// when `go_to` takes the user there; `→ …` for the portals whose destination is not known yet.
 fn portal_rows(
     portals: &[Portal],
     shard: Option<&str>,
@@ -567,23 +567,26 @@ fn portal_rows(
             if found.to.is_none() {
                 notes.push("destination loading".to_owned());
             }
-            let button = found.to.zip(go_to).map(|(destination, go_to)| {
-                view! {
+            let text = format!("→ {name}");
+            let destination = match found.to.zip(go_to) {
+                Some((destination, go_to)) => view! {
                     <button
                         type="button"
-                        class="chip"
+                        class="link portal-to"
                         aria-label=format!("Go to {name}")
+                        title=format!("Go to {name}")
                         on:click=move |_| go_to.run(destination.clone())
                     >
-                        "Go to"
+                        {text}
                     </button>
                 }
-            });
+                .into_any(),
+                None => view! { <span class="portal-to">{text}</span> }.into_any(),
+            };
             view! {
                 <li>
-                    <span class="portal-to">{format!("→ {name}")}</span>
+                    {destination}
                     <span class="muted">{notes.join(" · ")}</span>
-                    {button}
                 </li>
             }
         })

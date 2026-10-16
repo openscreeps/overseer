@@ -12,7 +12,7 @@ use std::sync::Arc;
 use leptos::prelude::*;
 use overseer::RoomSnapshot;
 use overseer::core::api::types::GameRoomObject;
-use overseer::map::RoomCoord;
+use overseer::map::{PortalDestination, RoomCoord};
 
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, Inspector, kind_key, kind_label, title};
@@ -349,6 +349,9 @@ pub fn ObjectsPanel(
     /// Centres the map(s) on a tile picked in the list.
     #[prop(optional)]
     centre: Option<Callback<(RoomCoord, u8, u8)>>,
+    /// Takes the user through a portal (the inspector's destination link).
+    #[prop(optional)]
+    go_to: Option<Callback<PortalDestination>>,
 ) -> impl IntoView {
     let filter = RwSignal::new(String::new());
     let me = StoredValue::new(user.clone());
@@ -436,7 +439,7 @@ pub fn ObjectsPanel(
                     <GroupView kind=key groups=listed selected=selection.id collapsed on_pick />
                 </For>
             </nav>
-            <Inspector snapshot selected=selection.id user on_select />
+            <Inspector snapshot selected=selection.id user on_select go_to />
         </div>
     }
 }
