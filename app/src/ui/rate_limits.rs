@@ -1,35 +1,78 @@
 //! The live session's rate limits: the Rate limits panel (account menu), the status bar's
-//! `Reset limit`, and screeps.com's reset flow ([`crate::rate_limits`]).
+//! `Reset limit` and `Rate limits lifted` items, the prompt to lift them, and screeps.com's
+//! reset flow ([`crate::rate_limits`]).
 //!
 //! The reset page opens as a popup in a browser and resumes the world's overviews on its
 //! success message (from `https://screeps.com` only); in the shell it opens in the system
 //! browser, which cannot talk back, so the app rechecks when its window regains focus. A
 //! recheck ([`crate::feed::Feed::recheck_rate_limit`]) sends nothing unless the world's
 //! overviews are paused by the limit.
+//!
+//! On screeps.com API-token sessions (main window only), [`RateLimitsUi::follow`] checks
+//! whether the token's limits are lifted ([`overseer::Account::rate_limit_exemption`]): when
+//! the session starts, after a reset, after `Check again`, after HTTP 429 replies (at most
+//! every [`RATE_LIMITED_DEBOUNCE_MS`]), every [`EXEMPT_RECHECK_MS`] while lifted and when the
+//! lift ends. The world map ignores its budget while lifted
+//! ([`crate::feed::Feed::set_rate_limit_exempt_until`]).
 
 use std::time::Duration;
 
-use leptos::html::Button;
+use leptos::html::{Button, Section};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use web_sys::KeyboardEvent;
+use overseer::Account;
+use wasm_bindgen::JsCast;
+use web_sys::{FocusEvent, HtmlElement, KeyboardEvent, Node};
 
 use crate::profiles::ServerKind;
-use crate::rate_limits::{self, Actions};
+use crate::rate_limits::{
+    self, Actions, EXEMPT_RECHECK_MS, RATE_LIMITED_DEBOUNCE_MS, Warning, Warnings,
+};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::toast::{ToastKind, Toasts};
 use crate::ui::world::MapState;
 
-/// The panel, the clock of relative times and the reset flow; `Copy`, provided as context.
+/// What [`RateLimitsUi::follow`] tracks of the live session.
+#[derive(Debug, Default)]
+struct Monitor {
+    /// The session followed ([`crate::state::Session::epoch`]).
+    epoch: Option<u64>,
+    /// A check of the lift is in flight.
+    checking: bool,
+    /// Check at once (session start, reset success, `Check again`).
+    check_now: bool,
+    /// When the latest check started (milliseconds since the Unix epoch).
+    last_check: u64,
+    /// When to check again (while lifted: slowly, and at the lift's end).
+    next_check: Option<u64>,
+    /// The client's count of HTTP 429 replies already seen.
+    rate_limited: u64,
+    /// HTTP 429 replies arrived since the latest check.
+    after_rate_limited: bool,
+    /// The lift (its end) whose ending toast is shown, and the toast.
+    toasted: Option<(u64, u64)>,
+    /// The prompts shown in this session.
+    warnings: Warnings,
+}
+
+/// The panel, the clock of relative times, the lift and the reset flow; `Copy`, provided as
+/// context.
 #[derive(Clone, Copy)]
 pub struct RateLimitsUi {
     /// The Rate limits panel is shown.
     pub open: RwSignal<bool>,
     /// Now, in milliseconds since the Unix epoch, updated every second.
     pub now: RwSignal<u64>,
+    /// Until when the live session's token is exempt from rate limits (milliseconds since the
+    /// Unix epoch), as last checked; see [`Self::lifted_until`].
+    pub exempt_until: RwSignal<Option<u64>>,
+    /// The prompt to lift the limits, while shown.
+    pub warning: RwSignal<Option<Warning>>,
     /// The shell opened the reset page in the system browser: recheck once the window
     /// regains focus.
     awaiting_focus: StoredValue<bool>,
+    monitor: StoredValue<Monitor>,
 }
 
 impl RateLimitsUi {
@@ -42,7 +85,10 @@ impl RateLimitsUi {
         Self {
             open: RwSignal::new(false),
             now,
+            exempt_until: RwSignal::new(None),
+            warning: RwSignal::new(None),
             awaiting_focus: StoredValue::new(false),
+            monitor: StoredValue::new(Monitor::default()),
         }
     }
 
@@ -51,22 +97,229 @@ impl RateLimitsUi {
         expect_context()
     }
 
+    /// Until when the token's limits are lifted, while they are (reactive; follows the clock
+    /// only while a lift is known).
+    pub fn lifted_until(self) -> Option<u64> {
+        self.exempt_until
+            .get()
+            .filter(|until| *until > self.now.get())
+    }
+
     /// Rechecks after a reset: on the page's success message (browser) or when the window
     /// regains focus after the shell opened the page. For as long as the page lives.
     pub fn listen(self, map: MapState) {
         let message = window_event_listener(leptos::ev::message, move |event| {
             if rate_limits::is_reset_success(&event.origin(), event.data().as_string().as_deref()) {
-                recheck(map);
+                self.lifted(map);
             }
         });
         let focus = window_event_listener(leptos::ev::focus, move |_| {
             if self.awaiting_focus.get_value() {
                 self.awaiting_focus.set_value(false);
-                recheck(map);
+                self.lifted(map);
             }
         });
         std::mem::forget(message);
         std::mem::forget(focus);
+    }
+
+    /// The limits may have been lifted: resumes the world's overviews paused by the rate
+    /// limit and checks the lift.
+    fn lifted(self, map: MapState) {
+        recheck(map);
+        self.monitor
+            .update_value(|monitor| monitor.check_now = true);
+    }
+
+    /// Follows the lift of the live session's token on screeps.com API-token sessions: checks
+    /// it (see the module docs), tells the world map, toasts before it ends and prompts to
+    /// lift the limits when an endpoint runs low. For the main window, as long as the page
+    /// lives.
+    pub fn follow(self, state: AppState, map: MapState) {
+        let toasts = Toasts::expect();
+        let lift_again = Callback::new(move |()| start_reset(state, self));
+        Effect::new(move |_| {
+            let until = self.exempt_until.get();
+            map.feed.with(|feed| {
+                if let Some(feed) = feed {
+                    feed.set_rate_limit_exempt_until(until);
+                }
+            });
+        });
+        Effect::new(move |_| {
+            let now = self.now.get();
+            let (kind, api_token) = session_server(state);
+            let session = state
+                .session
+                .with(|session| {
+                    session
+                        .as_ref()
+                        .map(|session| (session.epoch(), session.overseer.clone()))
+                })
+                .filter(|_| rate_limits::lift_applies(kind, api_token));
+            match session {
+                Some((epoch, overseer)) => {
+                    self.tick(now, epoch, &overseer, toasts, lift_again);
+                }
+                None => self.stop(toasts),
+            }
+        });
+    }
+
+    /// Forgets the lift: no session, or one it does not apply to.
+    fn stop(self, toasts: Toasts) {
+        let stale = self
+            .monitor
+            .try_update_value(|monitor| std::mem::take(monitor).toasted)
+            .flatten();
+        if let Some((_, toast)) = stale {
+            toasts.dismiss(toast);
+        }
+        if self.exempt_until.with_untracked(Option::is_some) {
+            self.exempt_until.set(None);
+        }
+        if self.warning.with_untracked(Option::is_some) {
+            self.warning.set(None);
+        }
+    }
+
+    /// Removes the ending toast unless it is the one of the lift ending at `keep`.
+    fn dismiss_toast(self, toasts: Toasts, keep: Option<u64>) {
+        let stale = self
+            .monitor
+            .try_update_value(|monitor| monitor.toasted.take_if(|(until, _)| Some(*until) != keep))
+            .flatten();
+        if let Some((_, toast)) = stale {
+            toasts.dismiss(toast);
+        }
+    }
+
+    /// One second of following session `epoch` at `now`.
+    fn tick(
+        self,
+        now: u64,
+        epoch: u64,
+        overseer: &overseer::Overseer,
+        toasts: Toasts,
+        lift_again: Callback<()>,
+    ) {
+        let client = overseer.client();
+        let rate_limited = client.rate_limited_count();
+        let mut fresh = false;
+        let due = self
+            .monitor
+            .try_update_value(|monitor| {
+                if monitor.epoch != Some(epoch) {
+                    *monitor = Monitor {
+                        epoch: Some(epoch),
+                        check_now: true,
+                        rate_limited,
+                        toasted: monitor.toasted,
+                        ..Monitor::default()
+                    };
+                    fresh = true;
+                }
+                if rate_limited > monitor.rate_limited {
+                    monitor.rate_limited = rate_limited;
+                    monitor.after_rate_limited = true;
+                }
+                let due = !monitor.checking
+                    && (monitor.check_now
+                        || (monitor.after_rate_limited
+                            && now.saturating_sub(monitor.last_check) >= RATE_LIMITED_DEBOUNCE_MS)
+                        || monitor.next_check.is_some_and(|at| now >= at));
+                if due {
+                    monitor.checking = true;
+                    monitor.check_now = false;
+                    monitor.after_rate_limited = false;
+                    monitor.next_check = None;
+                    monitor.last_check = now;
+                }
+                due
+            })
+            .unwrap_or(false);
+        if fresh {
+            self.exempt_until.set(None);
+            self.warning.set(None);
+        }
+        if due {
+            self.check(epoch, overseer.account());
+        }
+        let lifted = self
+            .exempt_until
+            .get_untracked()
+            .filter(|until| *until > now);
+        // The ending toast belongs to one lift: gone once it ended or another replaced it.
+        self.dismiss_toast(toasts, lifted);
+        if let Some(until) = lifted {
+            if let Some(text) = rate_limits::ending_label(until, now)
+                && self.monitor.with_value(|monitor| monitor.toasted.is_none())
+            {
+                let toast = toasts.show_action(ToastKind::Info, text, "Lift again", lift_again);
+                self.monitor
+                    .update_value(|monitor| monitor.toasted = Some((until, toast)));
+            }
+            return;
+        }
+        // Not lifted (as far as known once a check completed: every check starts with a
+        // `last_check`): prompt when an endpoint runs low.
+        let ready = self
+            .monitor
+            .with_value(|monitor| monitor.last_check > 0 && !monitor.checking);
+        if !ready || self.warning.with_untracked(Option::is_some) {
+            return;
+        }
+        let limits = client.rate_limits();
+        let warning = self
+            .monitor
+            .try_update_value(|monitor| {
+                monitor.warnings.next(
+                    limits
+                        .iter()
+                        .map(|endpoint| (endpoint.method.as_str(), endpoint.path, endpoint.limit)),
+                    now,
+                )
+            })
+            .flatten();
+        if warning.is_some() {
+            self.warning.set(warning);
+        }
+    }
+
+    /// Checks the lift of session `epoch`'s token; a failure keeps what is known.
+    fn check(self, epoch: u64, account: Account) {
+        spawn_local(async move {
+            let result = account.rate_limit_exemption().await;
+            let now = epoch_millis();
+            let live = self
+                .monitor
+                .try_update_value(|monitor| {
+                    if monitor.epoch != Some(epoch) {
+                        return false;
+                    }
+                    monitor.checking = false;
+                    // While lifted: again now and then, and when it ends.
+                    monitor.next_check = match result {
+                        Ok(Some(until)) => Some(until.min(now + EXEMPT_RECHECK_MS)),
+                        _ => None,
+                    };
+                    true
+                })
+                .unwrap_or(false);
+            if let (true, Ok(until)) = (live, result) {
+                self.exempt_until.set(until);
+                if until.is_some() {
+                    self.warning.set(None);
+                }
+            }
+        });
+    }
+
+    /// `Not now` on the prompt for `endpoint`: no prompt for it again in this session.
+    fn decline(self, endpoint: &str) {
+        self.monitor
+            .update_value(|monitor| monitor.warnings.decline(endpoint));
+        self.warning.set(None);
     }
 }
 
@@ -81,15 +334,13 @@ fn epoch_millis() -> u64 {
     now
 }
 
-/// The rate-limit actions of the live session (reactive).
-pub fn session_actions(state: AppState, map: MapState) -> Actions {
-    let paused = map
-        .progress
-        .with(|progress| progress.is_some_and(|progress| progress.stats_paused_until.is_some()));
+/// The kind of the live session's server and whether it signed in with an API token
+/// (reactive); a private server without a session.
+fn session_server(state: AppState) -> (ServerKind, Option<bool>) {
     let server = state
         .session
         .with(|session| session.as_ref().map(|session| session.server.clone()));
-    let (kind, api_token) = server
+    server
         .and_then(|url| {
             state.profiles.with(|profiles| {
                 profiles.server(&url).map(|server| {
@@ -100,8 +351,16 @@ pub fn session_actions(state: AppState, map: MapState) -> Actions {
                 })
             })
         })
-        .unwrap_or((ServerKind::Private, None));
-    rate_limits::actions(kind, api_token, paused)
+        .unwrap_or((ServerKind::Private, None))
+}
+
+/// The rate-limit actions of the live session (reactive).
+pub fn session_actions(state: AppState, map: MapState, ui: RateLimitsUi) -> Actions {
+    let paused = map
+        .progress
+        .with(|progress| progress.is_some_and(|progress| progress.stats_paused_until.is_some()));
+    let (kind, api_token) = session_server(state);
+    rate_limits::actions(kind, api_token, paused, ui.lifted_until().is_some())
 }
 
 /// Resumes the world's overviews paused by the rate limit, if any.
@@ -154,7 +413,7 @@ pub fn StatusReset() -> impl IntoView {
     let map = MapState::expect();
     let ui = RateLimitsUi::expect();
     move || {
-        session_actions(state, map).status_reset.then(|| {
+        session_actions(state, map, ui).status_reset.then(|| {
             view! {
                 <span class="status-item">
                     <button
@@ -171,8 +430,34 @@ pub fn StatusReset() -> impl IntoView {
     }
 }
 
-/// The Rate limits panel: the endpoints with a known limit, and the reset and recheck
-/// actions where they apply.
+/// `Rate limits lifted · 1 h 52 min` in the status bar while the token's limits are lifted.
+#[component]
+pub fn StatusLifted() -> impl IntoView {
+    let ui = RateLimitsUi::expect();
+    let label = Memo::new(move |_| {
+        ui.exempt_until
+            .get()
+            .and_then(|until| Some((until, rate_limits::lifted_label(until, ui.now.get())?)))
+    });
+    move || {
+        label.get().map(|(until, label)| {
+            view! {
+                <span
+                    class="status-item status-lifted"
+                    title=format!(
+                        "Your API token's rate limits are lifted until {}",
+                        local_clock(until),
+                    )
+                >
+                    {label}
+                </span>
+            }
+        })
+    }
+}
+
+/// The Rate limits panel: the endpoints with a known limit, the lift, and the reset and
+/// recheck actions where they apply.
 #[component]
 pub fn RateLimitsPanel() -> impl IntoView {
     let state = AppState::expect();
@@ -244,6 +529,19 @@ pub fn RateLimitsPanel() -> impl IntoView {
         }
         .into_any()
     };
+    let lifted = move || {
+        let until = ui.lifted_until()?;
+        let left = rate_limits::time_until(until, ui.now.get())?;
+        Some(view! {
+            <p class="notice lifted" role="status">
+                <Icon kind=IconKind::Check />
+                {format!(
+                    "Your API token's rate limits are lifted until {} ({left} left): the map loads without waiting for its budget.",
+                    local_clock(until),
+                )}
+            </p>
+        })
+    };
     let waiting = move || {
         let until = map
             .progress
@@ -262,7 +560,7 @@ pub fn RateLimitsPanel() -> impl IntoView {
         .platform
         .with_value(crate::platform::Platform::is_tauri);
     let actions = move || {
-        let actions = session_actions(state, map);
+        let actions = session_actions(state, map, ui);
         let reset = actions.reset.then(|| {
             view! {
                 <p class="help">
@@ -279,7 +577,7 @@ pub fn RateLimitsPanel() -> impl IntoView {
         });
         let check = actions.check_again.then(|| {
             view! {
-                <button type="button" on:click=move |_| recheck(map)>
+                <button type="button" on:click=move |_| ui.lifted(map)>
                     "Check again"
                 </button>
             }
@@ -312,6 +610,7 @@ pub fn RateLimitsPanel() -> impl IntoView {
                             <Icon kind=IconKind::Close />
                         </button>
                     </div>
+                    {lifted}
                     {waiting}
                     {rows}
                     {actions}
@@ -321,12 +620,108 @@ pub fn RateLimitsPanel() -> impl IntoView {
     }
 }
 
+/// The prompt to lift the limits when an endpoint runs low ([`RateLimitsUi::warning`]): a
+/// non-modal dialog that never takes the focus (typing elsewhere goes on), with `Lift limits
+/// for 2 hours` (the reset page) and `Not now` (Escape inside it too). Closing it while it
+/// holds the focus gives the focus back to where it came from.
+#[component]
+pub fn LiftPrompt() -> impl IntoView {
+    let state = AppState::expect();
+    let ui = RateLimitsUi::expect();
+    let dialog = NodeRef::<Section>::new();
+    let came_from = StoredValue::new_local(None::<HtmlElement>);
+    let close = move || {
+        let inside = dialog
+            .get_untracked()
+            .zip(document().active_element())
+            .is_some_and(|(dialog, active)| dialog.contains(Some(active.unchecked_ref::<Node>())));
+        let from = came_from.get_value();
+        came_from.set_value(None);
+        if inside && let Some(from) = from.filter(|from| from.is_connected()) {
+            let _ = from.focus();
+        }
+    };
+    let focusin = move |event: FocusEvent| {
+        let from = event
+            .related_target()
+            .and_then(|target| target.dyn_into::<HtmlElement>().ok());
+        let outside = dialog.get_untracked().is_some_and(|dialog| {
+            from.as_ref()
+                .is_some_and(|from| !dialog.contains(Some(from.unchecked_ref::<Node>())))
+        });
+        if outside {
+            came_from.set_value(from);
+        }
+    };
+    let not_now = move || {
+        if let Some(warning) = ui.warning.get_untracked() {
+            close();
+            ui.decline(&warning.endpoint);
+        }
+    };
+    let lift = move || {
+        close();
+        ui.warning.set(None);
+        start_reset(state, ui);
+    };
+    let keydown = move |event: KeyboardEvent| {
+        if event.key() == "Escape" {
+            event.prevent_default();
+            not_now();
+        }
+    };
+    move || {
+        let warning = ui.warning.get()?;
+        let reset = warning.reset;
+        let text = move || warning.text(ui.now.get());
+        Some(view! {
+            <section
+                class="panel floating lift-prompt"
+                role="dialog"
+                aria-labelledby="lift-prompt-title"
+                aria-describedby="lift-prompt-text"
+                node_ref=dialog
+                on:keydown=keydown
+                on:focusin=focusin
+            >
+                <div class="panel-head">
+                    <h2 id="lift-prompt-title">
+                        <Icon kind=IconKind::Gauge />
+                        "Rate limit running low"
+                    </h2>
+                </div>
+                <p id="lift-prompt-text" title=local_time(reset)>{text}</p>
+                <p class="help">
+                    "screeps.com can lift your API token's rate limits for 2 hours: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent."
+                </p>
+                <div class="actions">
+                    <button type="button" class="primary" on:click=move |_| lift()>
+                        "Lift limits for 2 hours"
+                    </button>
+                    <button type="button" on:click=move |_| not_now()>
+                        "Not now"
+                    </button>
+                </div>
+            </section>
+        })
+    }
+}
+
 /// `at` (milliseconds since the Unix epoch) as the browser's local date and time.
 fn local_time(at: u64) -> String {
+    String::from(date(at).to_locale_string("default", &wasm_bindgen::JsValue::UNDEFINED))
+}
+
+/// `at` (milliseconds since the Unix epoch) as the browser's local time of day.
+fn local_clock(at: u64) -> String {
+    String::from(date(at).to_locale_time_string("default"))
+}
+
+/// `at` (milliseconds since the Unix epoch) as a JavaScript date.
+fn date(at: u64) -> js_sys::Date {
     #[expect(
         clippy::cast_precision_loss,
         reason = "epoch milliseconds stay far below 2^53"
     )]
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(at as f64));
-    String::from(date.to_locale_string("default", &wasm_bindgen::JsValue::UNDEFINED))
+    js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(at as f64))
 }

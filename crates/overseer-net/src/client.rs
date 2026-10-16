@@ -5,7 +5,7 @@ mod rate_limit;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -59,6 +59,8 @@ struct Inner {
     keep_alive: Option<Duration>,
     rate_limit: Option<RateLimitPolicy>,
     rate_limits: Mutex<RateLimits>,
+    /// Replies with HTTP 429 so far.
+    rate_limited: AtomicU64,
     terrain: Mutex<TerrainCache>,
 }
 
@@ -189,6 +191,13 @@ impl Client {
     /// response's headers record the real one.
     pub fn forget_rate_limit<E: Endpoint>(&self) {
         lock(&self.inner.rate_limits).forget::<E>();
+    }
+
+    /// How many replies were HTTP 429 ([`ApiError::RateLimited`]) since the client was built,
+    /// retried ones included: a change means a limit was hit, endpoint or server-wide.
+    #[must_use]
+    pub fn rate_limited_count(&self) -> u64 {
+        self.inner.rate_limited.load(Ordering::Relaxed)
     }
 
     /// The server's shards and capabilities and the signed-in user, fetched once and cached.
@@ -361,7 +370,10 @@ impl Client {
         }
         let limit = match &result {
             Ok(reply) => reply.rate_limit,
-            Err(Error::Api(ApiError::RateLimited(limit))) => *limit,
+            Err(Error::Api(ApiError::RateLimited(limit))) => {
+                self.inner.rate_limited.fetch_add(1, Ordering::Relaxed);
+                *limit
+            }
             Err(_) => None,
         };
         if let Some(limit) = limit {
@@ -551,6 +563,7 @@ impl ClientBuilder {
                 keep_alive: self.keep_alive,
                 rate_limit: self.rate_limit,
                 rate_limits: Mutex::new(RateLimits::default()),
+                rate_limited: AtomicU64::new(0),
                 terrain: Mutex::new(HashMap::new()),
             }),
         })

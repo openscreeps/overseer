@@ -1,5 +1,5 @@
 //! The status bar: connection · shard and tick · zoom level · hovered room · loading progress
-//! … frame time, graphics backend and platform.
+//! · rate limits lifted … frame time, graphics backend and platform.
 //!
 //! An item shows only once its value is known (no "—" placeholders). While a map is shown its
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
@@ -14,7 +14,7 @@ use crate::platform::Platform;
 use crate::route::Shard;
 use crate::state::AppState;
 use crate::ui::hover::{MapRooms, place_text};
-use crate::ui::rate_limits::{RateLimitsUi, StatusReset};
+use crate::ui::rate_limits::{RateLimitsUi, StatusLifted, StatusReset};
 use crate::ui::topbar::status_class;
 use crate::ui::world::{MapState, Phase};
 
@@ -205,6 +205,7 @@ pub fn StatusBar() -> impl IntoView {
             {item(level, "status-item status-level", "Zoom level")}
             {item(hover, "status-item status-hover", "Room under the pointer")}
             {progress}
+            <StatusLifted />
             <span class="status-end">
                 {item(frame, "status-item status-frame", "CPU time of the last frame")}
                 {item(backend, "status-item status-backend", "Graphics backend")}

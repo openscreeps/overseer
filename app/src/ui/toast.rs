@@ -1,5 +1,6 @@
 //! Toasts: short confirmations and failures shown over the bottom right corner of the window,
-//! announced to screen readers, dismissed after a while or by their close button.
+//! announced to screen readers, dismissed after a while or by their close button. A toast with
+//! an action stays until dismissed or acted on.
 
 use std::time::Duration;
 
@@ -24,11 +25,13 @@ pub enum ToastKind {
 }
 
 /// One toast.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 struct Toast {
     id: u64,
     kind: ToastKind,
     text: String,
+    /// A button's label and what it does; the toast closes with it.
+    action: Option<(&'static str, Callback<()>)>,
 }
 
 /// The toasts of the window; `Copy`, provided as context by [`crate::ui::App`].
@@ -54,15 +57,7 @@ impl Toasts {
 
     /// Shows `text` for a while.
     pub fn show(self, kind: ToastKind, text: impl Into<String>) {
-        let id = self.next.get_value();
-        self.next.set_value(id + 1);
-        self.list.update(|list| {
-            list.push(Toast {
-                id,
-                kind,
-                text: text.into(),
-            });
-        });
+        let id = self.push(kind, text.into(), None);
         let stay = if kind == ToastKind::Error {
             LONG
         } else {
@@ -71,8 +66,40 @@ impl Toasts {
         set_timeout(move || self.dismiss(id), stay);
     }
 
-    /// Removes the toast `id`.
-    fn dismiss(self, id: u64) {
+    /// Shows `text` with a button `label` running `action` until either is used or
+    /// [`Self::dismiss`] removes it; returns its id.
+    pub fn show_action(
+        self,
+        kind: ToastKind,
+        text: impl Into<String>,
+        label: &'static str,
+        action: Callback<()>,
+    ) -> u64 {
+        self.push(kind, text.into(), Some((label, action)))
+    }
+
+    /// Adds a toast; returns its id.
+    fn push(
+        self,
+        kind: ToastKind,
+        text: String,
+        action: Option<(&'static str, Callback<()>)>,
+    ) -> u64 {
+        let id = self.next.get_value();
+        self.next.set_value(id + 1);
+        self.list.update(|list| {
+            list.push(Toast {
+                id,
+                kind,
+                text,
+                action,
+            });
+        });
+        id
+    }
+
+    /// Removes the toast `id`, if still shown.
+    pub fn dismiss(self, id: u64) {
         self.list
             .try_update(|list| list.retain(|toast| toast.id != id));
     }
@@ -93,10 +120,25 @@ pub fn ToastRegion() -> impl IntoView {
                     };
                     let role = if toast.kind == ToastKind::Error { "alert" } else { "status" };
                     let id = toast.id;
+                    let action = toast.action.map(|(label, action)| {
+                        view! {
+                            <button
+                                type="button"
+                                class="link toast-action"
+                                on:click=move |_| {
+                                    toasts.dismiss(id);
+                                    action.run(());
+                                }
+                            >
+                                {label}
+                            </button>
+                        }
+                    });
                     view! {
                         <div class=class role=role>
                             <Icon kind=icon />
                             <span class="toast-text">{toast.text}</span>
+                            {action}
                             <button
                                 type="button"
                                 class="icon-button sm ghost"

@@ -880,6 +880,89 @@ async fn a_recheck_while_not_paused_sends_nothing() {
 }
 
 #[tokio::test]
+async fn an_exempt_token_ignores_the_budget_but_not_a_429() {
+    // 80 × 80 rooms, all far (no minimap): three requests of the nearest sectors.
+    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let exhausted = rate_limit(60, 18, Duration::from_mins(30));
+    let until = paused_until(&exhausted);
+    lock(&fake.scripted).extend([
+        // Down to the near share: far rooms wait for the reset.
+        (200, exhausted),
+        // Refused (another client used the window) until the reset 120 s later.
+        (429, rate_limit(60, 0, Duration::from_secs(120))),
+        // 5 left: the budget would spread them over the window.
+        (200, rate_limit(60, 5, Duration::from_mins(30))),
+    ]);
+    let (server, overseer, websocket) = connect(fake.routes()).await;
+    answer_pings(websocket);
+    let mut world = overseer.map().world(None).await.unwrap();
+    tokio::time::pause();
+
+    world.set_interest(&Interest {
+        stats: Some(world.bounds()),
+        ..Interest::default()
+    });
+    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    assert_eq!(paused(&mut world).await, Some(until));
+
+    // Lifted for two hours: the pause ends and the next request goes out after the gap.
+    world.set_rate_limit_exempt_until(Some(epoch_millis() + 7_200_000));
+    assert_eq!(paused(&mut world).await, None);
+    advance(&mut world, Duration::from_secs(2)).await;
+    settle(&mut world, || map_stats(&server).len() == 2).await;
+    // The 429 still holds until its reset.
+    advance(&mut world, Duration::from_secs(60)).await;
+    quiet(&mut world).await;
+    assert_eq!(map_stats(&server).len(), 2);
+    assert_eq!(world.progress().stats_paused_until, None);
+    advance(&mut world, Duration::from_secs(65)).await;
+    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    // 5 left is no reason to wait: 1 s later the last rooms.
+    advance(&mut world, Duration::from_secs(2)).await;
+    assert_eq!(stats(&mut world).await.len(), 1400);
+    assert_eq!(map_stats(&server).len(), 4);
+    let progress = world.progress();
+    assert!(progress.is_complete());
+    assert_eq!(progress.stats_paused_until, None);
+}
+
+#[tokio::test]
+async fn the_budget_applies_again_when_the_exemption_ends() {
+    // 80 × 80 rooms, all far (no minimap): three requests of the nearest sectors.
+    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let exhausted = rate_limit(60, 18, Duration::from_mins(30));
+    let until = paused_until(&exhausted);
+    lock(&fake.scripted).extend([(200, exhausted.clone()), (200, exhausted)]);
+    let (server, overseer, websocket) = connect(fake.routes()).await;
+    answer_pings(websocket);
+    let mut world = overseer.map().world(None).await.unwrap();
+    tokio::time::pause();
+
+    // Exempt for 3 s: the first two requests go out despite the budget.
+    world.set_rate_limit_exempt_until(Some(epoch_millis() + 3_000));
+    world.set_interest(&Interest {
+        stats: Some(world.bounds()),
+        ..Interest::default()
+    });
+    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    advance(&mut world, Duration::from_millis(1500)).await;
+    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    assert_eq!(world.progress().stats_paused_until, None);
+
+    // Then the near share holds the far rooms back until the reset.
+    advance(&mut world, Duration::from_secs(2)).await;
+    assert_eq!(paused(&mut world).await, Some(until));
+    advance(&mut world, Duration::from_secs(60)).await;
+    quiet(&mut world).await;
+    assert_eq!(map_stats(&server).len(), 2);
+    // A past exemption changes nothing.
+    world.set_rate_limit_exempt_until(Some(epoch_millis() - 1));
+    quiet(&mut world).await;
+    assert_eq!(world.progress().stats_paused_until, Some(until));
+    assert_eq!(map_stats(&server).len(), 2);
+}
+
+#[tokio::test]
 async fn minimaps_are_capped_nearest_first_and_released() {
     let fake = Fake::new(40, rect("W19N19", "E19S19"));
     let (_server, overseer, mut websocket) = connect(fake.routes()).await;

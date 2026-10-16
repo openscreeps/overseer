@@ -7,6 +7,7 @@ use std::sync::Arc;
 use overseer_net::core::Token;
 use overseer_net::core::api::{endpoints, types};
 use overseer_net::core::socket::{Channel, Payload, UserCpu, UserResources};
+use overseer_net::rt::{SystemTime, UNIX_EPOCH};
 
 use crate::rooms::StatInterval;
 use crate::{Error, Overseer, Watch};
@@ -281,6 +282,29 @@ impl Account {
             .unwrap_or_default())
     }
 
+    /// Until when the session's API token is exempt from screeps.com's rate limits, in
+    /// milliseconds since the Unix epoch: the `noRatelimitUntil` of its entry in
+    /// [`Self::auth_tokens`] (one `GET /api/user/auth-token`, which reports no rate limit of
+    /// its own), while it lies in the future. The user lifts the limits of a token on
+    /// screeps.com's reset page (`#!/account/auth-tokens/noratelimit`, a captcha), for about
+    /// two hours.
+    ///
+    /// The list does not hold whole tokens: each entry's `token` is its first 8 characters,
+    /// matched against the session's token. `None` when the
+    /// exemption has passed or was never granted, and for sessions not signed in with an API
+    /// token (a password sign-in's session token matches no entry). Official server only:
+    /// other servers answer with an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
+    /// fails.
+    pub async fn rate_limit_exemption(&self) -> Result<Option<u64>, Error> {
+        let tokens = self.auth_tokens().await?;
+        let session = self.overseer.tokens().borrow().clone();
+        Ok(session.and_then(|session| exemption(&tokens, &session, epoch_millis())))
+    }
+
     /// Generates a persistent API token with the permissions of `request` (`type: full`, or
     /// selected endpoints, websockets and Memory segments) via `POST /api/user/auth-token`.
     /// The token is returned only this once. Official server only.
@@ -327,4 +351,101 @@ impl Account {
 /// Clears the cached profile after a change of the account.
 async fn forget_me(overseer: &Overseer) {
     *overseer.me_cache().lock().await = None;
+}
+
+/// How many leading characters of a token the API token list ([`Account::auth_tokens`])
+/// reports.
+const TOKEN_PREFIX_CHARS: usize = 8;
+
+/// The first [`TOKEN_PREFIX_CHARS`] characters of `token`; `None` when it is shorter.
+fn token_prefix(token: &str) -> Option<&str> {
+    let end = token
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(token.len()))
+        .nth(TOKEN_PREFIX_CHARS)?;
+    token.get(..end)
+}
+
+/// The `noRatelimitUntil` of the entry of `tokens` whose prefix is `session`'s, when after
+/// `now` (milliseconds since the Unix epoch).
+fn exemption(tokens: &[types::UserAuthTokenListEntry], session: &Token, now: u64) -> Option<u64> {
+    let prefix = token_prefix(session.as_str())?;
+    tokens
+        .iter()
+        .find(|entry| token_prefix(&entry.token) == Some(prefix))?
+        .no_ratelimit_until
+        .filter(|until| *until > now)
+}
+
+/// Now, in milliseconds since the Unix epoch.
+fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use overseer_net::core::Token;
+    use overseer_net::core::api::types::UserAuthTokenListEntry;
+
+    use super::{exemption, token_prefix};
+
+    fn entry(token: &str, until: Option<u64>) -> UserAuthTokenListEntry {
+        UserAuthTokenListEntry {
+            id: format!("id-{token}"),
+            token: token.to_owned(),
+            full: true,
+            no_ratelimit_until: until,
+            ..UserAuthTokenListEntry::default()
+        }
+    }
+
+    #[test]
+    fn the_session_token_matches_its_entry_by_the_first_8_characters() {
+        let now = 1_700_000_000_000;
+        let session = Token::new("0123abcd-4567-89ef-0123-456789abcdef");
+        let tokens = [
+            entry("ffffeeee", Some(now + 9_000_000)),
+            entry("0123abcd", Some(now + 7_200_000)),
+        ];
+        assert_eq!(exemption(&tokens, &session, now), Some(now + 7_200_000));
+        // A longer entry still matches by its prefix.
+        let longer = [entry("0123abcd-4567", Some(now + 60_000))];
+        assert_eq!(exemption(&longer, &session, now), Some(now + 60_000));
+        // A past or missing exemption, or no entry of the session (a password sign-in's
+        // session token), is none.
+        let past = [
+            entry("0123abcd", Some(now - 1)),
+            entry("ffffeeee", Some(now + 1)),
+        ];
+        assert_eq!(exemption(&past, &session, now), None);
+        assert_eq!(exemption(&past, &session, now - 1), None);
+        assert_eq!(exemption(&[entry("0123abcd", None)], &session, now), None);
+        assert_eq!(
+            exemption(&[entry("0123abce", Some(now + 1))], &session, now),
+            None
+        );
+        assert_eq!(exemption(&[], &session, now), None);
+        // Fewer than 8 characters match nothing.
+        assert_eq!(
+            exemption(&[entry("0123", Some(now + 1))], &Token::new("0123"), now),
+            None
+        );
+        assert_eq!(
+            exemption(&[entry("", Some(now + 1))], &Token::new(""), now),
+            None
+        );
+    }
+
+    #[test]
+    fn prefixes_count_characters() {
+        assert_eq!(token_prefix("0123abcd"), Some("0123abcd"));
+        assert_eq!(token_prefix("0123abcdef"), Some("0123abcd"));
+        assert_eq!(token_prefix("0123abc"), None);
+        assert_eq!(token_prefix("éééééééééé"), Some("éééééééé"));
+    }
 }

@@ -270,6 +270,53 @@ async fn account_requests_have_the_documented_shape() {
 }
 
 #[tokio::test]
+async fn the_rate_limit_exemption_is_the_session_tokens_entry_while_in_the_future() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let until = u64::try_from(now.as_millis()).unwrap() + 7_200_000;
+    let profiles = Arc::new(AtomicU64::new(0));
+    // Entries hold the first 8 characters of each token.
+    let tokens = format!(
+        r#"{{"ok":1,"tokens":[{{"_id":"k1","full":true,"token":"ffffeeee","noRatelimitUntil":{}}},{{"_id":"k2","description":"bot","full":false,"token":"0123abcd","noRatelimitUntil":{until}}},{{"_id":"k3","full":true,"token":"99998888","noRatelimitUntil":1}},{{"_id":"k4","full":true,"token":"77776666"}}]}}"#,
+        until + 1
+    );
+    let server = Server::start(
+        move |request| match (request.method.as_str(), request.path.as_str()) {
+            ("GET", "/api/user/auth-token") => (200, tokens.clone()),
+            _ => account_routes(request, &profiles),
+        },
+        |_| true,
+    )
+    .await;
+    for (token, expected) in [
+        ("0123abcd-4567-89ef-0123-456789abcdef", Some(until)),
+        // Lifted once, long ago; never lifted.
+        ("99998888-4567-89ef-0123-456789abcdef", None),
+        ("77776666-4567-89ef-0123-456789abcdef", None),
+        // A password sign-in's session token is in no entry.
+        ("0123abce5d6e7f8091a2b3c4d5e6f708192a3b4c", None),
+    ] {
+        let profile = ServerProfile {
+            url: server.url(),
+            auth: Auth::Token(Token::new(token)),
+            server_password: None,
+            default_shard: None,
+        };
+        let overseer = Overseer::connect(profile).await.unwrap();
+        assert_eq!(
+            overseer.account().rate_limit_exemption().await.unwrap(),
+            expected
+        );
+        overseer.shutdown().await;
+    }
+    assert_eq!(
+        sent(&server, "/api/user/auth-token"),
+        vec![request("GET", "", ""); 4]
+    );
+}
+
+#[tokio::test]
 async fn power_creep_requests_have_the_documented_shape() {
     let mut server = start().await;
     let (overseer, _websocket) = connect(&mut server).await;

@@ -182,7 +182,10 @@ impl WorldProgress {
 ///   says until when ([`WorldEvent::StatsPaused`] reports each change). The user can lift
 ///   the limit early (screeps.com's reset page); [`Self::recheck_rate_limit`] then resumes
 ///   without waiting for the reset. It sends nothing of its own and does nothing while not
-///   paused.
+///   paused. While the token is exempt from rate limits
+///   ([`Self::set_rate_limit_exempt_until`]), the budget does not apply: requests go out
+///   at least 1 s apart, far rooms included, and nothing pauses; HTTP 429 still waits for
+///   the reset. At the exemption's end the budget applies again.
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
 /// - **Portals**: no endpoint lists a world's portals, and only some rooms have them: the
@@ -428,6 +431,19 @@ impl WorldMap {
             self.work.dirty = true;
         }
         paused
+    }
+
+    /// Tells the world that the session's token is exempt from rate limits until `until`
+    /// (milliseconds since the Unix epoch; screeps.com's `noRatelimitUntil`, see
+    /// [`Account::rate_limit_exemption`](crate::Account::rate_limit_exemption)), or not
+    /// (`None`, or a time already past). While exempt, overview loading ignores the budget:
+    /// no pause and no share kept for near rooms, only the 1 s gap between requests and the
+    /// wait after HTTP 429; a pause ends at once. From `until` on, the budget applies again.
+    /// The same `until` again changes nothing.
+    pub fn set_rate_limit_exempt_until(&mut self, until: Option<u64>) {
+        if self.work.stats.set_exempt_until(until, Instant::now()) {
+            self.work.dirty = true;
+        }
     }
 
     /// How much of what is wanted is known.

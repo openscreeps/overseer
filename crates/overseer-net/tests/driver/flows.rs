@@ -77,6 +77,7 @@ async fn endpoint_rate_limits_wait_for_the_reset_and_retry_once() {
     let reset = now_secs();
     let server = rate_limited_server(1, move || limited(60, 0, reset, 429, "{}"), reset + 60).await;
     let client = client(&server, Some(RateLimitPolicy::default()));
+    assert_eq!(client.rate_limited_count(), 0);
     let started = Instant::now();
     let me = client.send(&endpoints::AuthMe).await.unwrap();
     assert_eq!(me.body.id, "u1");
@@ -86,6 +87,8 @@ async fn endpoint_rate_limits_wait_for_the_reset_and_retry_once() {
         started.elapsed()
     );
     assert_eq!(server.requests().len(), 2);
+    // The refusal counts, though the retry succeeded.
+    assert_eq!(client.rate_limited_count(), 1);
     let expected = RateLimit {
         limit: 60,
         remaining: 59,
@@ -145,10 +148,10 @@ async fn rate_limited_requests_are_retried_only_once_and_never_when_disabled() {
         max_wait: Duration::ZERO,
         global_delay: Duration::from_millis(10),
     };
-    let error = client(&server, Some(policy))
-        .send(&endpoints::AuthMe)
-        .await
-        .unwrap_err();
+    let retrying = client(&server, Some(policy));
+    let error = retrying.send(&endpoints::AuthMe).await.unwrap_err();
+    // Both refusals count, server-wide ones (no headers) too.
+    assert_eq!(retrying.rate_limited_count(), 2);
     assert!(
         matches!(error, Error::Api(ApiError::RateLimited(None))),
         "{error:?}"

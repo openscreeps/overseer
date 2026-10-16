@@ -82,14 +82,21 @@ pub(super) struct Stats {
     /// Rooms of the world with an overview.
     known_in_world: usize,
     fetch: Option<Fetch>,
-    /// No request before this (pacing, rate limit or failure).
+    /// No request before this (the gap after a request, a refusal's reset or a failure),
+    /// exempt or not.
     not_before: Option<Instant>,
+    /// After the latest success, when the budget allows the next request (spread over the
+    /// rest of the window, or its reset once none is left); ignored while exempt.
+    paced: Option<Instant>,
     /// The latest rate limit seen and its reset as an [`Instant`], converted once from the
     /// server's clock.
     seen: Option<(RateLimit, Instant)>,
     /// While the rate limit holds back wanted overviews: when it resets, in milliseconds since
     /// the Unix epoch.
     paused: Option<u64>,
+    /// Until when the token is exempt from the rate limit: as given (milliseconds since the
+    /// Unix epoch) and converted once to an [`Instant`]; the budget does not apply until then.
+    exempt: Option<(u64, Instant)>,
 }
 
 impl Stats {
@@ -104,8 +111,10 @@ impl Stats {
             known_in_world: 0,
             fetch: None,
             not_before: None,
+            paced: None,
             seen: None,
             paused: None,
+            exempt: None,
         }
     }
 
@@ -173,14 +182,35 @@ impl Stats {
         }
         client.forget_rate_limit::<endpoints::GameMapStats>();
         self.not_before = None;
+        self.paced = None;
         self.seen = None;
         true
     }
 
+    /// Makes the token exempt from the rate limit until `until` (milliseconds since the Unix
+    /// epoch; `None` or a past time: not exempt). Returns whether anything changed.
+    pub(super) fn set_exempt_until(&mut self, until: Option<u64>, now: Instant) -> bool {
+        let millis = epoch_millis();
+        let exempt = until
+            .filter(|until| *until > millis)
+            .map(|until| (until, now + Duration::from_millis(until - millis)));
+        if exempt.map(|(until, _)| until) == self.exempt.map(|(until, _)| until) {
+            return false;
+        }
+        self.exempt = exempt;
+        true
+    }
+
+    /// When the exemption from the rate limit ends, while it lasts at `now`.
+    fn exempt_end(&self, now: Instant) -> Option<Instant> {
+        self.exempt.map(|(_, end)| end).filter(|end| *end > now)
+    }
+
     /// Requests the overviews of the stale near rooms, else of the stale far rooms, when the
-    /// budget allows; returns when to plan again (the budget allows the next request or an
-    /// overview goes stale). Queues a [`WorldEvent::StatsPaused`] when the rate limit starts
-    /// or stops holding back wanted overviews (or its reset moves).
+    /// budget allows (or regardless of it while exempt, until the exemption ends); returns when
+    /// to plan again (the budget allows the next request, an overview goes stale or the
+    /// exemption ends). Queues a [`WorldEvent::StatsPaused`] when the rate limit starts or
+    /// stops holding back wanted overviews (or its reset moves).
     pub(super) fn plan(
         &mut self,
         map: &Map,
@@ -215,21 +245,31 @@ impl Stats {
                 _ => far.push(room),
             }
         }
-        let paused = self.held_back(client, now, !near.is_empty(), !far.is_empty());
+        let exempt_end = self.exempt_end(now);
+        let wake = |at: Instant| Some(exempt_end.map_or(at, |end| end.min(at)));
+        let paused = if exempt_end.is_some() {
+            None
+        } else {
+            self.held_back(client, now, !near.is_empty(), !far.is_empty())
+        };
         self.set_paused(paused, events);
-        let ready = self.ready_at(client, now);
+        let ready = self.ready_at(client, now, exempt_end.is_some());
         let batch = if near.is_empty() {
             if far.is_empty() {
                 return expires;
             }
-            let ready = ready.max(self.far_ready_at(client, now));
+            let ready = if exempt_end.is_some() {
+                ready
+            } else {
+                ready.max(self.far_ready_at(client, now))
+            };
             if ready > now {
-                return Some(expires.map_or(ready, |earliest| earliest.min(ready)));
+                return wake(expires.map_or(ready, |earliest| earliest.min(ready)));
             }
             nearest_sectors(far, rect.center())
         } else {
             if ready > now {
-                return Some(ready);
+                return wake(ready);
             }
             nearest_sectors(near, self.near_center.unwrap_or_else(|| rect.center()))
         };
@@ -264,7 +304,8 @@ impl Stats {
         match result {
             Ok(response) => {
                 self.record(&rooms, &response, now, events);
-                self.not_before = Some(self.pace(client, now));
+                self.not_before = Some(now + GAP);
+                self.paced = Some(self.pace(client, now));
             }
             Err(Error::Closed) => return Err(Closed),
             Err(Error::Net(NetError::Api(ApiError::RateLimited(limit)))) => {
@@ -273,8 +314,12 @@ impl Stats {
                     None => now + GLOBAL_RETRY,
                 };
                 self.not_before = Some(wait);
+                self.paced = None;
             }
-            Err(_) => self.not_before = Some(now + RETRY),
+            Err(_) => {
+                self.not_before = Some(now + RETRY);
+                self.paced = None;
+            }
         }
         Ok(true)
     }
@@ -345,10 +390,17 @@ impl Stats {
         }
     }
 
-    /// When a request may go out: after the pacing and, when the latest limit the client saw
-    /// (from any request) has no request left, after its reset.
-    fn ready_at(&mut self, client: &Client, now: Instant) -> Instant {
+    /// When a request may go out: after the gap, a refusal's reset or a failure's wait and,
+    /// unless `exempt`, after the pacing and, when the latest limit the client saw (from any
+    /// request) has no request left, after its reset.
+    fn ready_at(&mut self, client: &Client, now: Instant, exempt: bool) -> Instant {
         let mut ready = self.not_before.unwrap_or(now);
+        if exempt {
+            return ready;
+        }
+        if let Some(paced) = self.paced {
+            ready = ready.max(paced);
+        }
         if let Some(limit) = client.rate_limit::<endpoints::GameMapStats>()
             && limit.remaining == 0
         {

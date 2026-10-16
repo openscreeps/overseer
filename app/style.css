@@ -1091,6 +1091,10 @@ main.popout {
   font-size: inherit;
 }
 
+.status-lifted {
+  color: var(--ok);
+}
+
 /* Toasts: over the bottom right corner, above the status bar. */
 
 .toasts {
@@ -1145,6 +1149,11 @@ main.popout {
   min-width: 0;
 }
 
+.toast .toast-action {
+  font-size: inherit;
+  white-space: nowrap;
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -1191,6 +1200,22 @@ main.popout {
   box-shadow: var(--shadow-2);
   animation: pop-in var(--duration) var(--ease);
   transform-origin: top right;
+}
+
+/* The prompt to lift the rate limits: over the bottom right corner, above the toasts there (it
+   asks for an answer; they go away by themselves), so it never covers the account menu or the
+   Rate limits panel. */
+.panel.floating.lift-prompt {
+  top: auto;
+  bottom: calc(var(--statusbar-h) + var(--space-4));
+  z-index: calc(var(--z-toast) + 1);
+  width: min(26rem, calc(100vw - 2 * var(--space-3)));
+  border-left: 3px solid var(--warn);
+  transform-origin: bottom right;
+}
+
+.lift-prompt p {
+  margin: 0 0 var(--space-3);
 }
 
 .panel-head {
@@ -1353,6 +1378,14 @@ form > button {
   background: var(--warn-soft);
   border-left: 3px solid var(--warn);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.notice.lifted {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--ok-soft);
+  border-left-color: var(--ok);
 }
 
 .actions {
