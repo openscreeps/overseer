@@ -221,70 +221,75 @@ test.describe('map', () => {
     });
   });
 
-  badged(
-    "fetches the owners' badges of the rooms in view, then takes them from the cache @openscreeps",
-    async ({ signedInPage: page, home, user }) => {
+  test.describe(() => {
+    // The run's warm cache holds the badges and every room in view already.
+    test.use({ cache: 'cold' });
+
+    badged(
+      "fetches the owners' badges of the rooms in view, then takes them from the cache @openscreeps",
+      async ({ signedInPage: page, home, user }) => {
+        await openRoom(page, home.path);
+        const requests = badgeRequests(page);
+        // Badges show from rooms of ten pixels until the live room's scene covers them: one
+        // Escape zooms out to the rooms level. The home room's owner is the user.
+        await worldMap(page).focus();
+        await page.keyboard.press('Escape');
+        await expect(level(page)).toHaveText('Rooms');
+        await expect.poll(() => requests, { timeout: 30_000 }).toContain(user.username);
+        await expect
+          .poll(async () =>
+            (await cachedBadges(page)).some((key) => key.includes(`|~badge|${user.id}|`)),
+          )
+          .toBe(true);
+
+        // After a reload the same view takes the badge from the cache: by the time everything
+        // in view is known, it was not fetched again.
+        const before = requests.length;
+        await page.reload();
+        await expect(breadcrumb(page)).toContainText(home.room);
+        await expect(level(page)).toHaveText('Rooms', { timeout: 30_000 });
+        await expect(status(page).getByTitle('Loading the world')).toHaveCount(0, {
+          timeout: 60_000,
+        });
+        expect(requests.slice(before)).not.toContain(user.username);
+      },
+    );
+
+    recorded('counts what is loading in the status bar until the rooms in view are known', async ({
+      signedInPage: page,
+      home,
+    }) => {
       await openRoom(page, home.path);
-      const requests = badgeRequests(page);
-      // Badges show from rooms of ten pixels until the live room's scene covers them: one
-      // Escape zooms out to the rooms level. The home room's owner is the user.
-      await worldMap(page).focus();
-      await page.keyboard.press('Escape');
-      await expect(level(page)).toHaveText('Rooms');
-      await expect.poll(() => requests, { timeout: 30_000 }).toContain(user.username);
+      const loading = status(page).getByTitle('Loading the world');
+      const number = (value = '') => Number(value.replaceAll('\u202f', ''));
+      const counts = (text: string) =>
+        [...text.matchAll(/(Terrain|Owners|Portals) ([\d\u202f]+) \/ ([\d\u202f]+)/g)].map(
+          ([, part, done, wanted]) => ({ part, done: number(done), wanted: number(wanted) }),
+        );
+      // Everything in view is known and the item goes away; or only the owners wait for the
+      // map-stats rate limit (screeps.com's 60 requests an hour per account), the status bar
+      // saying so.
       await expect
-        .poll(async () =>
-          (await cachedBadges(page)).some((key) => key.includes(`|~badge|${user.id}|`)),
+        .poll(
+          async () => {
+            if ((await loading.count()) === 0) return true;
+            const text = (await loading.textContent()) ?? '';
+            return (
+              text.includes('waiting for the rate limit, resumes in') &&
+              counts(text).every(({ part, done, wanted }) => part === 'Owners' || done === wanted)
+            );
+          },
+          { timeout: 60_000 },
         )
         .toBe(true);
-
-      // After a reload the same view takes the badge from the cache: by the time everything in
-      // view is known, it was not fetched again.
-      const before = requests.length;
-      await page.reload();
-      await expect(breadcrumb(page)).toContainText(home.room);
-      await expect(level(page)).toHaveText('Rooms', { timeout: 30_000 });
-      await expect(status(page).getByTitle('Loading the world')).toHaveCount(0, {
-        timeout: 60_000,
-      });
-      expect(requests.slice(before)).not.toContain(user.username);
-    },
-  );
-
-  recorded('counts what is loading in the status bar until the rooms in view are known', async ({
-    signedInPage: page,
-    home,
-  }) => {
-    await openRoom(page, home.path);
-    const loading = status(page).getByTitle('Loading the world');
-    const number = (value = '') => Number(value.replaceAll('\u202f', ''));
-    const counts = (text: string) =>
-      [...text.matchAll(/(Terrain|Owners|Portals) ([\d\u202f]+) \/ ([\d\u202f]+)/g)].map(
-        ([, part, done, wanted]) => ({ part, done: number(done), wanted: number(wanted) }),
-      );
-    // Everything in view is known and the item goes away; or only the owners wait for the
-    // map-stats rate limit (screeps.com's 60 requests an hour per account), the status bar
-    // saying so.
-    await expect
-      .poll(
-        async () => {
-          if ((await loading.count()) === 0) return true;
-          const text = (await loading.textContent()) ?? '';
-          return (
-            text.includes('waiting for the rate limit, resumes in') &&
-            counts(text).every(({ part, done, wanted }) => part === 'Owners' || done === wanted)
-          );
-        },
-        { timeout: 60_000 },
-      )
-      .toBe(true);
-    const shown = await page.evaluate(() => window.e2eProgress ?? []);
-    expect(shown.length).toBeGreaterThan(0);
-    // `Terrain 12 / 40 · Owners 3 / 40 · Portals 0 / 40`: never more known than wanted.
-    for (const text of shown) {
-      expect(counts(text).length, text).toBeGreaterThan(0);
-      for (const { done, wanted } of counts(text)) expect(done, text).toBeLessThanOrEqual(wanted);
-    }
+      const shown = await page.evaluate(() => window.e2eProgress ?? []);
+      expect(shown.length).toBeGreaterThan(0);
+      // `Terrain 12 / 40 · Owners 3 / 40 · Portals 0 / 40`: never more known than wanted.
+      for (const text of shown) {
+        expect(counts(text).length, text).toBeGreaterThan(0);
+        for (const { done, wanted } of counts(text)) expect(done, text).toBeLessThanOrEqual(wanted);
+      }
+    });
   });
 
   test('lists a room’s portals and goes through them @openscreeps', async ({

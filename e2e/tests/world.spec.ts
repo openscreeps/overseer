@@ -126,17 +126,11 @@ async function startRoom(server: Server, account: Account): Promise<string> {
   return room[0];
 }
 
-/**
- * The room in focus is live in the drawer. 30 s for now: on a first visit the world map's
- * portal scan of the whole world (121 `roomMap2` subscriptions at once) goes out before the
- * room's live subscription and delays its first update (measured up to 11.5 s through the
- * proxy under load, 3.6 s without the scans). The library fix (detail rooms before scans, scans
- * held while a viewed room is pending) brings this back to 15 s.
- */
+/** The room in focus is live in the drawer. */
 async function expectLive(page: Page, room: string) {
   await expect(
     roomInfo(page, room).getByRole('status').filter({ hasText: 'Live' }),
-  ).toBeVisible({ timeout: 30_000 });
+  ).toBeVisible({ timeout: 15_000 });
 }
 
 /** The accessible name of the world map with no room in focus. */
@@ -388,52 +382,57 @@ test.describe('world', () => {
     await expect(inspector).toContainText(player.username);
   });
 
-  test('restores route, camera and mode after a reload, terrain from the cache', async ({
-    signedInPage: page,
-    server,
-    home,
-  }) => {
-    await openRoom(page, home.path);
-    const perspective = page.getByRole('button', { name: 'Perspective view' });
-    await perspective.click();
-    await expect(perspective).toHaveAttribute('aria-pressed', 'true');
-    // The terrain of the rooms in view goes to the cache as it arrives.
-    await expect.poll(async () => (await cachedRooms(page)).length).toBeGreaterThan(0);
-    const cached = await cachedRooms(page);
-    // What the reloaded page starts from: the state the app saved when the page went away.
-    await page.addInitScript(() => {
-      window.e2eSavedState = localStorage.getItem('overseer.state');
-    });
-    const terrainBodies: string[] = [];
-    page.on('request', (request) => {
-      if (request.method() === 'POST' && request.url().endsWith('/api/game/rooms')) {
-        terrainBodies.push(request.postData() ?? '');
-      }
-    });
-    await page.reload();
+  test.describe(() => {
+    // The page caches the rooms in view itself first: the run's warm cache holds them already.
+    test.use({ cache: 'cold' });
 
-    const saved = await page.evaluate(() => window.e2eSavedState ?? '{}');
-    const place: SavedPlace = JSON.parse(saved).places[server.url];
-    expect(place.mode).toBe('Perspective');
-    expect(place.rooms[shardKey(home)]).toBe(home.room);
-    const before = place.cameras[shardKey(home)];
-    expect(before).toBeTruthy();
-    await expect(page).toHaveURL(routeOf(server, home, home.room));
-    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
-    await expect(perspective).toHaveAttribute('aria-pressed', 'true');
-    await expect(breadcrumb(page)).toContainText(home.room);
-    const after = await camera(page, server, home);
-    expect(after.centre[0]).toBeCloseTo(before.centre[0], 1);
-    expect(after.centre[1]).toBeCloseTo(before.centre[1], 1);
-    expect(after.half_height).toBeCloseTo(before.half_height, 1);
-    expect(await cachedRooms(page)).toEqual(expect.arrayContaining(cached));
-    // Every room cached before the reload comes from IndexedDB: only the library's
-    // world-bounds probe (the four rooms around the centre) may ask the server for those.
-    const probe: Record<string, true> = { W0N0: true, E0N0: true, W0S0: true, E0S0: true };
-    const refetched = terrainBodies
-      .flatMap((body): string[] => JSON.parse(body).rooms ?? [])
-      .filter((room) => cached.includes(room) && !probe[room]);
-    expect(refetched).toEqual([]);
+    test('restores route, camera and mode after a reload, terrain from the cache', async ({
+      signedInPage: page,
+      server,
+      home,
+    }) => {
+      await openRoom(page, home.path);
+      const perspective = page.getByRole('button', { name: 'Perspective view' });
+      await perspective.click();
+      await expect(perspective).toHaveAttribute('aria-pressed', 'true');
+      // The terrain of the rooms in view goes to the cache as it arrives.
+      await expect.poll(async () => (await cachedRooms(page)).length).toBeGreaterThan(0);
+      const cached = await cachedRooms(page);
+      // What the reloaded page starts from: the state the app saved when the page went away.
+      await page.addInitScript(() => {
+        window.e2eSavedState = localStorage.getItem('overseer.state');
+      });
+      const terrainBodies: string[] = [];
+      page.on('request', (request) => {
+        if (request.method() === 'POST' && request.url().endsWith('/api/game/rooms')) {
+          terrainBodies.push(request.postData() ?? '');
+        }
+      });
+      await page.reload();
+
+      const saved = await page.evaluate(() => window.e2eSavedState ?? '{}');
+      const place: SavedPlace = JSON.parse(saved).places[server.url];
+      expect(place.mode).toBe('Perspective');
+      expect(place.rooms[shardKey(home)]).toBe(home.room);
+      const before = place.cameras[shardKey(home)];
+      expect(before).toBeTruthy();
+      await expect(page).toHaveURL(routeOf(server, home, home.room));
+      await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
+      await expect(perspective).toHaveAttribute('aria-pressed', 'true');
+      await expect(breadcrumb(page)).toContainText(home.room);
+      const after = await camera(page, server, home);
+      expect(after.centre[0]).toBeCloseTo(before.centre[0], 1);
+      expect(after.centre[1]).toBeCloseTo(before.centre[1], 1);
+      expect(after.half_height).toBeCloseTo(before.half_height, 1);
+      expect(await cachedRooms(page)).toEqual(expect.arrayContaining(cached));
+      // Every room cached before the reload comes from IndexedDB: only the library's
+      // world-bounds probe (the four rooms around the centre) may ask the server for those.
+      const probe: Record<string, true> = { W0N0: true, E0N0: true, W0S0: true, E0S0: true };
+      const refetched = terrainBodies
+        .flatMap((body): string[] => JSON.parse(body).rooms ?? [])
+        .filter((room) => cached.includes(room) && !probe[room]);
+      expect(refetched).toEqual([]);
+    });
   });
 
   rewritten.describe('when the server cannot measure the world', () => {
