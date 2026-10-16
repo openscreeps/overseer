@@ -8,6 +8,7 @@ mod portals;
 mod stats;
 mod terrain;
 
+pub use detail::DETAIL_FIRST;
 pub use focus::PREFETCH_RING;
 pub use portals::{
     PORTAL_BACKGROUND_IN_FLIGHT, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_IN_FLIGHT,
@@ -47,6 +48,11 @@ use terrain::Terrains;
 /// Each live minimap is one socket update per tick to receive and decode, so the count is
 /// bounded whatever the size of the view; the renderer asks for the nearest rooms first.
 pub const MINIMAP_CAP: usize = 256;
+
+/// Most `roomMap2` subscriptions of each kind (live minimaps, nearest first; portal scans of
+/// viewed and visible rooms, the background waiting) while a room wanted in detail waits for
+/// its first update, at most [`DETAIL_FIRST`]: the server answers the room first.
+pub const HELD_ROOM_MAPS: usize = 4;
 
 /// The central rooms whose existence tells which sides of the zero lines hold rooms.
 const CENTRE: [&str; 4] = ["W0N0", "E0N0", "W0S0", "E0S0"];
@@ -191,7 +197,9 @@ impl WorldProgress {
 /// first, and the smallest share of the request budget (below). Portal destinations go by
 /// what is wanted now ([`Interest::portal_destinations`], see **Portals**). Viewed rooms
 /// refresh at once regardless of their lifetime, then stay fresh while viewed: their live
-/// room (see **Live rooms**) and one overview request (see **Overviews**).
+/// room (see **Live rooms**) and one overview request (see **Overviews**). Their live rooms
+/// are subscribed first, and while one waits for its first update the scans wait (see
+/// **Detail**).
 ///
 /// # Pacing per server
 ///
@@ -337,10 +345,16 @@ impl WorldProgress {
 ///   later overview response only brings the status, and scans and room-objects responses
 ///   are dropped. Live minimaps update portal presence (above); they cannot tell owners (a
 ///   user's positions mix creeps and structures).
-/// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order.
-///   Their terrain comes from the terrain above (they are wanted first, ahead of
-///   [`Interest::terrain`]), so a seeded or fetched room subscribes without any request; a
-///   room the server does not know is refused.
+/// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order
+///   at once, with no request: their terrain comes from the terrain above (they are wanted
+///   first, ahead of [`Interest::terrain`]) and is given to the subscription when it arrives
+///   (the server's updates meanwhile become a snapshot then); a room the server does not
+///   know is refused. Detail rooms subscribe ahead of the minimaps, and while a subscribed
+///   room waits for its first update (or a refusal), at most [`DETAIL_FIRST`] (5 s), at
+///   most [`HELD_ROOM_MAPS`] (4) live minimaps (the nearest) and portal scans each are
+///   subscribed, background scans waiting: otherwise up to [`MINIMAP_CAP`] subscriptions of
+///   each and their answers queue ahead of the room on the server and on the socket, and a
+///   first visit's room took seconds longer to show.
 ///   The server sends each user at most 2 rooms per update across all connections (pop-out
 ///   windows included) and refuses the others (`subscribe limit reached`, chosen at random,
 ///   on every update): the least important subscribed room is then released and reported
@@ -374,6 +388,8 @@ pub struct WorldMap {
     minimaps: Option<MapView>,
     /// Rooms whose minimap was reported and not yet gone.
     shown: HashSet<RoomCoord>,
+    /// The live minimaps are down to [`HELD_ROOM_MAPS`] while a detail room waits.
+    minimaps_held: bool,
     work: Work,
 }
 
@@ -458,6 +474,7 @@ impl WorldMap {
             interest: Interest::default(),
             minimaps,
             shown: HashSet::new(),
+            minimaps_held: false,
             work,
         }
     }
@@ -544,18 +561,7 @@ impl WorldMap {
                 .and_then(|rect| rect.intersection(&self.bounds)),
         );
         work.portals.refocus();
-        work.portals.set_minimaps(live);
-        if let Some(view) = &mut self.minimaps {
-            let rooms = minimaps;
-            let change = view.set_rooms(rooms.iter().take(MINIMAP_CAP).map(ToString::to_string));
-            for room in change.removed {
-                if let Ok(room) = room.parse()
-                    && self.shown.remove(&room)
-                {
-                    work.events.push_back(WorldEvent::MinimapGone(room));
-                }
-            }
-        }
+        // The detail rooms first, so their subscriptions go out ahead of the minimaps'.
         let rooms = user.then(|| self.overseer.rooms());
         work.details.set(
             detail,
@@ -565,6 +571,29 @@ impl WorldMap {
             &mut work.events,
         );
         self.interest = interest.clone();
+        let held = self.work.details.holding(Instant::now()).is_some();
+        self.subscribe_minimaps(held);
+    }
+
+    /// Subscribes the live minimaps of the interest, nearest first: up to [`MINIMAP_CAP`],
+    /// or [`HELD_ROOM_MAPS`] while `held` (a detail room waits for its first update).
+    fn subscribe_minimaps(&mut self, held: bool) {
+        self.minimaps_held = held;
+        let Some(view) = &mut self.minimaps else {
+            return;
+        };
+        let cap = if held { HELD_ROOM_MAPS } else { MINIMAP_CAP };
+        let minimaps = unique(&self.interest.minimaps);
+        let live = minimaps.len().min(cap);
+        self.work.portals.set_minimaps(live);
+        let change = view.set_rooms(minimaps[..live].iter().map(ToString::to_string));
+        for room in change.removed {
+            if let Ok(room) = room.parse()
+                && self.shown.remove(&room)
+            {
+                self.work.events.push_back(WorldEvent::MinimapGone(room));
+            }
+        }
     }
 
     /// Seeds the terrain of `room` from the app's persistent cache: it is never requested and
@@ -700,12 +729,18 @@ impl WorldMap {
 
     /// Starts the requests that are due and sets the timer for the next one.
     fn plan(&mut self) {
-        let work = &mut self.work;
-        if !work.dirty {
+        if !self.work.dirty {
             return;
         }
-        work.dirty = false;
+        self.work.dirty = false;
         let now = Instant::now();
+        // A room wanted in detail and waiting for its first update holds scans and minimaps
+        // back.
+        let held = self.work.details.holding(now);
+        if held.is_some() != self.minimaps_held {
+            self.subscribe_minimaps(held.is_some());
+        }
+        let work = &mut self.work;
         let shard = self.shard.as_deref();
         let client = self.overseer.client();
         let mut budget = Budget::new(client);
@@ -724,10 +759,11 @@ impl WorldMap {
             shard,
             at,
             (&mut budget, &work.terrain),
+            held.is_some(),
         );
         // The pacing changes back when the exemption ends.
         let exempt = work.stats.exempt_end(now);
-        let due = [terrain, stats, portals, exempt]
+        let due = [terrain, stats, portals, exempt, held]
             .into_iter()
             .flatten()
             .min();
@@ -807,8 +843,9 @@ impl Map {
     ///
     /// Its bounds come from the world size (`GET /api/game/world-size`) and which of the four
     /// central rooms exist (one `POST /api/game/rooms` for `W0N0`, `E0N0`, `W0S0` and `E0S0`,
-    /// whose terrain stays cached): screeps.com shards are centred on them, the upstream
-    /// default world and `OpenScreeps` worlds lie north-west of them (see [`RoomRect`]).
+    /// whose terrain stays cached), both at once: screeps.com shards are centred on them, the
+    /// upstream default world and `OpenScreeps` worlds lie north-west of them (see
+    /// [`RoomRect`]).
     ///
     /// # Errors
     ///
@@ -817,8 +854,12 @@ impl Map {
     pub async fn world(&self, shard: Option<&str>) -> Result<WorldMap, Error> {
         self.overseer.ensure_open()?;
         let shard = self.overseer.resolve_shard(shard);
-        let size = self.world_size(shard.as_deref()).await?;
-        let centre = self.terrain(CENTRE, shard.as_deref()).await?;
+        // Both at once: the probe does not depend on the size.
+        let (size, centre) = futures_util::future::try_join(
+            self.world_size(shard.as_deref()),
+            self.terrain(CENTRE, shard.as_deref()),
+        )
+        .await?;
         let exists = |room: &str| centre.contains_key(room);
         let sides = Sides {
             west: exists("W0N0") || exists("W0S0"),

@@ -268,25 +268,36 @@ impl Client {
     ///
     /// Returns the errors of [`Self::send`].
     pub async fn world(&self) -> Result<World, Error> {
+        Ok(self.discover().await?.0)
+    }
+
+    /// [`Self::world`], and the signed-in user's profile (`GET /api/auth/me`) when this call
+    /// requested it (`None` when the world was cached or the client is anonymous), so that a
+    /// caller showing the profile need not request it again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::send`].
+    pub async fn discover(&self) -> Result<(World, Option<types::AuthMeResponse>), Error> {
         let authenticated = self.inner.credentials.is_some() || self.token().is_some();
         if let Some(world) = lock(&self.inner.world)
             .as_ref()
             .filter(|world| world.user().is_some() || !authenticated)
         {
-            return Ok(world.clone());
+            return Ok((world.clone(), None));
         }
         let version = self.send(&endpoints::PlatformVersion).await?.body;
-        let user = if authenticated {
-            Some(self.send(&endpoints::AuthMe).await?.body.id)
+        let me = if authenticated {
+            Some(self.send(&endpoints::AuthMe).await?.body)
         } else {
             None
         };
-        let mut world = World::new(version, user);
+        let mut world = World::new(version, me.as_ref().map(|me| me.id.clone()));
         if let Some(shard) = &self.inner.default_shard {
             world.set_shard(shard.clone());
         }
         *lock(&self.inner.world) = Some(world.clone());
-        Ok(world)
+        Ok((world, me))
     }
 
     /// Opens a socket connection for the [`World`] ([`Self::world`]), authenticated with the

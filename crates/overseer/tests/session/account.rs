@@ -99,21 +99,21 @@ fn request(method: &str, query: &str, body: &str) -> (String, String, String) {
 async fn the_profile_is_cached_until_refreshed_or_changed() {
     let mut server = start().await;
     let (overseer, _websocket) = connect(&mut server).await;
-    // Connecting read the profile once (money 0).
+    // Connecting read the profile once (money 0): the first `me` with no request.
     let account = overseer.account();
 
     let first = account.me().await.unwrap();
-    assert_eq!(first.money, 1.0);
+    assert_eq!(first.money, 0.0);
     assert_eq!(first.username.as_deref(), Some("Alice"));
     // Every handle shares the cache.
     let other = overseer.account();
     let (again, other) = tokio::join!(account.me(), other.me());
     assert!(Arc::ptr_eq(&first, &again.unwrap()));
     assert!(Arc::ptr_eq(&first, &other.unwrap()));
-    assert_eq!(sent(&server, "/api/auth/me").len(), 2);
+    assert_eq!(sent(&server, "/api/auth/me").len(), 1);
 
     let refreshed = account.refresh().await.unwrap();
-    assert_eq!(refreshed.money, 2.0);
+    assert_eq!(refreshed.money, 1.0);
     assert!(Arc::ptr_eq(&refreshed, &account.me().await.unwrap()));
     assert_eq!(
         account.notify_prefs().await.unwrap(),
@@ -122,7 +122,7 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
             ..UserNotifyPrefs::default()
         }
     );
-    assert_eq!(sent(&server, "/api/auth/me").len(), 3);
+    assert_eq!(sent(&server, "/api/auth/me").len(), 2);
 
     // The account's own changes clear the cache.
     let badge = UserBadgeInput {
@@ -134,7 +134,7 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         r#type: UserBadgeInputType::Integer(7),
     };
     account.set_badge(badge).await.unwrap();
-    assert_eq!(account.me().await.unwrap().money, 3.0);
+    assert_eq!(account.me().await.unwrap().money, 2.0);
     account
         .set_badge(UserBadgeInput {
             color1: "#000000".to_owned(),
@@ -163,8 +163,8 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         .start_experimentation()
         .await
         .unwrap();
-    assert_eq!(account.me().await.unwrap().money, 4.0);
-    assert_eq!(sent(&server, "/api/auth/me").len(), 5);
+    assert_eq!(account.me().await.unwrap().money, 3.0);
+    assert_eq!(sent(&server, "/api/auth/me").len(), 4);
     assert_eq!(
         sent(&server, "/api/user/badge"),
         [

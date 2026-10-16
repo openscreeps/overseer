@@ -22,7 +22,7 @@ use overseer_net::{Client, Error as NetError};
 use super::focus::{Budget, Focus, Server, Tier, distance};
 use super::stats::epoch_millis;
 use super::terrain::{Terrains, reset_at};
-use super::{MINIMAP_CAP, WorldEvent};
+use super::{HELD_ROOM_MAPS, MINIMAP_CAP, WorldEvent};
 use crate::map::portal::portals_of;
 use crate::map::{
     Map, Portal, PortalDestination, RoomCoord, RoomRect, WorldKnowledge, may_have_portals,
@@ -402,7 +402,8 @@ impl Portals {
     /// (fresh), absent (`terrain`), scanned nor waiting for their destinations, by tier
     /// (viewed, then those of the wanted rooms or visible, then the background), the rooms
     /// where portals usually stand ([`may_have_portals`]) first but for viewed ones, nearest
-    /// the centre first, as far as [`MINIMAP_CAP`] allows; then requests destinations
+    /// the centre first, as far as [`MINIMAP_CAP`] allows (while `held`, the background
+    /// waits and at most [`HELD_ROOM_MAPS`] are in flight); then requests destinations
     /// ([`Self::fetch`]). Returns when to plan again (a scan times out, a retry or a request
     /// is due, or portals go stale).
     pub(super) fn plan(
@@ -412,6 +413,7 @@ impl Portals {
         shard: Option<&str>,
         (now, focus, _): (Instant, &Focus, Server),
         (budget, terrain): (&mut Budget<'_>, &Terrains),
+        held: bool,
     ) -> Option<Instant> {
         let Some(rect) = self.rect else {
             self.scans.clear();
@@ -440,10 +442,18 @@ impl Portals {
             due.at(at);
         }
         let mut free = MINIMAP_CAP.saturating_sub(self.minimaps + self.scans.len());
+        if held {
+            free = free.min(HELD_ROOM_MAPS.saturating_sub(self.scans.len()));
+        }
         let millis = epoch_millis();
         while free > 0
             && let Some(room) = self.queue.pop_front()
         {
+            // The queue goes by tier: from the first background room on, all wait.
+            if held && tier(room) == Tier::Background {
+                self.queue.push_front(room);
+                break;
+            }
             let fresh = self
                 .known
                 .get(&room)

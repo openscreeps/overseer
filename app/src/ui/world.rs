@@ -285,23 +285,29 @@ pub async fn open_world(
     Ok(Feed::start(world, |_| {}, progress))
 }
 
-/// A first visit's room (`opening` holds none yet): the account's start room
-/// ([`overseer::Account::start_room`]) on `shard` when the world `bounds` hold it and no room
-/// was chosen meanwhile. Best effort: without it the whole world shows.
-async fn open_on_start_room(
+/// The account's start room ([`overseer::Account::start_room`]) on `shard`, for a first
+/// visit's room. Best effort: `None` when it cannot be read.
+async fn start_room(overseer: Overseer, shard: Shard) -> Option<StartRoom> {
+    overseer
+        .account()
+        .start_room(shard.name())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// A first visit's room (`opening` holds none yet): the account's `start` room when the world
+/// `bounds` hold it and no room was chosen meanwhile. Without it the whole world shows.
+fn open_on_start_room(
     map: MapState,
     opening: StoredValue<Option<RoomCoord>>,
-    overseer: &Overseer,
-    shard: &Shard,
+    start: Option<&StartRoom>,
     bounds: RoomRect,
 ) {
     if opening.get_value().is_some() {
         return;
     }
-    let Ok(start) = overseer.account().start_room(shard.name()).await else {
-        return;
-    };
-    if let Some(room) = start_room_in(start.as_ref(), bounds)
+    if let Some(room) = start_room_in(start, bounds)
         && map.room.get_untracked().is_none()
     {
         opening.set_value(Some(room));
@@ -417,10 +423,24 @@ pub fn WorldScreen(
         let shard = shard_for_load.clone();
         let url = url_for_load.clone();
         spawn_scoped(async move {
-            match open_world(state, map, &overseer, &url, &shard).await {
+            // A first visit's start room is read while the world opens: neither waits for the
+            // other.
+            let first_visit = room.is_none() && saved_camera.is_none();
+            let start = first_visit.then(|| start_room(overseer.clone(), shard.clone()));
+            let (opened, start) = futures_util::future::join(
+                open_world(state, map, &overseer, &url, &shard),
+                async move {
+                    match start {
+                        Some(start) => start.await,
+                        None => None,
+                    }
+                },
+            )
+            .await;
+            match opened {
                 Ok(feed) => {
-                    if room.is_none() && saved_camera.is_none() {
-                        open_on_start_room(map, opening, &overseer, &shard, feed.bounds()).await;
+                    if first_visit {
+                        open_on_start_room(map, opening, start.as_ref(), feed.bounds());
                     }
                     map.bounds.set(Some(feed.bounds()));
                     map.feed.set(Some(feed));

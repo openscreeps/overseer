@@ -274,6 +274,9 @@ pub(crate) enum Command {
     Subscribe(Channel),
     /// The last reference to a channel was released.
     Unsubscribe(Channel),
+    /// A room channel's sink got its terrain: publish the snapshot of the room's state (and a
+    /// refusal) received meanwhile.
+    Republish(Channel),
     /// Close the socket and end the task.
     Shutdown,
 }
@@ -586,6 +589,7 @@ mod tests {
             .map(|command| match command {
                 Command::Subscribe(channel) => format!("subscribe {channel}"),
                 Command::Unsubscribe(channel) => format!("unsubscribe {channel}"),
+                Command::Republish(channel) => format!("republish {channel}"),
                 Command::Shutdown => "shutdown".to_owned(),
             })
             .collect()
