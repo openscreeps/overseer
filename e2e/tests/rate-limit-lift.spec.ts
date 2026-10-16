@@ -92,10 +92,7 @@ interface Fake {
  * `remaining` of 60 left, or a refusal when `remaining` is 0) and screeps.com's reset page.
  */
 async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: number): Promise<void> {
-  let firstCheck = () => {};
-  const checked = new Promise<void>((resolve) => {
-    firstCheck = resolve;
-  });
+  const { promise: checked, resolve: firstCheck } = Promise.withResolvers<void>();
   await page.route('**/api/user/auth-token', async (route: Route) => {
     const request = route.request();
     if (request.method() !== 'GET') return route.continue();

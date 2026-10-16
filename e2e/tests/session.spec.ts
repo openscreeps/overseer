@@ -3,6 +3,7 @@
 // stored token the server no longer takes, a session revoked while open, and a server that
 // cannot be reached.
 
+import type { Request } from '@playwright/test';
 import { expect, SERVER_NAME, signIn, test } from './fixtures';
 import { accountMenu, admin, alerts, seed, sessionOf, storedToken } from './support/accounts';
 
@@ -116,6 +117,39 @@ test.describe('session', () => {
       const discovery = await page.request.get('/overseer-proxy.json');
       expect(await discovery.json()).toEqual({ upstream: server.url });
     }
+  });
+
+  test('signing out while the account still loads keeps the sign-in form', {
+    tag: '@openscreeps',
+  }, async ({ page, server, account }) => {
+    // A session loads its account once it has begun (the second `GET /api/auth/me`, see
+    // above): hold that reply until the user has signed out.
+    let calls = 0;
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    let late: Request | undefined;
+    await page.route('**/api/auth/me', async (route) => {
+      if (route.request().method() === 'GET' && ++calls === 2) {
+        late = route.request();
+        await held;
+      }
+      await route.fallback();
+    });
+    await signIn(page, server, account);
+    await expect.poll(() => calls).toBe(2);
+    await accountMenu(page, account.username, 'Sign out');
+    const form = page.getByRole('region', { name: `Sign in to ${SERVER_NAME}` });
+    await expect(form).toBeVisible();
+
+    // The reply comes after all (or the request ends with the session): the form stays.
+    release();
+    await late?.response();
+    await page.evaluate(() => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      return promise;
+    });
+    await expect(form).toBeVisible();
+    await expect(page.getByText(`Connecting to ${SERVER_NAME}…`)).toHaveCount(0);
   });
 
   test('a stored token the server rejects asks to sign in again, name filled', {
