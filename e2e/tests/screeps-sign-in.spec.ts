@@ -86,6 +86,28 @@ test.describe('screeps.com sign-in', () => {
     await expect(form).toBeVisible();
   });
 
+  // The real thing: screeps.com and the account's API token (`--target official` only; skipped
+  // before any fixture is set up elsewhere).
+  test.describe('on screeps.com', () => {
+    test.skip(({ apiToken }) => !apiToken, 'needs screeps.com: cargo xtask e2e --target official');
+
+    test('signs in to screeps.com with an API token', async ({ page, apiToken, user }) => {
+      const form = await openScreepsSignIn(page);
+      await form.getByLabel('API token').fill(apiToken ?? '');
+      await form.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(page.getByRole('button', { name: `Account: ${user.username}` })).toBeVisible();
+      await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
+      await expect(page).toHaveURL(/#\/screeps\.com\//);
+      await page.goto('/#/');
+      await expect(
+        page
+          .getByRole('region', { name: 'Servers' })
+          .getByRole('listitem')
+          .filter({ hasText: 'https://screeps.com/' }),
+      ).toContainText(`Signed in as ${user.username}`);
+    });
+  });
+
   test('signs in with an API token', { tag: '@openscreeps' }, async ({ page, server, account }) => {
     const { token } = await sessionOf(server, account);
     const form = await openLocalScreepsSignIn(page, server);
@@ -128,7 +150,7 @@ test.describe('screeps.com sign-in', () => {
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
 
     await accountMenu(page, account.username, 'Sign out');
-    await expect(form.getByRole('button', { name: 'API token' })).toHaveAttribute(
+    await expect(form.getByRole('button', { name: 'API token', exact: true })).toHaveAttribute(
       'aria-pressed',
       'true',
     );

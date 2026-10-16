@@ -3,7 +3,7 @@
 // server's answers (`page.route`) for what a disposable server cannot do on its own.
 
 import type { Locator, Page, Request, Route } from '@playwright/test';
-import { Session, type Account, type Server } from '../fixtures';
+import { adminOf, Session, type Account, type Server } from '../fixtures';
 
 /**
  * The alerts of `scope` that say something: forms keep an empty alert ready for their error, so
@@ -68,7 +68,10 @@ export async function admin(
 ): Promise<Record<string, unknown>> {
   const reply = await fetch(new URL('admin', server.url), {
     method: 'POST',
-    headers: { Authorization: `Bearer ${server.adminToken}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${adminOf(server).token}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify(action),
   });
   const text = await reply.text();

@@ -4,7 +4,7 @@
 // cannot be reached.
 
 import { expect, SERVER_NAME, signIn, test } from './fixtures';
-import { admin, alerts, seed, sessionOf, storedToken } from './support/accounts';
+import { accountMenu, admin, alerts, seed, sessionOf, storedToken } from './support/accounts';
 
 declare global {
   interface Window {
@@ -14,8 +14,8 @@ declare global {
 }
 
 test.describe('session', () => {
-  test('resumes after a reload', async ({ signedInPage: page, player, server }) => {
-    const account = page.getByRole('button', { name: `Account: ${player.username}` });
+  test('resumes after a reload', async ({ signedInPage: page, user, server }) => {
+    const account = page.getByRole('button', { name: `Account: ${user.username}` });
     const status = page.getByRole('contentinfo', { name: 'Status' });
     await expect(account).toBeVisible();
     await expect(status).toContainText('Connected');
@@ -84,22 +84,20 @@ test.describe('session', () => {
       .not.toBe(seeded);
   });
 
-  test('signs out', async ({ signedInPage: page, player, server }) => {
+  test('signs out', async ({ signedInPage: page, user, server }) => {
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
-    await page.getByRole('button', { name: `Account: ${player.username}` }).click();
-    await page.getByRole('menuitem', { name: 'Sign out' }).click();
+    await accountMenu(page, user.username, 'Sign out');
     await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: `Sign in to ${server.name}` })).toBeVisible();
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Not connected');
-    expect(
-      await page.evaluate((key) => localStorage.getItem(key), `overseer.secret.token:${server.url}`),
-    ).toBeNull();
+    expect(await storedToken(page, server.url)).toBeNull();
     // Signed out stays signed out after a reload.
     await page.goto('/#/');
     await page.reload();
     await expect(
       page.getByRole('region', { name: 'Servers' }).getByRole('listitem').filter({ hasText: server.url }),
     ).toContainText('Signed out');
-    await expect(page.getByRole('button', { name: `Sign in ${SERVER_NAME}` })).toBeVisible();
+    await expect(page.getByRole('button', { name: `Sign in ${server.name}` })).toBeVisible();
   });
 
   test('talks to the server directly or through the proxy that serves it', {

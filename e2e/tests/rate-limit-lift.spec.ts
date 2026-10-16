@@ -20,9 +20,10 @@
 // request's headers) and hands it over through `X-Token`, so the app compares the list with the
 // token it holds right then.
 
-import type { Page, Request, Route } from '@playwright/test';
+import type { Page, Route } from '@playwright/test';
 import { expect, Session, test } from './fixtures';
 import type { Account, Server } from './fixtures';
+import { corsHeaders } from './support/accounts';
 
 /** The `X-RateLimit-*` headers of a window of 60 with `remaining` left, resetting at `reset`. */
 function limitHeaders(remaining: number, reset: number): Record<string, string> {
@@ -31,17 +32,6 @@ function limitHeaders(remaining: number, reset: number): Record<string, string> 
     'x-ratelimit-remaining': String(remaining),
     'x-ratelimit-reset': String(reset),
   };
-}
-
-/** Lets a cross-origin page (direct mode) read the response and the headers it needs. */
-function corsHeaders(request: Request, exposed = ''): Record<string, string> {
-  const origin = request.headers()['origin'];
-  const expose = [exposed, 'X-Token, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset']
-    .filter(Boolean)
-    .join(', ');
-  return origin
-    ? { 'access-control-allow-origin': origin, 'access-control-expose-headers': expose }
-    : {};
 }
 
 /**
@@ -89,6 +79,10 @@ interface Fake {
   tokenLists: number;
   /** Map-stats requests so far. */
   mapStats: number;
+  /** Map-stats requests left from now on, instead of the `remaining` given at the start. */
+  remaining?: number;
+  /** The reset page fails (the user closes it without solving the captcha). */
+  resetFails?: boolean;
 }
 
 /**
@@ -124,7 +118,8 @@ async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: num
     const request = route.request();
     if (request.method() !== 'POST') return route.continue();
     fake.mapStats += 1;
-    if (remaining === 0) {
+    const left = fake.remaining ?? remaining;
+    if (left === 0) {
       return route.fulfill({
         status: 429,
         headers: { ...corsHeaders(request), ...limitHeaders(0, reset) },
@@ -143,16 +138,19 @@ async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: num
       headers: {
         ...headers,
         ...corsHeaders(request, headers['access-control-expose-headers']),
-        ...limitHeaders(remaining, reset),
+        ...limitHeaders(left, reset),
       },
     });
   });
-  // The reset page: success at once (the real one after its captcha), then it closes.
+  // The reset page: success at once (the real one after its captcha), then it closes; or it
+  // closes without a word.
   await page.context().route('https://screeps.com/**', (route: Route) =>
     route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: '<!doctype html><title>Reset</title><script>window.opener.postMessage("screepsTokenSuccess", "*"); window.close();</script>',
+      body: fake.resetFails
+        ? '<!doctype html><title>Reset</title><script>window.close();</script>'
+        : '<!doctype html><title>Reset</title><script>window.opener.postMessage("screepsTokenSuccess", "*"); window.close();</script>',
     }),
   );
 }
@@ -336,6 +334,66 @@ test.describe('lifted rate limits', { tag: '@openscreeps' }, () => {
     const lifted = status.getByTitle(/^Your API token's rate limits are lifted until /);
     await expect(lifted).toHaveText(/^Rate limits lifted · (2 h|1 h 5\d min)$/, { timeout: 10_000 });
     expect(fake.tokenLists).toBe(checks + 1);
+    await expect(status).not.toContainText('waiting for the rate limit', { timeout: 30_000 });
+  });
+
+  test('Reset limit and the panel open the reset page; Escape leaves the prompt', async ({
+    page,
+    server,
+    account,
+  }) => {
+    const reset = Math.floor(Date.now() / 1000) + 30 * 60;
+    // Refused, not lifted, and the user first closes the reset page without solving it.
+    const fake: Fake = { lift: null, tokenLists: 0, mapStats: 0, resetFails: true };
+    await fakeScreeps(page, fake, 0, reset);
+    await signInAs(page, server, account, 'official', true);
+
+    // Escape inside the prompt is `Not now`.
+    const prompt = page.getByRole('dialog', { name: 'Rate limit running low' });
+    await expect(prompt).toBeVisible({ timeout: 30_000 });
+    await prompt.getByRole('button', { name: 'Not now' }).focus();
+    await page.keyboard.press('Escape');
+    await expect(prompt).toHaveCount(0);
+
+    // `Reset limit` in the status bar: the page closes unsolved, nothing changes.
+    const status = page.getByRole('contentinfo', { name: 'Status' });
+    const statusReset = status.getByRole('button', { name: 'Reset limit' });
+    await expect(statusReset).toHaveAttribute(
+      'title',
+      'Lift the rate limits of your API token on screeps.com',
+    );
+    await resetPage(page, () => statusReset.click());
+    await expect(statusReset).toBeVisible();
+    await expect(status.getByTitle('Loading the world')).toContainText('waiting for the rate limit');
+
+    // The panel: the limit, why loading waits, and the reset page, which succeeds this time.
+    await page.getByRole('button', { name: `Account: ${account.username}` }).click();
+    await page.getByRole('menuitem', { name: 'Rate limits' }).click();
+    const panel = page.getByRole('dialog', { name: 'Rate limits' });
+    await expect(panel.getByRole('button', { name: 'Close rate limits' })).toBeFocused();
+    await expect(
+      panel.getByRole('row', { name: /POST \/api\/game\/map-stats/ }).getByRole('cell'),
+    ).toHaveText(['60', '0', /^in (29|30|31) min$/]);
+    await expect(panel).toContainText(
+      /The map's room owners wait for the map-stats limit; loading resumes in (29|30|31) min\./,
+    );
+    await expect(panel).toContainText(
+      "Only the first 8 characters of your token are sent, in the page's address; the full token never leaves Overseer.",
+    );
+    fake.resetFails = false;
+    fake.lift = Date.now() + 2 * 3600_000;
+    fake.remaining = 59;
+    const lists = fake.tokenLists;
+    await resetPage(page, () => panel.getByRole('button', { name: 'Reset on screeps.com' }).click());
+    await expect.poll(() => fake.tokenLists).toBeGreaterThan(lists);
+    await expect(panel).toContainText(
+      /Your API token's rate limits are lifted until .+ \((2 h|1 h 59 min) left\)/,
+    );
+    await expect(panel.getByRole('button', { name: 'Reset on screeps.com' })).toHaveCount(0);
+    await expect(statusReset).toHaveCount(0);
+    await expect(status.getByTitle(/^Your API token's rate limits are lifted until /)).toHaveText(
+      /^Rate limits lifted · (2 h|1 h 59 min)$/,
+    );
     await expect(status).not.toContainText('waiting for the rate limit', { timeout: 30_000 });
   });
 
