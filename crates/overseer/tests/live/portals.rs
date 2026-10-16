@@ -1,4 +1,4 @@
-//! Live tests: portals found by the world map (candidate scans over `roomMap2`, destinations
+//! Live tests: portals found by the world map (every room scanned over `roomMap2`, destinations
 //! from room objects) and the badges of room owners.
 //!
 //! The portal test creates a portal pair between `W0S0` and `E0S0` through the server's admin
@@ -12,7 +12,7 @@ use overseer::core::api::types::{
     GameRoomObject, UserBadgeColor, UserBadgeInput, UserBadgeInputParam, UserBadgeInputType,
     UserBadgeType,
 };
-use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent, may_have_portals};
+use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
@@ -87,11 +87,8 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     .await
     .expect("the map views list the portals");
 
-    // Every candidate room of the world is scanned and reported once.
-    let candidates = bounds
-        .iter()
-        .filter(|&room| may_have_portals(room))
-        .collect::<BTreeSet<_>>();
+    // Every room of the world is scanned and reported once.
+    let candidates = bounds.iter().collect::<BTreeSet<_>>();
     world.set_interest(&Interest {
         portals: Some(RoomRect::new(
             RoomCoord {
@@ -107,8 +104,9 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     });
     assert_eq!(world.progress().portals_wanted, candidates.len());
     let mut reported = Vec::new();
-    // A scan that a busy server does not answer within its timeout is tried again 30 s later.
-    timeout(PATIENCE * 3, async {
+    // OpenScreeps answers scans behind its ticks (about a second each when many wait); a scan
+    // it does not answer within its timeout is tried again 30 s later.
+    timeout(PATIENCE * 20, async {
         while reported.len() < candidates.len() {
             if let WorldEvent::Portals(room, portals) =
                 world.next().await.expect("the session stays open")
@@ -119,7 +117,7 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("every candidate scanned in time: {reported:?} of {candidates:?}"));
+    .unwrap_or_else(|_| panic!("every room scanned in time: {reported:?} of {candidates:?}"));
     assert_eq!(
         reported.iter().copied().collect::<BTreeSet<_>>(),
         candidates
@@ -128,7 +126,27 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     let progress = world.progress();
     assert_eq!(progress.portals_scanned, progress.portals_wanted);
 
-    // The pair: a cluster in each room leading to the other.
+    // Every portal of the world lands exactly on a portal of its destination room that leads
+    // back to it, with the same lifetime: the created pair, and the generator's pairs of
+    // sector centres (from 21 rooms on; with an odd count one centre has none).
+    let lands_back = |from: RoomCoord, to: RoomCoord| {
+        let there = world.portals(to).expect("scanned");
+        world
+            .portals(from)
+            .expect("scanned")
+            .iter()
+            .filter(|portal| portal.destination.room == to)
+            .all(|portal| {
+                there.iter().any(|back| {
+                    (Some(back.x), Some(back.y)) == (portal.destination.x, portal.destination.y)
+                        && back.destination.room == from
+                        && (back.destination.x, back.destination.y)
+                            == (Some(portal.x), Some(portal.y))
+                        && (back.expires_at, back.decay_time)
+                            == (portal.expires_at, portal.decay_time)
+                })
+            })
+    };
     for (from, to) in [(west, east), (east, west)] {
         let portals = world.portals(from).expect("scanned");
         assert!(portals.len() >= 8, "{from}: {portals:?}");
@@ -142,7 +160,7 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
             .iter()
             .filter(|object| matches!(object, GameRoomObject::Portal(_)))
             .count();
-        assert_eq!(portals.len(), listed, "{from}: every portal parses");
+        assert_eq!(portals.len(), listed, "{from}: every portal known");
         let leading = portals
             .iter()
             .filter(|portal| portal.destination.room == to)
@@ -151,29 +169,36 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
         for portal in leading {
             assert_eq!(portal.destination.shard, None);
             assert!(portal.destination.x.is_some() && portal.destination.y.is_some());
-            assert_eq!((portal.expires_at, portal.decay_time), (None, None));
         }
+        assert!(lands_back(from, to), "{from} -> {to}: {portals:?}");
     }
-    // The generator links the sector centres of the world (from 21 rooms on) in a cycle: each
-    // has a cluster leading to another centre.
     let ends_in_5 = |value: i32| (if value < 0 { -value - 1 } else { value }) % 10 == 5;
     let centres = candidates
         .iter()
         .copied()
         .filter(|room| ends_in_5(room.x) && ends_in_5(room.y))
         .collect::<Vec<_>>();
-    if centres.len() > 1 {
-        for centre in &centres {
-            let portals = world.portals(*centre).expect("scanned");
-            assert!(
-                portals
-                    .iter()
-                    .any(|portal| portal.destination.room != *centre
-                        && centres.contains(&portal.destination.room)),
-                "{centre}: {portals:?}"
-            );
+    let mut unpaired = 0;
+    for centre in &centres {
+        let portals = world.portals(*centre).expect("scanned");
+        let partners = portals
+            .iter()
+            .map(|portal| portal.destination.room)
+            .filter(|to| to != centre && centres.contains(to))
+            .collect::<BTreeSet<_>>();
+        match partners.iter().next() {
+            None => unpaired += 1,
+            Some(&partner) => {
+                assert_eq!(partners.len(), 1, "{centre}: {portals:?}");
+                assert!(lands_back(*centre, partner), "{centre} -> {partner}");
+                assert!(lands_back(partner, *centre), "{partner} -> {centre}");
+            }
         }
     }
+    assert!(
+        unpaired <= centres.len() % 2,
+        "{unpaired} of {centres:?} unpaired"
+    );
     // Every portal of the world leads into it.
     for room in &candidates {
         for portal in world.portals(*room).expect("scanned").iter() {

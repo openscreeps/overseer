@@ -1,4 +1,8 @@
-//! Where the user looks: the three tiers every kind of world-map work is ordered by.
+//! Where the user looks: the three tiers every kind of world-map work is ordered by, and the
+//! client's request budget they share.
+
+use overseer_net::rt::Instant;
+use overseer_net::{Client, Priority};
 
 use crate::map::{Interest, RoomCoord, RoomRect};
 
@@ -17,6 +21,65 @@ pub(super) enum Tier {
     Background,
 }
 
+impl Tier {
+    /// The client's request priority of work of this tier.
+    const fn priority(self) -> Priority {
+        match self {
+            Self::Viewed => Priority::Viewed,
+            Self::Visible => Priority::Visible,
+            Self::Background => Priority::Background,
+        }
+    }
+}
+
+/// How a server limits requests, now (see [`WorldMap`](super::WorldMap)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Server {
+    /// No rate limit seen, or the token is exempt: in-flight caps only.
+    Unlimited,
+    /// It lists shards, reported a rate limit or refused a request with HTTP 429.
+    Limited,
+}
+
+impl Server {
+    /// How `client`'s server limits requests now.
+    pub(super) fn of(client: &Client) -> Self {
+        if client.has_rate_limits() && !client.is_rate_limit_exempt() {
+            Self::Limited
+        } else {
+            Self::Unlimited
+        }
+    }
+}
+
+/// The client's request budget ([`Client::budget_ready_at`]) as one planning pass spends it:
+/// requests it allows go out once the pass ends, so they count as pending meanwhile.
+pub(super) struct Budget<'a> {
+    client: &'a Client,
+    granted: usize,
+}
+
+impl<'a> Budget<'a> {
+    pub(super) const fn new(client: &'a Client) -> Self {
+        Self { client, granted: 0 }
+    }
+
+    /// The client whose budget this is.
+    pub(super) const fn client(&self) -> &'a Client {
+        self.client
+    }
+
+    /// Takes one request of `tier`, or tells when one may go out.
+    pub(super) fn take(&mut self, tier: Tier) -> Result<(), Instant> {
+        match self.client.budget_ready_at(tier.priority(), self.granted) {
+            None => {
+                self.granted += 1;
+                Ok(())
+            }
+            Some(at) => Err(at),
+        }
+    }
+}
 /// The rooms of each tier, from the latest interest.
 #[derive(Clone, Debug)]
 pub(super) struct Focus {

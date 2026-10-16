@@ -776,18 +776,14 @@ impl BadgeWants {
     /// world knows.
     fn new(map: MapState, overseer: &Overseer, server: &Server) -> Self {
         let surface = map.surface;
-        let loader = crate::badges::Badges::new(
-            overseer.clone(),
-            &server.url,
-            crate::badges::request_interval(server.kind),
-            move |user, pixels| {
+        let loader =
+            crate::badges::Badges::new(overseer.clone(), &server.url, move |user, pixels| {
                 if let Some(surface) = surface.try_get_value().flatten() {
                     surface.with_viewer(|viewer| {
                         viewer.set_badge(user, pixels, crate::badges::BADGE_SIZE);
                     });
                 }
-            },
-        );
+            });
         let wants = Self {
             view: RwSignal::new(None),
             loader: StoredValue::new_local(loader),

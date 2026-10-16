@@ -1,7 +1,8 @@
 //! The world features against an in-process server: room actions, history playback, map
-//! views, the world map, its scheduling, its portals and player badges.
+//! views, the world map, its scheduling and request budget, its portals and player badges.
 
 mod badges;
+mod budget;
 mod history;
 mod map;
 mod portals;

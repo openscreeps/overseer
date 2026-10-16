@@ -544,8 +544,7 @@ async fn near_overviews_refresh_after_10_minutes_and_far_ones_after_an_hour() {
     let owner = world.stat(room("W1N1")).unwrap();
     assert_eq!(owner.owner.as_ref().unwrap().level, 3);
 
-    // Then the far rooms, after the pause between requests.
-    advance(&mut world, Duration::from_secs(2)).await;
+    // Then the far rooms, at once.
     let second = stats(&mut world).await;
     assert_eq!(rooms_of(second.iter().map(|(room, _)| room)), far);
     let progress = world.progress();
@@ -683,7 +682,6 @@ async fn big_views_fill_in_capped_batches_of_the_nearest_sectors() {
         };
         received += stats.len();
         assert_eq!(map_stats(&server).len(), batch + 1);
-        advance(&mut world, Duration::from_secs(2)).await;
     }
     assert_eq!(received, 6400);
     let sizes = map_stats(&server).iter().map(Vec::len).collect::<Vec<_>>();
@@ -737,7 +735,6 @@ async fn far_overviews_leave_the_near_share_of_the_budget_and_a_429_waits_for_th
         rooms_of(near.iter().map(|(room, _)| room)),
         rooms_of(&rect("W39N39", "W20N20").iter().collect::<Vec<_>>())
     );
-    advance(&mut world, Duration::from_secs(2)).await;
     assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
 
     // The far rooms left wait for the window's reset.
@@ -766,7 +763,6 @@ async fn far_overviews_leave_the_near_share_of_the_budget_and_a_429_waits_for_th
 
     // After the reset the far rooms resume, until every room is known.
     while !world.progress().is_complete() {
-        advance(&mut world, Duration::from_secs(2)).await;
         stats(&mut world).await;
     }
     assert_eq!(world.progress().stats_known, 6400);
@@ -844,7 +840,6 @@ async fn a_paused_overview_load_says_until_when_and_a_recheck_after_a_reset_resu
             .map(|limit| limit.remaining),
         Some(59)
     );
-    advance(&mut world, Duration::from_secs(2)).await;
     assert_eq!(stats(&mut world).await.len(), 1400);
     assert_eq!(map_stats(&server).len(), 4);
     let progress = world.progress();
@@ -875,7 +870,6 @@ async fn a_recheck_while_not_paused_sends_nothing() {
     // Between two requests, while pacing.
     assert_eq!(stats(&mut world).await.len(), 400);
     assert!(!world.recheck_rate_limit());
-    advance(&mut world, Duration::from_secs(2)).await;
     assert_eq!(stats(&mut world).await.len(), 1200);
     // Every room known and fresh: 10 left is no pause.
     quiet(&mut world).await;

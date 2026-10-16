@@ -210,7 +210,10 @@ use overseer_core::socket::SocketError;
 pub use overseer_core as core;
 pub use serde_json;
 
-pub use client::{Client, ClientBuilder, EndpointRateLimit, RateLimitPolicy};
+pub use client::{
+    Client, ClientBuilder, EndpointRateLimit, GLOBAL_RATE_LIMIT_WAIT, Priority, REQUEST_BUDGET,
+    REQUEST_WINDOW, RateLimitPolicy,
+};
 pub use history::{HistoryReplay, RoomHistory};
 pub use socket::{DisconnectReason, ReconnectPolicy, RoomView, Socket, SocketEvent};
 pub use world::World;

@@ -574,7 +574,7 @@ async fn overviews_go_without_pauses_on_servers_without_rate_limits() {
 }
 
 #[tokio::test]
-async fn overviews_pause_between_requests_on_servers_with_rate_limits() {
+async fn overviews_go_one_at_a_time_without_gaps_on_servers_with_rate_limits() {
     let fake = Fake::new(80, true);
     let (server, overseer, websocket) = connect(fake.routes()).await;
     answer_pings(websocket);
@@ -585,17 +585,13 @@ async fn overviews_pause_between_requests_on_servers_with_rate_limits() {
         stats: Some(bounds),
         ..Interest::default()
     });
-    drive(&mut world, |world, _| world.progress().stats_known > 0).await;
-    drive_for(&mut world).await;
-    // One second between requests (timers fire on the millisecond after their deadline).
-    tokio::time::advance(Duration::from_millis(999)).await;
-    drive_for(&mut world).await;
-    assert_eq!(requested(&server, "/api/game/map-stats").len(), 1);
-    tokio::time::advance(Duration::from_millis(2)).await;
-    drive(&mut world, |_, _| {
-        requested(&server, "/api/game/map-stats").len() == 2
+    // The clock never moves: the endpoint's budget (none reported) and the request budget
+    // leave the three requests no pause, one after the other.
+    drive(&mut world, |world, _| {
+        world.progress().stats_known == bounds.len()
     })
     .await;
+    assert_eq!(requested(&server, "/api/game/map-stats").len(), 3);
 }
 
 #[tokio::test]
@@ -608,11 +604,11 @@ async fn portal_destinations_go_together_on_servers_without_rate_limits() {
         portals: Some(world.bounds()),
         ..Interest::default()
     });
-    // The clock never moves: the three rooms with portals are asked without pauses.
-    drive_portals(&mut world, &mut socket, |events| count(events) == 32).await;
+    // The clock never moves: the four rooms with portals are asked without pauses.
+    drive_portals(&mut world, &mut socket, |events| count(events) == 1600).await;
     let mut asked = room_objects(&server);
     asked.sort();
-    assert_eq!(asked, ["E5S5", "W0N0", "W0S0"]);
+    assert_eq!(asked, ["E5S5", "W0N0", "W0S0", "W1N1"]);
 }
 
 #[tokio::test]
@@ -700,8 +696,8 @@ async fn a_failing_portal_room_backs_off_alone() {
         portals: Some(world.bounds()),
         ..Interest::default()
     });
-    // Every other candidate is known although the nearest room with portals fails.
-    drive_portals(&mut world, &mut socket, |events| count(events) == 31).await;
+    // Every other room is known although the nearest room with portals fails.
+    drive_portals(&mut world, &mut socket, |events| count(events) == 1599).await;
     assert!(world.portals(room("W0N0")).is_none());
     assert!(world.portals(room("E5S5")).is_some() && world.portals(room("W0S0")).is_some());
     let asked = |name: &str| {
@@ -711,7 +707,7 @@ async fn a_failing_portal_room_backs_off_alone() {
             .count()
     };
     assert_eq!(asked("W0N0"), 1);
-    assert_eq!(asked("E5S5") + asked("W0S0"), 2);
+    assert_eq!(asked("E5S5") + asked("W0S0") + asked("W1N1"), 3);
     // Only that room waits (30 s, doubling with each failure in a row).
     let until = std::time::Instant::now() + Duration::from_millis(500);
     drive_portals(&mut world, &mut socket, |_| {

@@ -1,5 +1,6 @@
 //! The shared HTTP client: token, sign-in, rate limits and world discovery.
 
+mod budget;
 mod flows;
 mod rate_limit;
 
@@ -16,11 +17,13 @@ use overseer_core::api::{
 use overseer_core::{ServerUrl, Token};
 use reqwest_websocket::{Upgrade, WebSocket};
 
+pub use budget::{GLOBAL_RATE_LIMIT_WAIT, Priority, REQUEST_BUDGET, REQUEST_WINDOW};
 pub use rate_limit::{EndpointRateLimit, RateLimitPolicy};
 
-use crate::rt::{SystemTime, sleep};
+use crate::rt::{Instant, SystemTime, UNIX_EPOCH, sleep};
 use crate::socket::{ReconnectPolicy, Socket};
 use crate::{Error, USER_AGENT, World};
+use budget::Budget;
 use rate_limit::RateLimits;
 
 /// HTTP API client and socket connector for one account on one server.
@@ -61,6 +64,9 @@ struct Inner {
     rate_limits: Mutex<RateLimits>,
     /// Replies with HTTP 429 so far.
     rate_limited: AtomicU64,
+    /// Every request of the latest window, the rate-limit exemption and the latest
+    /// server-wide refusal.
+    budget: Mutex<Budget>,
     terrain: Mutex<TerrainCache>,
 }
 
@@ -198,6 +204,59 @@ impl Client {
     #[must_use]
     pub fn rate_limited_count(&self) -> u64 {
         self.inner.rate_limited.load(Ordering::Relaxed)
+    }
+
+    /// Requests this client sent (every attempt, retries included) in the latest
+    /// [`REQUEST_WINDOW`].
+    #[must_use]
+    pub fn requests_in_window(&self) -> usize {
+        lock(&self.inner.budget).count(Instant::now())
+    }
+
+    /// Whether the server limits request rates: it lists shards (screeps.com and its season,
+    /// whose server-wide limit of 120 requests per minute per token sends no headers), or a
+    /// response carried `X-RateLimit-*` headers or was refused with HTTP 429.
+    #[must_use]
+    pub fn has_rate_limits(&self) -> bool {
+        lock(&self.inner.world)
+            .as_ref()
+            .is_some_and(World::is_sharded)
+            || self.rate_limited_count() > 0
+            || !self.rate_limits().is_empty()
+    }
+
+    /// Tells the client that the token is exempt from rate limits until `until` (milliseconds
+    /// since the Unix epoch; screeps.com's `noRatelimitUntil`), or not (`None`): meanwhile
+    /// [`Self::budget_ready_at`] lets every request go.
+    pub fn set_rate_limit_exempt_until(&self, until: Option<u64>) {
+        lock(&self.inner.budget).set_exempt_until(until);
+    }
+
+    /// Whether the token is exempt from rate limits now
+    /// ([`Self::set_rate_limit_exempt_until`]).
+    #[must_use]
+    pub fn is_rate_limit_exempt(&self) -> bool {
+        lock(&self.inner.budget).is_exempt(epoch_millis())
+    }
+
+    /// When a background request of `priority` may go out, after `pending` requests the
+    /// caller allowed but has not sent yet: `None` at once. Background loading (the world
+    /// map, badges) asks before each request; the user's own requests never ask and never
+    /// wait, but count.
+    ///
+    /// On servers with rate limits ([`Self::has_rate_limits`]) every request of the client
+    /// counts over a sliding [`REQUEST_WINDOW`], and a request of `priority` waits while
+    /// [`Priority::budget`] are in it ([`REQUEST_BUDGET`], 110 of screeps.com's 120 per
+    /// minute, for viewed rooms, 5 and 10 fewer for visible and background ones). A sliding
+    /// window also bounds every fixed minute. After HTTP 429 without the endpoint's limit
+    /// every priority waits [`GLOBAL_RATE_LIMIT_WAIT`]. Servers without rate limits, and a
+    /// token exempt from them, have no budget: `None`.
+    #[must_use]
+    pub fn budget_ready_at(&self, priority: Priority, pending: usize) -> Option<Instant> {
+        if !self.has_rate_limits() || self.is_rate_limit_exempt() {
+            return None;
+        }
+        lock(&self.inner.budget).ready_at(priority, pending, Instant::now())
     }
 
     /// The server's shards and capabilities and the signed-in user, fetched once and cached.
@@ -358,6 +417,7 @@ impl Client {
         &self,
         endpoint: &E,
     ) -> (Option<Token>, Result<Reply<E::Response>, Error>) {
+        lock(&self.inner.budget).record(Instant::now());
         let mut session = self.session().clone();
         let used = session.token().cloned();
         let result = self.exchange(&mut session, endpoint).await;
@@ -372,6 +432,9 @@ impl Client {
             Ok(reply) => reply.rate_limit,
             Err(Error::Api(ApiError::RateLimited(limit))) => {
                 self.inner.rate_limited.fetch_add(1, Ordering::Relaxed);
+                if limit.is_none() {
+                    lock(&self.inner.budget).refused(Instant::now());
+                }
                 *limit
             }
             Err(_) => None,
@@ -412,6 +475,15 @@ impl Client {
 }
 
 /// Locks a mutex whose critical sections cannot panic halfway through an update.
+/// Now, in milliseconds since the Unix epoch.
+fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -564,6 +636,7 @@ impl ClientBuilder {
                 rate_limit: self.rate_limit,
                 rate_limits: Mutex::new(RateLimits::default()),
                 rate_limited: AtomicU64::new(0),
+                budget: Mutex::new(Budget::default()),
                 terrain: Mutex::new(HashMap::new()),
             }),
         })

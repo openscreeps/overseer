@@ -10,8 +10,8 @@ mod terrain;
 
 pub use focus::PREFETCH_RING;
 pub use portals::{
-    PORTAL_BACKGROUND_SCANS, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_GAP,
-    PORTAL_IN_FLIGHT, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
+    PORTAL_BACKGROUND_SCANS, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_IN_FLIGHT,
+    PORTAL_SCAN_SETTLE, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
 };
 pub use stats::{
     STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_IN_FLIGHT, STATS_TTL,
@@ -37,7 +37,7 @@ use crate::refresh::closed;
 use crate::{Closed, ConnectionStatus, Error, Overseer, RoomSnapshot};
 
 use detail::Details;
-use focus::Focus;
+use focus::{Budget, Focus, Server};
 use portals::Portals;
 use stats::Stats;
 use terrain::Terrains;
@@ -135,11 +135,11 @@ pub struct WorldProgress {
     /// or only the near share left while far rooms are wanted): when it resets, in
     /// milliseconds since the Unix epoch. `None` when not paused.
     pub stats_paused_until: Option<u64>,
-    /// Rooms of [`Interest::portals`] that [may have portals](super::may_have_portals) whose
-    /// portals (or their absence) are known, possibly stale.
+    /// Rooms of [`Interest::portals`] whose portals (or their absence) are known, possibly
+    /// stale.
     pub portals_scanned: usize,
-    /// Rooms of [`Interest::portals`] inside the world that may have portals, while a user is
-    /// signed in, else none.
+    /// Rooms of [`Interest::portals`] inside the world (but those the server has no terrain
+    /// for), while a user is signed in, else none: every room is scanned.
     pub portals_wanted: usize,
 }
 
@@ -180,28 +180,38 @@ impl WorldProgress {
 /// | Background | the rest of the world, while anything of the kind is wanted | nearest the same centre |
 ///
 /// Background work only takes what higher tiers leave: one of the [`TERRAIN_IN_FLIGHT`]
-/// terrain requests, [`PORTAL_BACKGROUND_SCANS`] scan subscriptions, and requests that go out
-/// only while no viewed or visible request waits. Viewed rooms refresh at once regardless of
-/// their lifetime, then stay fresh while viewed: their live room (see **Live rooms**) and
-/// one overview request (see **Overviews**).
+/// terrain requests, [`PORTAL_BACKGROUND_SCANS`] scan subscriptions, and the smallest share
+/// of the request budget (below). Viewed rooms refresh at once regardless of their lifetime,
+/// then stay fresh while viewed: their live room (see **Live rooms**) and one overview
+/// request (see **Overviews**).
 ///
 /// # Pacing per server
 ///
 /// A server shows rate limits when it lists shards (screeps.com and its seasonal server:
 /// their server-wide limit of 120 requests per minute per token sends no headers) or once any
-/// response carried `X-RateLimit-*` headers or was refused with HTTP 429. While the token is
-/// exempt from rate limits ([`Self::set_rate_limit_exempt_until`], screeps.com's
-/// `noRatelimitUntil`) every kind paces like on a server without rate limits. Every kind
-/// honours an endpoint's limit that reports no request left (until its reset) and HTTP 429
-/// (until the endpoint's reset, 60 s after a server-wide refusal) on every server, exempt or
-/// not.
+/// response carried `X-RateLimit-*` headers or was refused with HTTP 429
+/// ([`net::Client::has_rate_limits`](crate::net::Client::has_rate_limits)). There every
+/// request of every kind first asks the session's request budget
+/// ([`net::Client::budget_ready_at`](crate::net::Client::budget_ready_at)), shared with the
+/// app's badge loader: every request of the client counts over a sliding minute, and
+/// requests for viewed rooms may go out while fewer than
+/// [`REQUEST_BUDGET`](crate::net::REQUEST_BUDGET) (110) are in it, visible ones 105,
+/// background ones 100, so the user's own requests (which never wait) keep 10 of
+/// screeps.com's 120; a sliding window bounds every fixed minute too. No other gap applies.
+/// After HTTP 429 without the endpoint's limit every background request waits 60 s, and
+/// [`net::Client::rate_limited_count`](crate::net::Client::rate_limited_count) changes, which
+/// the app answers by offering to lift the limit. While the token is exempt from rate limits
+/// ([`Self::set_rate_limit_exempt_until`], screeps.com's `noRatelimitUntil`) nothing is paced:
+/// in-flight caps only, as on servers without rate limits. Every kind honours an endpoint's
+/// limit that reports no request left (until its reset) and HTTP 429 (until the endpoint's
+/// reset, 60 s after a server-wide refusal) on every server, exempt or not.
 ///
 /// | Kind | Server with rate limits | Without (private servers), or exempt |
 /// |------|-------------------------|--------------------------------------|
-/// | Terrain (`POST /api/game/rooms`) | [`TERRAIN_IN_FLIGHT`] at a time, no pause | the same |
-/// | Overviews (`POST /api/game/map-stats`) | one at a time, 1 s apart, within the hourly budget (see below) | [`STATS_IN_FLIGHT`] at a time, no pause, no budget |
+/// | Terrain (`POST /api/game/rooms`) | [`TERRAIN_IN_FLIGHT`] at a time, within the request budget | [`TERRAIN_IN_FLIGHT`] at a time |
+/// | Overviews (`POST /api/game/map-stats`) | one at a time, within the request budget and the endpoint's hourly budget (see below) | [`STATS_IN_FLIGHT`] at a time, no hourly budget |
 /// | Portal scans (`roomMap2`) | no HTTP; within [`MINIMAP_CAP`] subscriptions | the same |
-/// | Portal destinations (`GET /api/game/room-objects`) | starts [`PORTAL_GAP`] apart, at most 2 at a time | [`PORTAL_IN_FLIGHT`] at a time, no pause |
+/// | Portal destinations (`GET /api/game/room-objects`) | [`PORTAL_IN_FLIGHT`] at a time, within the request budget | [`PORTAL_IN_FLIGHT`] at a time |
 ///
 /// # Policies
 ///
@@ -231,7 +241,8 @@ impl WorldProgress {
 ///   per request: a whole screeps.com shard takes 14 requests per hour. On servers with rate
 ///   limits, one request at a time following the endpoint's rate limit
 ///   ([`net::Client::rate_limit`](crate::net::Client::rate_limit), screeps.com allows 60 per
-///   hour per token): at least 1 s apart; once fewer than half of the window's requests are
+///   hour per token): at once while at least half of the window's requests are left (and the
+///   request budget allows); once fewer than half of the window's requests are
 ///   left, the rest are spread evenly until the reset; far rooms may use only
 ///   [`STATS_FAR_SHARE`] percent of the window (42 of 60), so viewed and near rooms always
 ///   refresh; none goes out while none is left, and after HTTP 429 the next waits for the
@@ -242,31 +253,46 @@ impl WorldProgress {
 ///   without waiting for the reset. It sends nothing of its own and does nothing while not
 ///   paused. While the token is exempt from rate limits
 ///   ([`Self::set_rate_limit_exempt_until`]), the budget does not apply: requests go out
-///   at least 1 s apart, far rooms included, and nothing pauses; HTTP 429 still waits for
-///   the reset. At the exemption's end the budget applies again.
+///   at once, far rooms included, and nothing pauses; HTTP 429 still waits for the reset. At
+///   the exemption's end the budget applies again.
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
-/// - **Portals**: no endpoint lists a world's portals, and only some rooms have them: the
-///   generators of screeps.com and `OpenScreeps` place them in sector centres (`W5N5`:
-///   intra-shard) and highway crossroads (`W10N0`: inter-shard on screeps.com), see
-///   [`may_have_portals`](super::may_have_portals). Sampled on screeps.com `shard3`
-///   (October 2026): of 1 600 rooms around `W8S2`, the 30 with portals were all such rooms.
-///   While [`Interest::portals`] is set, the candidates of the world whose portals are not
-///   known (or stale) are scanned by tier (those of [`Interest::portals`] count as visible),
-///   without any HTTP request: each is subscribed to `roomMap2`, whose first update (sent as
-///   soon as the server processes the subscription) lists portal positions (`p`), and
-///   released when it arrives (or after [`PORTAL_SCAN_TIMEOUT`], 30 s; scanned again 30 s
-///   later). Scans and live minimaps together stay within [`MINIMAP_CAP`] subscriptions
-///   (scans wait while the minimaps take them all). A live minimap counts as a scan of its
-///   room, of any room of the world (candidate or not) whose portals appear or vanish. A
+/// - **Portals**: no endpoint lists a world's portals, and worlds differ in where they stand
+///   (sector centres such as `W5N5` and highway crossroads such as `W10N0` on both
+///   screeps.com and `OpenScreeps`; also anywhere on screeps.com's highways, such as
+///   `W42N0` ↔ `W42N10` on `shard0`). So while [`Interest::portals`] is set, every room of the
+///   world whose portals are not known (or stale), but rooms the server has no terrain for,
+///   is scanned, by tier (those of [`Interest::portals`] count as visible), rooms where
+///   portals usually stand ([`may_have_portals`](super::may_have_portals): centres and
+///   highways, 7 204 of the 33 124 rooms of `shard0`) first in the visible and background
+///   tiers, each tier nearest the centre first. A scan makes no HTTP request: the room is
+///   subscribed to `roomMap2`, whose first update (sent as soon as the server processes the
+///   subscription) lists portal positions (`p`), and released when it arrives (or after
+///   [`PORTAL_SCAN_TIMEOUT`], 30 s; scanned again 30 s later). Scans and live minimaps
+///   together stay within [`MINIMAP_CAP`] subscriptions, background scans within
+///   [`PORTAL_BACKGROUND_SCANS`]: each answer frees a subscription for the next room, a steady
+///   rate the server sets by how fast it answers (scans waiting on a reconnect are sent again
+///   with the reconnect's subscriptions, at most the cap; none starts over). A live minimap
+///   counts as a scan of its room, or of any room of the world whose portals appear or vanish. A
 ///   room without portals is reported with none; for a room with portals, one
-///   `GET /api/game/room-objects` brings their destinations ([`Portal`]), by tier, paced per
-///   server (above): on screeps.com at most 30 per minute, a quarter of its server-wide 120
-///   (the endpoint has no limit of its own there). A request that fails or takes longer than
-///   [`PORTAL_FETCH_TIMEOUT`] holds back only its room: it is asked again after 30 s,
-///   doubling with each failure in a row up to an hour, while the other rooms go on. Measured on
-///   `shard3` around `W8S2` (51 × 51 rooms): 61 candidates scanned at once, 44 with portals,
-///   all destinations known after 44 requests and 93 s. Each scan is reported
+///   `GET /api/game/room-objects` brings their destinations ([`Portal`]), by tier, then the
+///   rooms whose fetch tells the most portal tiles not known otherwise, paced per server
+///   (above); the endpoint has no limit of its own on screeps.com. A request that fails or
+///   takes longer than [`PORTAL_FETCH_TIMEOUT`] holds back only its room: it is asked again
+///   after 30 s, doubling with each failure in a row up to an hour, while the other rooms go
+///   on. Paired portals save requests: on screeps.com every intra-shard portal lands exactly
+///   on a portal of its destination room that leads back to it, with the same
+///   [`Portal::expires_at`] (sampled on `shard0`, October 2026: 144 of 144 in `W42N0`,
+///   `E31S40` and their partners, and the sector-centre pairs such as `E55N45` ↔ `E55N15`);
+///   `OpenScreeps` generates such pairs too. So when exactly one known portal of the shard
+///   (fetched or live, never inferred ones, never inter-shard ones) lands on each portal
+///   tile of a room's map view, that room's portals are inferred to lead back to them (decay
+///   included), and it is not fetched; a room only partly accounted for is fetched. To let
+///   one fetch tell its partner rather than race it, destinations wait (except for viewed
+///   rooms) while scans of rooms of their tier where portals usually stand are in flight, at
+///   most [`PORTAL_SCAN_SETTLE`], and a room whose portal tiles have the shape of those of a room
+///   being fetched waits for that fetch. A live room or a later fetch replaces inferred
+///   portals ([`Self::portals_inferred`] tells them apart). Each scan is reported
 ///   ([`WorldEvent::Portals`]) and used for [`PORTAL_TTL`] (24 hours),
 ///   [`PORTAL_DECAYING_TTL`] (1 hour) for a room with a decaying portal, or until a portal
 ///   becomes unstable ([`Portal::expires_at`]), before the room is scanned again;
@@ -322,21 +348,11 @@ pub struct WorldMap {
     work: Work,
 }
 
-/// How a server limits requests, from what it showed so far (see [`WorldMap`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Server {
-    /// No rate limit seen: no pause beyond the concurrency caps.
-    Unlimited,
-    /// It lists shards, reported a rate limit or refused a request with HTTP 429.
-    Limited,
-}
-
 /// The requests and subscriptions [`WorldMap::next`] drives.
 struct Work {
     events: VecDeque<WorldEvent>,
     knowledge: WorldKnowledge,
     focus: Focus,
-    server: Server,
     terrain: Terrains,
     stats: Stats,
     portals: Portals,
@@ -350,13 +366,12 @@ struct Work {
 }
 
 impl Work {
-    /// Nothing known or wanted yet of the world `bounds`, on a server that is `server` so far.
-    fn new(bounds: RoomRect, server: Server) -> Self {
+    /// Nothing known or wanted yet of the world `bounds`.
+    fn new(bounds: RoomRect) -> Self {
         let knowledge = WorldKnowledge::new();
         Self {
             events: VecDeque::new(),
             focus: Focus::new(bounds),
-            server,
             terrain: Terrains::new(bounds),
             stats: Stats::new(bounds, knowledge.clone()),
             portals: Portals::new(bounds, knowledge.clone()),
@@ -404,12 +419,8 @@ impl WorldMap {
     fn new(overseer: Overseer, shard: Option<String>, bounds: RoomRect) -> Self {
         let map = overseer.map();
         let minimaps = map.view(shard.as_deref()).ok();
-        let server = if shard.is_some() {
-            Server::Limited
-        } else {
-            Server::Unlimited
-        };
-        let mut world = Self {
+        let work = Work::new(bounds);
+        Self {
             status: overseer.status(),
             overseer,
             map,
@@ -418,10 +429,8 @@ impl WorldMap {
             interest: Interest::default(),
             minimaps,
             shown: HashSet::new(),
-            work: Work::new(bounds, server),
-        };
-        world.update_server();
-        world
+            work,
+        }
     }
 
     /// What [`WorldMap`] knows of each room (overviews and portals), as a handle readable
@@ -430,17 +439,6 @@ impl WorldMap {
     #[must_use]
     pub fn knowledge(&self) -> WorldKnowledge {
         self.work.knowledge.clone()
-    }
-
-    /// Makes the server [`Server::Limited`] once it reported a rate limit or refused a request
-    /// with HTTP 429 (it never goes back).
-    fn update_server(&mut self) {
-        let client = self.overseer.client();
-        if self.work.server == Server::Unlimited
-            && (client.rate_limited_count() > 0 || !client.rate_limits().is_empty())
-        {
-            self.work.server = Server::Limited;
-        }
     }
 
     /// The shard; `None` on single-world servers.
@@ -488,10 +486,13 @@ impl WorldMap {
         let minimaps = unique(&interest.minimaps);
         let live = minimaps.len().min(MINIMAP_CAP);
         work.stats.set_near(&minimaps[..live]);
-        work.portals.rect = interest
-            .portals
-            .filter(|_| user && self.minimaps.is_some())
-            .and_then(|rect| rect.intersection(&self.bounds));
+        work.portals.set_rect(
+            interest
+                .portals
+                .filter(|_| user && self.minimaps.is_some())
+                .and_then(|rect| rect.intersection(&self.bounds)),
+        );
+        work.portals.refocus();
         work.portals.set_minimaps(live);
         if let Some(view) = &mut self.minimaps {
             let rooms = minimaps;
@@ -564,12 +565,15 @@ impl WorldMap {
     /// Tells the world that the session's token is exempt from rate limits until `until`
     /// (milliseconds since the Unix epoch; screeps.com's `noRatelimitUntil`, see
     /// [`Account::rate_limit_exemption`](crate::Account::rate_limit_exemption)), or not
-    /// (`None`, or a time already past). While exempt, nothing is paced (see [`WorldMap`]):
-    /// overviews ignore the budget (no pause, no share kept for near rooms, no gap) and portal
-    /// destinations go without gaps, each kind within its concurrency cap; HTTP 429 still
-    /// waits. A pause ends at once. From `until` on, the pacing applies again.
+    /// (`None`, or a time already past), and tells the session's client
+    /// ([`net::Client::set_rate_limit_exempt_until`](crate::net::Client::set_rate_limit_exempt_until)),
+    /// whose request budget then lets everything go (badges included). While exempt, nothing
+    /// is paced (see [`WorldMap`]): no request budget, overviews ignore their hourly budget
+    /// (no pause, no share kept for near rooms), each kind only within its in-flight cap;
+    /// HTTP 429 still waits. A pause ends at once. From `until` on, the pacing applies again.
     /// The same `until` again changes nothing.
     pub fn set_rate_limit_exempt_until(&mut self, until: Option<u64>) {
+        self.overseer.client().set_rate_limit_exempt_until(until);
         if self.work.stats.set_exempt_until(until, Instant::now()) {
             self.work.dirty = true;
         }
@@ -580,7 +584,7 @@ impl WorldMap {
     pub fn progress(&self) -> WorldProgress {
         let (terrain_known, terrain_absent, terrain_wanted) = self.work.terrain.progress();
         let (stats_known, stats_wanted) = self.work.stats.progress();
-        let (portals_scanned, portals_wanted) = self.work.portals.progress();
+        let (portals_scanned, portals_wanted) = self.work.portals.progress(&self.work.terrain);
         WorldProgress {
             terrain_known,
             terrain_absent,
@@ -644,26 +648,31 @@ impl WorldMap {
 
     /// Starts the requests that are due and sets the timer for the next one.
     fn plan(&mut self) {
-        if !self.work.dirty {
+        let work = &mut self.work;
+        if !work.dirty {
             return;
         }
-        self.update_server();
-        let work = &mut self.work;
         work.dirty = false;
         let now = Instant::now();
         let shard = self.shard.as_deref();
         let client = self.overseer.client();
-        let server = if work.stats.exempt_end(now).is_some() {
-            Server::Unlimited
-        } else {
-            work.server
-        };
-        let at = (now, &work.focus, server);
-        let terrain = work.terrain.plan(&self.map, client, shard, now);
-        let stats = work
-            .stats
-            .plan(&self.map, client, shard, at, &mut work.events);
-        let portals = work.portals.plan(&self.map, &self.overseer, shard, at);
+        let mut budget = Budget::new(client);
+        let at = (now, &work.focus, Server::of(client));
+        let terrain = work.terrain.plan(&self.map, shard, at, &mut budget);
+        let stats = work.stats.plan(
+            &self.map,
+            client,
+            shard,
+            at,
+            (&mut budget, &mut work.events),
+        );
+        let portals = work.portals.plan(
+            &self.map,
+            &self.overseer,
+            shard,
+            at,
+            (&mut budget, &work.terrain),
+        );
         // The pacing changes back when the exemption ends.
         let exempt = work.stats.exempt_end(now);
         let due = [terrain, stats, portals, exempt]
@@ -704,6 +713,13 @@ impl WorldMap {
     #[must_use]
     pub fn portals(&self, room: RoomCoord) -> Option<Arc<[Portal]>> {
         self.work.knowledge.portals(room)
+    }
+
+    /// Whether the known portals of `room` were inferred from the paired portals that lead to
+    /// it, rather than fetched or shown by its live room (see [`WorldMap`]).
+    #[must_use]
+    pub fn portals_inferred(&self, room: RoomCoord) -> bool {
+        self.work.portals.is_inferred(room)
     }
 
     /// The latest minimap of `room`, from its first [`WorldEvent::Minimap`] until its

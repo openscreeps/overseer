@@ -11,38 +11,26 @@
 //!
 //! # Pace
 //!
-//! One badge at a time, never blocking the map. On screeps.com (and its season) the badge
-//! requests count against the token's global limit of 120 requests per minute, shared with
-//! terrain and room objects: one request per [`OFFICIAL_INTERVAL`] (at most 60 per minute,
-//! half the budget). Private servers have no such limit: requests follow each other at once.
-//! Each player's badge is fetched at most once per world screen, failures included.
+//! One badge at a time, never blocking the map. Each request first asks the session's request
+//! budget (`Client::budget_ready_at`, priority visible), shared with the world map: on
+//! screeps.com (and its season) every request of the token counts against its limit of 120
+//! per minute, and background loading together stays within 105 for visible work; private
+//! servers, and a token whose rate limits are lifted, have no budget: requests follow each
+//! other at once. Each player's badge is fetched at most once per world screen, failures
+//! included.
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::time::Duration;
 
 use overseer::core::api::types::UserBadge;
 use overseer::map::{RoomCoord, RoomRect, RoomStat};
-
-use crate::profiles::ServerKind;
 
 /// Side of a rasterized badge, in pixels: the viewer's badge size (no resampling there).
 pub const BADGE_SIZE: u32 = overseer_view::BADGE_SIZE;
 /// Bytes of a rasterized badge (RGBA).
 pub const BADGE_BYTES: usize = (BADGE_SIZE * BADGE_SIZE * 4) as usize;
-/// Shortest time between two badge requests to screeps.com.
-pub const OFFICIAL_INTERVAL: Duration = Duration::from_secs(1);
 /// Most badges asked for at once (the nearest ones; the rest follow as the view moves).
 const MAX_WANTED: usize = 256;
-
-/// The shortest time between two badge requests to a server of `kind`.
-pub const fn request_interval(kind: ServerKind) -> Duration {
-    if kind.uses_screeps_accounts() {
-        OFFICIAL_INTERVAL
-    } else {
-        Duration::ZERO
-    }
-}
 
 /// A stable 64-bit hash of a badge's parameters (FNV-1a of their JSON): the same badge hashes
 /// the same in every session and build, a changed one differently.
@@ -155,9 +143,10 @@ mod loader {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
     use std::rc::Rc;
-    use std::time::Duration;
 
     use overseer::Overseer;
+    use overseer::net::Priority;
+    use overseer::net::rt;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
@@ -188,24 +177,21 @@ mod loader {
     pub struct Badges {
         overseer: Overseer,
         server: Rc<str>,
-        interval: Duration,
         deliver: Deliver,
         state: Rc<RefCell<State>>,
     }
 
     impl Badges {
         /// A loader for the server with base URL `server` (`overseer` connected to it),
-        /// requests at most every `interval`, handing pixels to `deliver`.
+        /// within the session's request budget, handing pixels to `deliver`.
         pub fn new(
             overseer: Overseer,
             server: &str,
-            interval: Duration,
             deliver: impl Fn(&str, &[u8]) + 'static,
         ) -> Self {
             Self {
                 overseer,
                 server: server.into(),
-                interval,
                 deliver: Rc::new(deliver),
                 state: Rc::new(RefCell::new(State {
                     done: HashMap::new(),
@@ -247,7 +233,6 @@ mod loader {
         /// Gets queued badges one by one until none is left.
         async fn run(self) {
             let store = BadgeStore::open(&self.server).await.ok();
-            let mut last_request: Option<f64> = None;
             loop {
                 let want = {
                     let mut state = self.state.borrow_mut();
@@ -269,21 +254,9 @@ mod loader {
                     self.deliver(&want.user, &pixels);
                     continue;
                 }
-                if let Some(at) = last_request {
-                    let delay_ms = self
-                        .interval
-                        .as_secs_f64()
-                        .mul_add(1000.0, at - js_sys::Date::now());
-                    if delay_ms > 0.0 {
-                        #[expect(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_sign_loss,
-                            reason = "a positive delay of at most the interval"
-                        )]
-                        overseer::net::rt::sleep(Duration::from_millis(delay_ms as u64)).await;
-                    }
+                while let Some(at) = self.overseer.client().budget_ready_at(Priority::Visible, 0) {
+                    rt::sleep_until(at).await;
                 }
-                last_request = Some(js_sys::Date::now());
                 // A badge that cannot be fetched or drawn is not tried again on this screen.
                 let Ok(svg) = self.overseer.map().badge_svg(&want.username, false).await else {
                     continue;
@@ -352,14 +325,9 @@ pub fn test_badge(shape: i64) -> UserBadge {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use overseer::map::{RoomCoord, RoomOwner, RoomRect, RoomReservation, RoomStat, RoomStatus};
 
-    use super::{
-        OFFICIAL_INTERVAL, Want, badge_hash, premultiply, request_interval, test_badge, wanted,
-    };
-    use crate::profiles::ServerKind;
+    use super::{Want, badge_hash, premultiply, test_badge, wanted};
 
     #[test]
     fn badge_hashes_follow_the_parameters_and_stay_stable() {
@@ -432,12 +400,5 @@ mod tests {
         let mut pixels = [255, 128, 0, 255, 255, 128, 10, 128, 200, 100, 50, 0];
         premultiply(&mut pixels);
         assert_eq!(pixels, [255, 128, 0, 255, 128, 64, 5, 128, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn screeps_com_is_paced_private_servers_are_not() {
-        assert_eq!(request_interval(ServerKind::Official), OFFICIAL_INTERVAL);
-        assert_eq!(request_interval(ServerKind::Season), OFFICIAL_INTERVAL);
-        assert_eq!(request_interval(ServerKind::Private), Duration::ZERO);
     }
 }

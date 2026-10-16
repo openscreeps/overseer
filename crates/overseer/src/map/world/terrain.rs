@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use overseer_net::Error as NetError;
 use overseer_net::core::api::{ApiError, Terrain, endpoints};
 use overseer_net::rt::{BoxFuture, Instant, SystemTime, UNIX_EPOCH};
-use overseer_net::{Client, Error as NetError};
 
 use super::WorldEvent;
-use super::focus::{Focus, distance};
+use super::focus::{Budget, Focus, Server, Tier, distance};
 use crate::map::{Map, RoomCoord, RoomRect};
 use crate::{Closed, Error};
 
@@ -165,6 +165,11 @@ impl Terrains {
         self.absent.contains(&room)
     }
 
+    /// How many rooms the server has no terrain for.
+    pub(super) fn absent_count(&self) -> usize {
+        self.absent.len()
+    }
+
     /// The wanted rooms: with a known terrain, without one on the server, and in total.
     pub(super) fn progress(&self) -> (usize, usize, usize) {
         (self.wanted_known, self.wanted_absent, self.wanted.len())
@@ -177,15 +182,15 @@ impl Terrains {
     pub(super) fn plan(
         &mut self,
         map: &Map,
-        client: &Client,
         shard: Option<&str>,
-        now: Instant,
+        (now, focus, _): (Instant, &Focus, Server),
+        budget: &mut Budget<'_>,
     ) -> Option<Instant> {
         if self.fetches.len() >= TERRAIN_IN_FLIGHT || (self.queue.is_empty() && !self.sweeps()) {
             return None;
         }
         let mut ready = self.not_before.filter(|&at| at > now);
-        if let Some(limit) = client.rate_limit::<endpoints::GameRooms>()
+        if let Some(limit) = budget.client().rate_limit::<endpoints::GameRooms>()
             && limit.remaining == 0
         {
             let reset = reset_at(limit.reset, now);
@@ -196,6 +201,14 @@ impl Terrains {
         }
         self.not_before = None;
         while self.fetches.len() < TERRAIN_IN_FLIGHT {
+            let tier = match self.queue.iter().find(|room| self.unknown(**room)) {
+                Some(&room) => focus.tier(room).min(Tier::Visible),
+                None if self.sweeps() => Tier::Background,
+                None => break,
+            };
+            if let Err(at) = budget.take(tier) {
+                return Some(at);
+            }
             let mut rooms = Vec::with_capacity(TERRAIN_BATCH.min(self.queue.len()));
             while rooms.len() < TERRAIN_BATCH
                 && let Some(room) = self.queue.pop_front()

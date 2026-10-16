@@ -2,7 +2,7 @@
 
 use overseer_net::core::api::types::{GameRoomObject, GameRoomObjectPortal};
 
-use super::{RoomCoord, RoomRect};
+use super::RoomCoord;
 
 /// Where a [`Portal`] leads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -69,33 +69,20 @@ impl Portal {
     }
 }
 
-/// Whether portals may stand in `room`: the generators of screeps.com and `OpenScreeps` put
-/// them only in sector centres (`W5N5`, `E15S25`: intra-shard portals) and highway crossroads
-/// (`W0N0`, `E10S20`: inter-shard portals on screeps.com), the rooms whose name numbers both
-/// end in 5, or both in 0.
+/// Whether `room` is where portals usually stand: sector centres (`W5N5`, `E15S25`:
+/// intra-shard pairs on screeps.com and `OpenScreeps`) and highway rooms (a name number ending
+/// in 0: inter-shard portals at crossroads such as `W10N0` on screeps.com, intra-shard pairs
+/// anywhere on highways such as `W42N0` ↔ `W42N10` on `shard0`). Worlds differ, so
+/// [`WorldMap`](super::WorldMap) scans every room; these go first in the background.
 #[must_use]
 pub const fn may_have_portals(room: RoomCoord) -> bool {
     let (x, y) = (name_number(room.x) % 10, name_number(room.y) % 10);
-    (x == 5 && y == 5) || (x == 0 && y == 0)
+    (x == 5 && y == 5) || x == 0 || y == 0
 }
 
 /// The number in a room name of the coordinate `value` (`W0` is -1, `E0` is 0).
 const fn name_number(value: i32) -> i32 {
     if value < 0 { -value - 1 } else { value }
-}
-
-/// The rooms of `rect` that [may have portals](may_have_portals), row by row from the
-/// north-west corner.
-pub(crate) fn portal_rooms(rect: RoomRect) -> impl Iterator<Item = RoomCoord> {
-    let (min, max) = (rect.min, rect.max);
-    (min.y..=max.y)
-        .filter(|&y| matches!(name_number(y) % 10, 0 | 5))
-        .flat_map(move |y| {
-            let end = name_number(y) % 10;
-            (min.x..=max.x)
-                .filter(move |&x| name_number(x) % 10 == end)
-                .map(move |x| RoomCoord { x, y })
-        })
 }
 
 /// The portals among `objects`, in a stable order whatever order the server sent them in:
@@ -113,45 +100,24 @@ pub(crate) fn portals_of<'a>(objects: impl IntoIterator<Item = &'a GameRoomObjec
 mod tests {
     use overseer_net::core::api::types::GameRoomObject;
 
-    use super::{Portal, PortalDestination, may_have_portals, portal_rooms};
-    use crate::map::{RoomCoord, RoomRect};
+    use super::{Portal, PortalDestination, may_have_portals};
+    use crate::map::RoomCoord;
 
     fn room(name: &str) -> RoomCoord {
         name.parse().unwrap()
     }
 
     #[test]
-    fn portals_stand_in_sector_centres_and_highway_crossroads() {
+    fn portals_usually_stand_in_sector_centres_and_on_highways() {
         for name in [
-            "W5N5", "E5S5", "W15N25", "E25S5", "W0N0", "E0S0", "W10N0", "E20S10", "E0N10",
+            "W5N5", "E5S5", "W15N25", "E25S5", "W0N0", "E0S0", "W10N0", "E20S10", "E0N10", "W5N0",
+            "W0N5", "W42N0", "E31S40", "W11N10",
         ] {
             assert!(may_have_portals(room(name)), "{name}");
         }
-        for name in ["W5N0", "W0N5", "W4N5", "E6S5", "W1N1", "E9S9", "W11N10"] {
+        for name in ["W4N5", "E6S5", "W1N1", "E9S9", "W42N1", "E31S41"] {
             assert!(!may_have_portals(room(name)), "{name}");
         }
-    }
-
-    #[test]
-    fn portal_rooms_are_the_candidates_of_a_rect_row_by_row() {
-        let rect = RoomRect::new(room("W10N10"), room("E9S9"));
-        let rooms = portal_rooms(rect)
-            .map(|room| room.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            rooms,
-            [
-                "W10N10", "W0N10", "E0N10", "W5N5", "E5N5", "W10N0", "W0N0", "E0N0", "W10S0",
-                "W0S0", "E0S0", "W5S5", "E5S5"
-            ]
-        );
-        assert!(
-            rect.iter()
-                .filter(|&room| may_have_portals(room))
-                .eq(portal_rooms(rect))
-        );
-        let empty = RoomRect::new(room("W1N1"), room("W4N4"));
-        assert_eq!(portal_rooms(empty).count(), 0);
     }
 
     #[test]

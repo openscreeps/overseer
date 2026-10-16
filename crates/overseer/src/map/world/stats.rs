@@ -11,8 +11,8 @@ use overseer_net::core::api::{ApiError, RateLimit, endpoints};
 use overseer_net::rt::{BoxFuture, Instant, SystemTime, UNIX_EPOCH};
 use overseer_net::{Client, Error as NetError};
 
-use super::focus::Focus;
-use super::{Server, WorldEvent};
+use super::WorldEvent;
+use super::focus::{Budget, Focus, Server, Tier};
 use crate::map::{Map, MapStat, RoomCoord, RoomRect, RoomStat, WorldKnowledge};
 use crate::{Closed, Error, RoomSnapshot};
 
@@ -40,9 +40,8 @@ pub const STATS_IN_FLIGHT: usize = 2;
 /// this before.
 pub const STATS_VIEWED_FRESH: Duration = Duration::from_mins(1);
 
-/// Shortest pause between two requests on servers with rate limits, which also gathers rooms
-/// entering view meanwhile.
-const GAP: Duration = Duration::from_secs(1);
+/// Shortest wait after HTTP 429 with the endpoint's limit.
+const MIN_LIMIT_WAIT: Duration = Duration::from_secs(1);
 
 /// Wait after a request failed for another reason than the rate limit.
 const RETRY: Duration = Duration::from_secs(30);
@@ -276,19 +275,19 @@ impl Stats {
     }
 
     /// Requests the overviews of the viewed rooms due a refresh and the stale near rooms,
-    /// else of the stale far rooms (visible sectors first), when the budget allows (or
-    /// regardless of it while exempt, until the exemption ends; on a `server` without rate
-    /// limits, up to [`STATS_IN_FLIGHT`] requests without pause); returns when to plan again
-    /// (the budget allows the next request, an overview goes stale or the exemption ends).
-    /// Queues a [`WorldEvent::StatsPaused`] when the rate limit starts or stops holding back
-    /// wanted overviews (or its reset moves).
+    /// else of the stale far rooms (visible sectors first), when the endpoint's budget and the
+    /// client's request budget allow (the endpoint's budget not while exempt, until the
+    /// exemption ends; on a `server` without rate limits, up to [`STATS_IN_FLIGHT`] requests
+    /// at once); returns when to plan again (a budget allows the next request, an overview
+    /// goes stale or the exemption ends). Queues a [`WorldEvent::StatsPaused`] when the rate
+    /// limit starts or stops holding back wanted overviews (or its reset moves).
     pub(super) fn plan(
         &mut self,
         map: &Map,
         client: &Client,
         shard: Option<&str>,
         (now, focus, server): (Instant, &Focus, Server),
-        events: &mut VecDeque<WorldEvent>,
+        (budget, events): (&mut Budget<'_>, &mut VecDeque<WorldEvent>),
     ) -> Option<Instant> {
         self.server = server;
         let Some(rect) = self.rect else {
@@ -301,7 +300,7 @@ impl Stats {
         };
         let mut due = None;
         while self.fetches.len() < in_flight {
-            match self.start(map, client, shard, (now, rect, focus), events) {
+            match self.start(map, client, shard, (now, rect, focus), (budget, events)) {
                 Ok(()) => {}
                 Err(at) => {
                     due = at;
@@ -319,7 +318,7 @@ impl Stats {
         client: &Client,
         shard: Option<&str>,
         (now, rect, focus): (Instant, RoomRect, &Focus),
-        events: &mut VecDeque<WorldEvent>,
+        (budget, events): (&mut Budget<'_>, &mut VecDeque<WorldEvent>),
     ) -> Result<(), Option<Instant>> {
         let millis = epoch_millis();
         let fresh = u64::try_from(STATS_VIEWED_FRESH.as_millis()).unwrap_or(u64::MAX);
@@ -374,6 +373,12 @@ impl Stats {
             if ready > now {
                 return wake(ready);
             }
+            let tier = if viewed.is_empty() {
+                Tier::Visible
+            } else {
+                Tier::Viewed
+            };
+            budget.take(tier).map_err(Some)?;
             let sectors = STATS_BATCH_SECTORS - usize::from(!viewed.is_empty());
             let center = self.near_center.unwrap_or_else(|| focus.centre());
             viewed.extend(nearest_sectors(near, center, sectors, None));
@@ -391,7 +396,12 @@ impl Stats {
                 return wake(expires.map_or(ready, |earliest| earliest.min(ready)));
             }
             let visible = focus.visible().or(Some(rect));
-            nearest_sectors(far, focus.centre(), STATS_BATCH_SECTORS, visible)
+            let batch = nearest_sectors(far, focus.centre(), STATS_BATCH_SECTORS, visible);
+            let tier = batch
+                .first()
+                .map_or(Tier::Background, |&room| focus.tier(room));
+            budget.take(tier).map_err(Some)?;
+            batch
         };
         let names = batch.iter().map(ToString::to_string).collect::<Vec<_>>();
         let (map, shard) = (map.clone(), shard.map(str::to_owned));
@@ -437,7 +447,7 @@ impl Stats {
                 Err(Error::Closed) => return Err(Closed),
                 Err(Error::Net(NetError::Api(ApiError::RateLimited(limit)))) => {
                     let wait = match limit {
-                        Some(limit) => self.reset_at(limit, now).max(now + GAP),
+                        Some(limit) => self.reset_at(limit, now).max(now + MIN_LIMIT_WAIT),
                         None => now + GLOBAL_RETRY,
                     };
                     self.not_before = Some(wait);
@@ -496,21 +506,20 @@ impl Stats {
         }
     }
 
-    /// When the next request may go out after one succeeded: after [`GAP`] while at least half
-    /// of the window's requests are left, then spread evenly over the rest of the window, and
-    /// after the reset once none is left.
+    /// When the next request may go out after one succeeded, as far as the endpoint's budget
+    /// goes: at once while at least half of the window's requests are left, then spread
+    /// evenly over the rest of the window, and after the reset once none is left.
     fn pace(&mut self, client: &Client, now: Instant) -> Instant {
-        let gap = now + GAP;
         let Some(limit) = client.rate_limit::<endpoints::GameMapStats>() else {
-            return gap;
+            return now;
         };
         let reset = self.reset_at(limit, now);
         if limit.remaining == 0 {
-            reset.max(gap)
+            reset
         } else if u64::from(limit.remaining) * 2 < u64::from(limit.limit) {
-            (now + reset.saturating_duration_since(now) / limit.remaining).max(gap)
+            now + reset.saturating_duration_since(now) / limit.remaining
         } else {
-            gap
+            now
         }
     }
 

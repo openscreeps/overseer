@@ -1,4 +1,5 @@
-//! Portals on the world map: candidate rooms scanned nearest first within the subscription cap,
+//! Portals on the world map: every room scanned (usual portal rooms first, nearest first)
+//! within the subscription cap,
 //! destinations of the rooms with portals only (intra- and inter-shard), no rescans, seeding,
 //! expiry, live minimaps counting as scans, timed-out scans retried.
 //!
@@ -10,8 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use overseer::map::{
-    Interest, MINIMAP_CAP, PORTAL_GAP, PORTAL_SCAN_TIMEOUT, PORTAL_TTL, Portal, PortalDestination,
-    RoomCoord, RoomRect, WorldEvent, WorldMap, may_have_portals,
+    Interest, MINIMAP_CAP, PORTAL_SCAN_SETTLE, PORTAL_SCAN_TIMEOUT, PORTAL_TTL, Portal,
+    PortalDestination, RoomCoord, RoomRect, WorldEvent, WorldMap, may_have_portals,
 };
 use serde_json::Value;
 
@@ -269,22 +270,22 @@ fn portal(room_name: &str, expires_at: Option<u64>) -> Portal {
 }
 
 #[tokio::test]
-async fn scans_take_the_nearest_candidates_within_the_cap_and_fetch_only_rooms_with_portals() {
+async fn every_room_is_scanned_usual_rooms_first_within_the_cap_and_only_rooms_with_portals_fetched()
+ {
     let (server, overseer, websocket) = connect(routes(40, true)).await;
     let mut world = overseer.map().world(None).await.unwrap();
     let bounds = world.bounds();
     assert_eq!(bounds, rect("W19N19", "E19S19"));
-    let candidates = bounds
+    let rooms = bounds
         .iter()
-        .filter(|&room| may_have_portals(room))
         .map(|room| room.to_string())
         .collect::<BTreeSet<_>>();
-    assert_eq!(candidates.len(), 32);
-    // Live minimaps (never answered) leave room for 3 scans.
-    let minimaps = bounds
-        .iter()
-        .filter(|&room| !may_have_portals(room))
-        .take(MINIMAP_CAP - 3)
+    // Live minimaps (outside the world, never answered) leave room for 30 scans.
+    let minimaps = (0..MINIMAP_CAP - 30)
+        .map(|index| RoomCoord {
+            x: 100 + i32::try_from(index).unwrap(),
+            y: 100,
+        })
         .collect::<Vec<_>>();
     let mut socket = Socket::new(websocket, minimaps.iter().copied());
     let interest = Interest {
@@ -294,35 +295,56 @@ async fn scans_take_the_nearest_candidates_within_the_cap_and_fetch_only_rooms_w
     };
     world.set_interest(&interest);
     let progress = world.progress();
-    assert_eq!((progress.portals_scanned, progress.portals_wanted), (0, 32));
+    assert_eq!(
+        (progress.portals_scanned, progress.portals_wanted),
+        (0, rooms.len())
+    );
     assert!(!progress.is_complete());
 
-    let start = std::time::Instant::now();
-    let events = drive(&mut world, &mut socket, |events| count(events) == 32).await;
-    // Every candidate once, nearest the centre (W0N0) first, never more than the cap.
-    let scanned = socket.scanned();
-    assert_eq!(scanned[..3], ["W0N0", "E0N0", "W0S0"]);
-    assert_eq!(scanned.len(), 32);
+    let events = drive(&mut world, &mut socket, |events| {
+        count(events) == rooms.len()
+    })
+    .await;
+    // Every room once, never more than the cap: those where portals usually stand (sector
+    // centres and highways) first, nearest the centre (W0N0) first, then the others.
+    let scanned = socket
+        .scanned()
+        .into_iter()
+        .filter(|room| rooms.contains(*room))
+        .collect::<Vec<_>>();
+    assert_eq!(scanned[0], "W0N0");
+    assert_eq!(scanned.len(), rooms.len());
     assert_eq!(
         scanned
             .iter()
             .map(|&room| room.to_owned())
             .collect::<BTreeSet<_>>(),
-        candidates
+        rooms
+    );
+    let usual = scanned
+        .iter()
+        .filter(|&&name| may_have_portals(room(name)))
+        .count();
+    assert!(
+        scanned[..usual]
+            .iter()
+            .all(|&name| may_have_portals(room(name)))
     );
     assert_eq!(socket.most, MINIMAP_CAP);
     assert_eq!(count(&drive_for(&mut world, &mut socket).await), 0);
-    assert_eq!(socket.live.len(), MINIMAP_CAP - 3, "scans are released");
-    // One room-objects request per room with portals, nearest first, paced.
-    assert_eq!(room_objects(&server), ["W0N0", "W0S0", "E5S5"]);
-    assert!(start.elapsed() >= 2 * PORTAL_GAP);
+    assert_eq!(socket.live.len(), MINIMAP_CAP - 30, "scans are released");
+    // One room-objects request per room with portals (`W1N1` is no usual portal room), without
+    // pause on a server without rate limits.
+    let mut asked = room_objects(&server);
+    asked.sort();
+    assert_eq!(asked, ["E5S5", "W0N0", "W0S0", "W1N1"]);
 
     let found = portals(&events);
     let with_portals = found
         .iter()
         .filter(|(_, portals)| !portals.is_empty())
         .count();
-    assert_eq!(with_portals, 3);
+    assert_eq!(with_portals, 4);
     let inter_shard = world.portals(room("W0N0")).unwrap();
     assert_eq!(
         *inter_shard,
@@ -356,15 +378,19 @@ async fn scans_take_the_nearest_candidates_within_the_cap_and_fetch_only_rooms_w
         world.portals(room("E0N0")).as_deref(),
         Some(&[] as &[Portal])
     );
-    assert!(world.portals(room("W1N2")).is_none());
+    assert_eq!(
+        world.portals(room("W1N2")).as_deref(),
+        Some(&[] as &[Portal])
+    );
     let progress = world.progress();
     assert_eq!(
         (progress.portals_scanned, progress.portals_wanted),
-        (32, 32)
+        (rooms.len(), rooms.len())
     );
     assert!(progress.is_complete());
 
     // Known rooms are not scanned again, whatever the interest does.
+    let before = socket.scanned().len();
     world.set_interest(&Interest {
         portals: Some(rect("W19N19", "W10N10")),
         ..Interest::default()
@@ -372,8 +398,8 @@ async fn scans_take_the_nearest_candidates_within_the_cap_and_fetch_only_rooms_w
     world.set_interest(&interest);
     let events = drive_for(&mut world, &mut socket).await;
     assert_eq!(count(&events), 0);
-    assert_eq!(socket.scanned().len(), 32);
-    assert_eq!(room_objects(&server).len(), 3);
+    assert_eq!(socket.scanned().len(), before);
+    assert_eq!(room_objects(&server).len(), 4);
 }
 
 /// Paused time moves by seconds only: the socket's keep-alive (30 s) would drop a connection
@@ -452,56 +478,64 @@ async fn seeded_scans_are_used_until_stale_or_a_portal_becomes_unstable() {
 
 #[tokio::test]
 async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
-    // The 4 × 4 world W1N1..E1S1: its candidates are those of the interest.
+    // The 4 × 4 world W1N1..E1S1: every room is scanned.
     let (server, overseer, websocket) = connect(routes(4, true)).await;
     let mut world = overseer.map().world(None).await.unwrap();
     // Minimaps are answered by hand; E0S0's scan goes unanswered at first.
     let mut socket = Socket::new(websocket, [room("W0N0"), room("W1N1"), room("E0S0")]);
+    let rooms = world
+        .bounds()
+        .iter()
+        .map(|room| room.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(rooms.len(), 16);
     tokio::time::pause();
     world.set_interest(&Interest {
         portals: Some(rect("W2N2", "E1S1")),
         minimaps: vec![room("W0N0"), room("W1N1")],
         ..Interest::default()
     });
-    // W0N0's scan shares its minimap's subscription.
-    let events = drive(&mut world, &mut socket, |events| count(events) == 2).await;
+    // The scans of W0N0 and W1N1 share their minimaps' subscriptions. Destinations wait for
+    // the scans still in flight to settle.
+    let mut events = drive_for(&mut world, &mut socket).await;
+    tokio::time::advance(PORTAL_SCAN_SETTLE + Duration::from_millis(1)).await;
+    events.extend(
+        drive(&mut world, &mut socket, |more| {
+            count(more) + count(&events) == 13
+        })
+        .await,
+    );
     assert_eq!(
         socket
             .subscribed
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["W0N0", "W1N1", "E0N0", "W0S0", "E0S0"])
+        rooms.iter().map(String::as_str).collect::<BTreeSet<_>>()
     );
-    assert_eq!(socket.subscribed.len(), 5);
-    let mut found = portals(&events)
+    assert_eq!(socket.subscribed.len(), 16);
+    let found = portals(&events)
         .into_iter()
         .map(|(room, portals)| (room.to_string(), portals.len()))
         .collect::<Vec<_>>();
-    found.sort();
-    assert_eq!(found, [("E0N0".to_owned(), 0), ("W0S0".to_owned(), 1)]);
+    assert_eq!(found.len(), 13);
+    assert_eq!(
+        found
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .collect::<Vec<_>>(),
+        [&("W0S0".to_owned(), 1)]
+    );
 
-    // A candidate's minimap answers its scan; a minimap showing portals in any other room of
-    // the interest brings its destinations too.
+    // A room's minimap answers its scan; a minimap showing portals brings their destinations.
     socket.send("W0N0").await;
     socket.send("W1N1").await;
-    let events = drive(&mut world, &mut socket, |events| {
-        events
-            .iter()
-            .filter(|event| matches!(event, WorldEvent::Minimap(..)))
-            .count()
-            == 2
-    })
-    .await;
-    assert_eq!(count(&events), 0);
-    tokio::time::advance(PORTAL_GAP).await;
-    let mut events = drive(&mut world, &mut socket, |events| count(events) >= 1).await;
-    tokio::time::advance(PORTAL_GAP).await;
-    events.extend(drive(&mut world, &mut socket, |events| count(events) == 1).await);
-    let fetched = portals(&events)
+    let events = drive(&mut world, &mut socket, |events| count(events) == 2).await;
+    let mut fetched = portals(&events)
         .into_iter()
         .map(|(room, portals)| (room.to_string(), portals[0].destination.room))
         .collect::<Vec<_>>();
+    fetched.sort();
     assert_eq!(
         fetched,
         [
@@ -518,7 +552,7 @@ async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
     // The unanswered scan is released after its timeout and tried again 30 s later (the clock
     // moves by 30 s at most, within the socket's keep-alive).
     assert!(socket.live.contains("E0S0"));
-    tokio::time::advance(PORTAL_SCAN_TIMEOUT).await;
+    tokio::time::advance(PORTAL_SCAN_TIMEOUT + Duration::from_millis(1)).await;
     let before = socket.subscribed.len();
     let start = std::time::Instant::now();
     while socket.live.contains("E0S0") {
@@ -534,6 +568,9 @@ async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
     assert_eq!(socket.subscribed[before..], ["E0S0"]);
     assert_eq!(portals(&events)[0].0, room("E0S0"));
     let progress = world.progress();
-    assert_eq!((progress.portals_scanned, progress.portals_wanted), (4, 4));
+    assert_eq!(
+        (progress.portals_scanned, progress.portals_wanted),
+        (16, 16)
+    );
     assert_eq!(room_objects(&server).len(), 3);
 }
