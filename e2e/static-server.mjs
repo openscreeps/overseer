@@ -7,7 +7,7 @@ import { stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { extname, join, normalize, sep } from 'node:path';
 
-const root = normalize(process.env.OVERSEER_E2E_DIST ?? '../app/dist');
+const root = normalize(process.env.OVERSEER_E2E_DIST ?? '../target/e2e/dist');
 const port = Number(process.env.OVERSEER_E2E_DIRECT_PORT ?? 4610);
 const types = {
   '.css': 'text/css',

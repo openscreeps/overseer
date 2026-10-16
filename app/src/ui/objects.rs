@@ -6,6 +6,7 @@
 //! map selects its topmost object ([`topmost`]) in the list. A selected creep is followed as
 //! it moves.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use leptos::prelude::*;
@@ -420,12 +421,19 @@ pub fn ObjectsPanel(
             </div>
             <nav class="objects-list" aria-label="Objects">
                 {empty}
+                // Groups keyed by kind and rows by object id, updated in place: a walking creep
+                // must not rebuild its row every tick (a click or the focus on it would be lost).
                 <For
-                    each=move || listed.get().unwrap_or_default()
+                    each=move || {
+                        listed.with(|listed| {
+                            let groups = listed.iter().flatten();
+                            groups.map(|group| group.key.clone()).collect::<Vec<_>>()
+                        })
+                    }
                     key=Clone::clone
-                    let(group)
+                    let(key)
                 >
-                    <GroupView group selected=selection.id collapsed on_pick />
+                    <GroupView kind=key groups=listed selected=selection.id collapsed on_pick />
                 </For>
             </nav>
             <Inspector snapshot selected=selection.id user on_select />
@@ -436,13 +444,40 @@ pub fn ObjectsPanel(
 /// One kind's objects, collapsible (`collapsed` holds the collapsed kinds).
 #[component]
 fn GroupView(
-    group: Group,
+    /// The kind ([`Group::key`]).
+    kind: String,
+    /// Every group listed.
+    groups: Memo<Option<Vec<Group>>>,
     selected: RwSignal<Option<String>>,
     collapsed: RwSignal<Vec<String>>,
     on_pick: Callback<(String, u8, u8)>,
 ) -> impl IntoView {
-    let count = group.entries.len();
-    let key = StoredValue::new(group.key.clone());
+    let list_id = format!("objects-{kind}");
+    let key = StoredValue::new(kind);
+    let group = Memo::new(move |_| {
+        key.with_value(|key| {
+            groups.with(|groups| {
+                groups
+                    .iter()
+                    .flatten()
+                    .find(|group| group.key == *key)
+                    .cloned()
+            })
+        })
+    });
+    let entries = Memo::new(move |_| {
+        group.with(|group| {
+            group
+                .iter()
+                .flat_map(|group| &group.entries)
+                .map(|entry| (entry.id.clone(), entry.clone()))
+                .collect::<HashMap<_, _>>()
+        })
+    });
+    let label = group
+        .with_untracked(|group| group.as_ref().map(|group| group.label.clone()))
+        .unwrap_or_default();
+    let count = move || group.with(|group| group.as_ref().map_or(0, |group| group.entries.len()));
     let open = move || key.with_value(|key| !collapsed.with(|collapsed| collapsed.contains(key)));
     let toggle = move |_| {
         let key = key.get_value();
@@ -454,42 +489,15 @@ fn GroupView(
             }
         });
     };
-    let list_id = format!("objects-{}", group.key);
-    let items = group
-        .entries
-        .into_iter()
-        .map(|entry| {
-            let id = entry.id.clone();
-            let current = {
-                let id = id.clone();
-                move || selected.with(|selected| selected.as_deref() == Some(id.as_str()))
-            };
-            let (x, y) = (entry.x, entry.y);
-            // The user's own objects are marked by colour; others name their owner.
-            let owner = entry
-                .owner
-                .clone()
-                .filter(|_| !entry.own)
-                .map(|owner| view! { <span class="owner">{owner}</span> });
-            let label = format!("{} at {x},{y}", entry.title);
-            view! {
-                <li>
-                    <button
-                        type="button"
-                        class="object-row"
-                        class:own=entry.own
-                        aria-current=move || current().then_some("true")
-                        aria-label=label
-                        on:click=move |_| on_pick.run((id.clone(), x, y))
-                    >
-                        <span class="name">{entry.title}</span>
-                        {owner}
-                        <span class="pos">{format!("{x},{y}")}</span>
-                    </button>
-                </li>
-            }
+    let ids = move || {
+        group.with(|group| {
+            group
+                .iter()
+                .flat_map(|group| &group.entries)
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
         })
-        .collect_view();
+    };
     view! {
         <section class="object-group">
             <h3>
@@ -501,12 +509,69 @@ fn GroupView(
                     on:click=toggle
                 >
                     <span class="chevron" aria-hidden="true"><Icon kind=IconKind::ChevronDown /></span>
-                    <span class="group-label">{group.label}</span>
+                    <span class="group-label">{label}</span>
                     <span class="count">{count}</span>
                 </button>
             </h3>
-            <ul id=list_id hidden=move || !open()>{items}</ul>
+            <ul id=list_id hidden=move || !open()>
+                <For each=ids key=Clone::clone let(id)>
+                    <ObjectRow id entries selected on_pick />
+                </For>
+            </ul>
         </section>
+    }
+}
+
+/// One object's row, updated in place as the object changes (a creep walks).
+#[component]
+fn ObjectRow(
+    /// The object id.
+    id: String,
+    /// The group's objects by id.
+    entries: Memo<HashMap<String, Entry>>,
+    selected: RwSignal<Option<String>>,
+    on_pick: Callback<(String, u8, u8)>,
+) -> impl IntoView {
+    let id = StoredValue::new(id);
+    let entry =
+        Memo::new(move |_| id.with_value(|id| entries.with(|entries| entries.get(id).cloned())));
+    let text = move |field: fn(&Entry) -> String| {
+        move || entry.with(|entry| entry.as_ref().map(field).unwrap_or_default())
+    };
+    let current = move || {
+        id.with_value(|id| selected.with(|selected| selected.as_deref() == Some(id.as_str())))
+    };
+    let own = move || entry.with(|entry| entry.as_ref().is_some_and(|entry| entry.own));
+    // The user's own objects are marked by colour; others name their owner.
+    let owner = move || {
+        let owner = entry.with(|entry| {
+            let other = entry.as_ref().filter(|entry| !entry.own);
+            other.and_then(|entry| entry.owner.clone())
+        });
+        owner.map(|owner| view! { <span class="owner">{owner}</span> })
+    };
+    // Where the object is now, not where it was when the row was drawn.
+    let pick = move |_| {
+        let place = entry.with_untracked(|entry| entry.as_ref().map(|entry| (entry.x, entry.y)));
+        if let Some((x, y)) = place {
+            on_pick.run((id.get_value(), x, y));
+        }
+    };
+    view! {
+        <li>
+            <button
+                type="button"
+                class="object-row"
+                class:own=own
+                aria-current=move || current().then_some("true")
+                aria-label=text(|entry| format!("{} at {},{}", entry.title, entry.x, entry.y))
+                on:click=pick
+            >
+                <span class="name">{text(|entry| entry.title.clone())}</span>
+                {owner}
+                <span class="pos">{text(|entry| format!("{},{}", entry.x, entry.y))}</span>
+            </button>
+        </li>
     }
 }
 

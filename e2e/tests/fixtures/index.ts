@@ -5,7 +5,9 @@
 //   same-origin in front of the game server. Each Playwright project sets it and its baseURL.
 // - `server` (worker): the disposable game server ({@link Server}).
 // - `account`: a fresh registered account without a spawn.
-// - `player`: a fresh account with a spawn and a small bot running (creeps move).
+// - `player`: a fresh account with a spawn and a small bot running (creeps move), removed with
+//   everything it owns once the test's browser context has closed.
+// - `cleanup`: work for after the test's browser context has closed (the app never sees it).
 // - `signedInPage`: `page` already signed in as `player`, on the world of the server.
 // - `context`/`page`: with `OVERSEER_E2E_SLOW=<factor>` (see `playwright.config.ts`), every page
 //   of the context, popups included, runs its CPU `<factor>` times slower and waits
@@ -16,7 +18,7 @@
 // and token in localStorage) and opens the server's world; the UI then resumes it.
 
 import { test as base, expect, type Page } from '@playwright/test';
-import { createPlayer, register, Session, liveServer } from './api';
+import { createPlayer, register, removeUser, Session, liveServer } from './api';
 import type { Account, Player, Server } from './api';
 
 export * from './api';
@@ -105,13 +107,26 @@ export async function signIn(page: Page, server: Server, account: Account): Prom
 }
 
 export const test = base.extend<
-  { account: Account; player: Player; signedInPage: Page },
+  {
+    account: Account;
+    player: Player;
+    signedInPage: Page;
+    cleanup: (() => Promise<void>)[];
+  },
   { mode: Mode; server: Server }
 >({
   mode: ['direct', { option: true, scope: 'worker' }],
   // eslint-disable-next-line no-empty-pattern -- Playwright fixtures destructure their dependencies.
   server: [async ({}, use) => use(liveServer()), { scope: 'worker' }],
-  context: async ({ context }, use) => {
+  // Set up before the browser context (which depends on it), so torn down after it closed.
+  // eslint-disable-next-line no-empty-pattern -- Playwright fixtures destructure their dependencies.
+  cleanup: async ({}, use) => {
+    const tasks: (() => Promise<void>)[] = [];
+    await use(tasks);
+    for (const task of tasks.reverse()) await task();
+  },
+  context: async ({ cleanup, context }, use) => {
+    void cleanup;
     if (SLOWDOWN > 1) {
       // Popups too; a page closed before the session opens needs no slowing down.
       context.on('page', (page) => void slowDown(page).catch(() => {}));
@@ -123,7 +138,11 @@ export const test = base.extend<
     await use(page);
   },
   account: async ({ server }, use) => use(await register(server.url)),
-  player: async ({ server }, use) => use(await createPlayer(server.url)),
+  player: async ({ server, cleanup }, use) => {
+    const player = await createPlayer(server.url);
+    cleanup.push(() => removeUser(server, player.id));
+    await use(player);
+  },
   signedInPage: async ({ page, server, player }, use) => {
     await signIn(page, server, player);
     await use(page);

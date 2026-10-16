@@ -16,7 +16,9 @@ const ci = Boolean(process.env.CI);
 const slow = Number(process.env.OVERSEER_E2E_SLOW ?? 0) > 1;
 const directPort = Number(process.env.OVERSEER_E2E_DIRECT_PORT ?? 4610);
 const proxyPort = Number(process.env.OVERSEER_E2E_PROXY_PORT ?? 4611);
-const dist = process.env.OVERSEER_E2E_DIST ?? resolve(__dirname, '../app/dist');
+// `cargo xtask e2e` builds the app into its own `target/e2e/dist`: `app/dist` is the development
+// build `trunk serve` rewrites on every change.
+const dist = process.env.OVERSEER_E2E_DIST ?? resolve(__dirname, '../target/e2e/dist');
 const proxy =
   process.env.OVERSEER_E2E_PROXY ??
   resolve(__dirname, '../target/e2e/overseer-proxy' + (process.platform === 'win32' ? '.exe' : ''));

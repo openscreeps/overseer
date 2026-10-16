@@ -70,8 +70,9 @@ test.describe('rate limits', () => {
 
     const status = page.getByRole('contentinfo', { name: 'Status' });
     const loading = status.getByTitle('Loading the world');
+    // Owners pause; the portal scan (no map stats) goes on beside them.
     await expect(loading).toContainText(
-      /Owners 0 \/ [\d\u202f]+ · waiting for the rate limit, resumes in (30|31) min$/,
+      /Owners 0 \/ [\d\u202f]+ · Portals [\d\u202f]+ \/ [\d\u202f]+ · waiting for the rate limit, resumes in (30|31) min$/,
       { timeout: 30_000 },
     );
     // Private servers have no reset page.

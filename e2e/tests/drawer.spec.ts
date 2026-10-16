@@ -31,14 +31,16 @@ interface TilePointCanvas extends HTMLCanvasElement {
 
 /**
  * Clicks tile `(x, y)` of `room` on the canvas `testid`, once the camera stands still (two
- * reads of the tile's place 150 ms apart agree), checking that the canvas takes the click.
+ * reads of the tile's place 150 ms apart agree) with the tile on the canvas (before the camera
+ * sets off towards a room, it stands still elsewhere), checking that the canvas takes the
+ * click. One round trip per try: on a slow page each one waits for its busy main thread.
  */
 async function clickTile(page: Page, testid: string, room: string, x: number, y: number) {
   const canvas = page.getByTestId(testid);
-  const settled: { point?: [number, number] | null } = {};
+  const settled: { at?: { left: number; top: number; hit?: string | null } | null } = {};
   await expect
     .poll(async () => {
-      settled.point = await canvas.evaluate(
+      settled.at = await canvas.evaluate(
         async (element, [room, x, y]) => {
           const hook = element as TilePointCanvas;
           const before = hook.overseerTilePoint?.(room, x, y);
@@ -46,24 +48,24 @@ async function clickTile(page: Page, testid: string, room: string, x: number, y:
           setTimeout(wait.resolve, 150);
           await wait.promise;
           const after = hook.overseerTilePoint?.(room, x, y);
-          const still =
-            before && after && Math.hypot(before[0] - after[0], before[1] - after[1]) < 0.5;
-          return still ? after : null;
+          if (!before || !after) return null;
+          if (Math.hypot(before[0] - after[0], before[1] - after[1]) >= 0.5) return null;
+          const box = element.getBoundingClientRect();
+          if (after[0] < 0 || after[1] < 0 || after[0] > box.width || after[1] > box.height) {
+            return null;
+          }
+          const [left, top] = [box.left + after[0], box.top + after[1]];
+          const hit = document.elementFromPoint(left, top)?.getAttribute('data-testid');
+          return { left, top, hit };
         },
         [room, x, y] as const,
       );
-      return settled.point != null;
+      return settled.at != null;
     })
     .toBe(true);
-  const box = await canvas.boundingBox();
-  if (!box || !settled.point) throw new Error(`${testid} shows no tile ${x},${y}`);
-  const [left, top] = [box.x + settled.point[0], box.y + settled.point[1]];
-  const hit = await page.evaluate(
-    ([left, top]) => document.elementFromPoint(left, top)?.getAttribute('data-testid'),
-    [left, top] as const,
-  );
-  expect(hit, `tile ${x},${y} is on the canvas, uncovered`).toBe(testid);
-  await page.mouse.click(left, top);
+  if (!settled.at) throw new Error(`${testid} shows no tile ${x},${y}`);
+  expect(settled.at.hit, `tile ${x},${y} is on the canvas, uncovered`).toBe(testid);
+  await page.mouse.click(settled.at.left, settled.at.top);
 }
 
 /** The tile in an object row's name (`… at X,Y`). */
@@ -121,11 +123,16 @@ test.describe('drawer', () => {
     for (const field of ['Hits', 'Ticks to live', 'Body']) {
       await expect(inspector.getByRole('term').filter({ hasText: field })).toBeVisible();
     }
+    // Both read at once: the creep walks every tick, and two separate reads of a slow page
+    // straddle a step more often than not.
     await expect
-      .poll(async () => {
-        const position = await inspector.locator('.inspector-sub .pos').textContent();
-        return position === (await mapTile(page));
-      })
+      .poll(() =>
+        page.evaluate(() => {
+          const position = document.querySelector('.inspector-sub .pos')?.textContent;
+          const map = document.querySelector('[data-testid="world-map"]')?.getAttribute('aria-label');
+          return position != null && position === map?.match(/tile (\d+,\d+) selected/)?.[1];
+        }),
+      )
       .toBe(true);
 
     // The filter narrows the list.

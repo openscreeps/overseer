@@ -181,6 +181,20 @@ export async function createPlayer(url: string): Promise<Player> {
   throw new Error('no room accepts a spawn');
 }
 
+/**
+ * Removes the user `id` with everything they own (`user-remove` of the server's admin API): the
+ * room is free again and the bot stops. Every bot runs each tick until then, so players that
+ * pile up slow the world down (requests take seconds) and fill its rooms.
+ */
+export async function removeUser(server: Server, id: string): Promise<void> {
+  const reply = await fetch(new URL('admin', server.url), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${server.adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'user-remove', userId: id }),
+  });
+  if (!reply.ok) throw new ApiError(`admin user-remove: HTTP ${reply.status} ${await reply.text()}`);
+}
+
 /** Rooms with status `normal` that nobody owns. */
 async function freeRooms(session: Session): Promise<string[]> {
   const rooms: string[] = [];

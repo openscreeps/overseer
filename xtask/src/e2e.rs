@@ -4,9 +4,11 @@
 //! 1. Finds the server checkout (`OPENSCREEPS_SERVER_DIR`, else `../server`; `npm ci` when it
 //!    has no `node_modules`).
 //! 2. Builds what the selected suites need before any world exists: the web app
-//!    (`trunk build --release` in `app/`, skipped with `--no-build`), the `overseer-proxy`
-//!    binary (copied to `target/e2e/`) and the live test targets; installs the Playwright
-//!    project (`npm ci` in `e2e/` when needed, `npx playwright install chromium`).
+//!    (`trunk build --release` of `app/` into `target/e2e/dist/`, its own bundle: `app/dist/`
+//!    is the development build `trunk serve` rewrites on every change; skipped with
+//!    `--no-build`), the `overseer-proxy` binary (copied to `target/e2e/`) and the live test
+//!    targets; installs the Playwright project (`npm ci` in `e2e/` when needed,
+//!    `npx playwright install chromium`).
 //! 3. For each suite, creates a fresh world in a temporary directory (`init --username e2e`),
 //!    starts it on a free port with fast ticks and waits until `GET /api/version` answers.
 //!    Players and their bots slow a world down as they add up, so the suites do not share one.
@@ -173,7 +175,7 @@ impl Drop for TeardownOnDrop {
 fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), Error> {
     let server = server_dir(root)?;
     let target = target_dir(root);
-    let dist = root.join("app").join("dist");
+    let dist = target.join("e2e").join("dist");
     let e2e = root.join("e2e");
     let proxy = target
         .join("e2e")
@@ -181,7 +183,7 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
     let mut prepared = summary.step("server dependencies", || npm_ci_if_missing(&server));
     if options.ui {
         if options.build {
-            prepared = prepared && summary.step("web app (trunk build)", || build_app(root));
+            prepared = prepared && summary.step("web app (trunk build)", || build_app(root, &dist));
         } else if dist.join("index.html").is_file() {
             summary.skip("web app (trunk build)", "--no-build");
         } else {
@@ -297,12 +299,14 @@ fn npm_ci_if_missing(dir: &Path) -> Result<(), Error> {
     )
 }
 
-/// `trunk build --release` in `app/`. Trunk rejects the `NO_COLOR=1` some shells export, so it
-/// runs without it.
-fn build_app(root: &Path) -> Result<(), Error> {
+/// `trunk build --release` of `app/` into `dist`. Trunk rejects the `NO_COLOR=1` some shells
+/// export, so it runs without it.
+fn build_app(root: &Path, dist: &Path) -> Result<(), Error> {
     status(
         Command::new("trunk")
-            .args(["build", "--release"])
+            .args(["build", "--release", "--dist"])
+            // Trunk runs in `app/`: a relative `CARGO_TARGET_DIR` is the workspace's.
+            .arg(std::path::absolute(dist)?)
             .env_remove("NO_COLOR")
             .current_dir(root.join("app")),
         "trunk build",
