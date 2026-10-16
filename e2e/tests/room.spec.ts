@@ -46,6 +46,8 @@ test.describe('room', () => {
       const info = roomInfo(page, home.room);
       await expect(info).toContainText(/Status\s*Open/);
       await expect(info).toContainText(new RegExp(`Owner\\s*${user.username} · level 1`));
+      await expect(info.getByRole('progressbar', { name: 'Progress to level 2' })).toBeVisible();
+      await expect(info).toContainText(/Upgrade\s*[\d\s]+ \/ 200/);
       await expect(
         info.getByRole('progressbar', { name: 'Energy available for spawning' }),
       ).toBeVisible();

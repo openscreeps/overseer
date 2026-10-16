@@ -162,6 +162,11 @@ test.describe('objects', () => {
       for (const meter of meters) {
         await expect(panel.getByRole('progressbar', { name: meter })).toBeVisible();
       }
+      // A controller below level 8 shows its way to the next level.
+      const level = Number(name.match(/^Controller · level (\d+)/)?.[1] ?? 0);
+      if (level >= 1 && level <= 7) {
+        await expect(panel.getByRole('progressbar', { name: 'Progress' })).toBeVisible();
+      }
       // The map selects the object's tile.
       await expect.poll(() => mapTile(page)).toBe(`${x},${y}`);
     }
@@ -171,11 +176,6 @@ test.describe('objects', () => {
     signedInPage: page,
     home,
   }) => {
-    test.fixme(
-      true,
-      'App bug: every room snapshot rebuilds the whole inspector, closing Raw JSON within a ' +
-        'tick (app/src/ui/inspector.rs, `Inspector`).',
-    );
     await openObjects(page, home.path, home.room);
     const list = objectList(page);
     const panel = inspector(page);

@@ -133,11 +133,6 @@ test.describe('drawer', () => {
   });
 
   test('says what to do while no room is in focus', async ({ signedInPage: page, home }) => {
-    test.fixme(
-      true,
-      'App bug: "Show the whole world" sets no room, then the next frame (still at the Room ' +
-        'level while the camera zooms out) focuses the centre room again (app/src/ui/world.rs).',
-    );
     await openRoom(page, home.path, home.room);
     const world = page.getByRole('navigation', { name: 'Breadcrumb' }).getByRole('button');
     await world.click();
