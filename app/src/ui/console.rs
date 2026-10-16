@@ -269,9 +269,13 @@ pub fn ConsolePanel(
                 .collect::<Vec<_>>()
         })
     });
+    // On the next frame, unless the user paused meanwhile (a scroll up between a new line and
+    // this frame must not be undone).
     let to_bottom = move || {
         request_animation_frame(move || {
-            if let Some(output) = output.get_untracked() {
+            if following.get_untracked()
+                && let Some(output) = output.get_untracked()
+            {
                 output.set_scroll_top(output.scroll_height());
             }
         });
