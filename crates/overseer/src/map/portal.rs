@@ -26,8 +26,9 @@ pub struct Portal {
     pub x: u8,
     /// Its tile.
     pub y: u8,
-    /// Where it leads.
-    pub destination: PortalDestination,
+    /// Where it leads; `None` while only the room's map view showed it (the destination is
+    /// pending, see [`WorldMap`](super::WorldMap)).
+    pub destination: Option<PortalDestination>,
     /// When it becomes unstable (`unstableDate`), in milliseconds since the Unix epoch: from
     /// then on it decays and disappears `PORTAL_DECAY` (30 000) ticks later. `None` for
     /// permanent portals and those already decaying.
@@ -37,6 +38,19 @@ pub struct Portal {
 }
 
 impl Portal {
+    /// A portal at a tile of `room`'s map view whose destination is not known yet.
+    #[must_use]
+    pub const fn pending(room: RoomCoord, x: u8, y: u8) -> Self {
+        Self {
+            room,
+            x,
+            y,
+            destination: None,
+            expires_at: None,
+            decay_time: None,
+        }
+    }
+
     /// The portal of a room object; `None` for other objects and portals whose room,
     /// destination or tile does not parse.
     #[must_use]
@@ -57,12 +71,12 @@ impl Portal {
             room: portal.room.parse().ok()?,
             x: tile(portal.x)?,
             y: tile(portal.y)?,
-            destination: PortalDestination {
+            destination: Some(PortalDestination {
                 room: destination.room.parse().ok()?,
                 shard: destination.shard.clone(),
                 x: destination.x.and_then(tile),
                 y: destination.y.and_then(tile),
-            },
+            }),
             expires_at: portal.unstable_date,
             decay_time: portal.decay_time,
         })
@@ -147,12 +161,12 @@ mod tests {
                     room: room("W15N15"),
                     x: 36,
                     y: 4,
-                    destination: PortalDestination {
+                    destination: Some(PortalDestination {
                         room: room("E25N5"),
                         shard: None,
                         x: Some(32),
                         y: Some(22),
-                    },
+                    }),
                     expires_at: Some(1_792_273_804_461),
                     decay_time: None,
                 },
@@ -160,12 +174,12 @@ mod tests {
                     room: room("W10N10"),
                     x: 18,
                     y: 8,
-                    destination: PortalDestination {
+                    destination: Some(PortalDestination {
                         room: room("W10N10"),
                         shard: Some("shard2".to_owned()),
                         x: None,
                         y: None,
-                    },
+                    }),
                     expires_at: None,
                     decay_time: None,
                 },
@@ -173,12 +187,12 @@ mod tests {
                     room: room("W5N5"),
                     x: 10,
                     y: 11,
-                    destination: PortalDestination {
+                    destination: Some(PortalDestination {
                         room: room("W5N5"),
                         shard: None,
                         x: Some(1),
                         y: Some(2),
-                    },
+                    }),
                     expires_at: None,
                     decay_time: Some(123_456),
                 },

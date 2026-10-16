@@ -22,6 +22,7 @@
 //! thin beaded line through their portals, and their links are drawn only when few are
 //! in view or one of their rooms has the focus (see `Overlay::update`).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::Vec2;
@@ -72,6 +73,8 @@ struct RoomPortals {
     links: Vec<(RoomCoord, Vec2, Option<Vec2>)>,
     /// Each portal's tile, and whether it leads to another shard.
     tiles: Vec<(u8, u8, bool)>,
+    /// Some portals' destinations are not known yet.
+    pending: bool,
 }
 
 impl RoomPortals {
@@ -81,35 +84,43 @@ impl RoomPortals {
             .iter()
             .map(|portal| tile_centre(room, portal.x, portal.y).distance(centre))
             .fold(0.0, f32::max);
-        let shards: BTreeSet<String> = portals
-            .iter()
-            .filter_map(|portal| portal.destination.shard.clone())
+        let known = || {
+            portals
+                .iter()
+                .filter_map(|portal| Some((portal, portal.destination.as_ref()?)))
+        };
+        let shards: BTreeSet<String> = known()
+            .filter_map(|(_, destination)| destination.shard.clone())
             .collect();
-        let destinations: BTreeSet<RoomCoord> = portals
-            .iter()
-            .filter(|portal| portal.destination.shard.is_none() && portal.destination.room != room)
-            .map(|portal| portal.destination.room)
+        let destinations: BTreeSet<RoomCoord> = known()
+            .filter(|(_, destination)| destination.shard.is_none() && destination.room != room)
+            .map(|(_, destination)| destination.room)
             .collect();
         let links = destinations
             .into_iter()
-            .filter_map(|destination| {
+            .filter_map(|target| {
                 let leading = || {
-                    portals.iter().filter(move |portal| {
-                        portal.destination.shard.is_none() && portal.destination.room == destination
+                    known().filter(move |(_, destination)| {
+                        destination.shard.is_none() && destination.room == target
                     })
                 };
-                let from = mean_centre(room, leading().map(|portal| (portal.x, portal.y)))?;
+                let from = mean_centre(room, leading().map(|(portal, _)| (portal.x, portal.y)))?;
                 let to = mean_centre(
-                    destination,
-                    leading()
-                        .filter_map(|portal| Some((portal.destination.x?, portal.destination.y?))),
+                    target,
+                    leading().filter_map(|(_, destination)| Some((destination.x?, destination.y?))),
                 );
-                Some((destination, from, to))
+                Some((target, from, to))
             })
             .collect();
         let tiles = portals
             .iter()
-            .map(|portal| (portal.x, portal.y, portal.destination.shard.is_some()))
+            .map(|portal| {
+                let other_shard = portal
+                    .destination
+                    .as_ref()
+                    .is_some_and(|destination| destination.shard.is_some());
+                (portal.x, portal.y, other_shard)
+            })
             .collect();
         Some(Self {
             centre,
@@ -117,6 +128,7 @@ impl RoomPortals {
             shards: shards.into_iter().collect(),
             links,
             tiles,
+            pending: portals.iter().any(|portal| portal.destination.is_none()),
         })
     }
 
@@ -239,10 +251,24 @@ impl Link {
     }
 }
 
+/// A run of rooms with portals, as far as asking for destinations goes.
+#[derive(Debug)]
+struct RunInfo {
+    /// Its rooms whose destinations are pending.
+    pending: Vec<RoomCoord>,
+    /// Its rooms' bounds.
+    rect: RoomRect,
+    /// Whether it is a wall.
+    wall: bool,
+}
+
 /// The portals of every room.
 #[derive(Debug, Default)]
 pub struct Portals {
     rooms: BTreeMap<RoomCoord, RoomPortals>,
+    /// The runs, as far as asking for destinations goes; `None` until asked for since the
+    /// portals changed.
+    runs: RefCell<Option<Vec<RunInfo>>>,
 }
 
 impl Portals {
@@ -262,6 +288,7 @@ impl Portals {
             Some(portals) => self.rooms.insert(room, portals),
             None => self.rooms.remove(&room),
         };
+        *self.runs.get_mut() = None;
         (true, names_changed)
     }
 
@@ -269,6 +296,73 @@ impl Portals {
     #[cfg(test)]
     pub fn contains(&self, room: RoomCoord) -> bool {
         self.rooms.contains_key(&room)
+    }
+
+    /// The rooms whose pending destinations the map needs now, most important first: those
+    /// of `focus` (the hovered and the selected room), then the rooms of compact runs that
+    /// meet `visible` (their arcs and shard names always show), nearest its centre first,
+    /// then those of walls that meet `visible` while at most `walls` do (their arcs show
+    /// then).
+    pub fn wanted(
+        &self,
+        visible: RoomRect,
+        focus: [Option<RoomCoord>; 2],
+        walls: usize,
+    ) -> Vec<RoomCoord> {
+        let mut cache = self.runs.borrow_mut();
+        let runs = cache.get_or_insert_with(|| self.run_infos());
+        let pending = |room: &RoomCoord| self.rooms.get(room).is_some_and(|room| room.pending);
+        let mut wanted: Vec<RoomCoord> = focus.into_iter().flatten().filter(pending).collect();
+        let centre = visible.center();
+        let near = |rect: &RoomRect| {
+            let (dx, dy) = (
+                i64::from(rect.center().x - centre.x),
+                i64::from(rect.center().y - centre.y),
+            );
+            dx * dx + dy * dy
+        };
+        let mut compact: Vec<&RunInfo> = runs
+            .iter()
+            .filter(|run| !run.wall && visible.intersection(&run.rect).is_some())
+            .collect();
+        compact.sort_by_key(|run| near(&run.rect));
+        let in_view: Vec<&RunInfo> = runs
+            .iter()
+            .filter(|run| run.wall && visible.intersection(&run.rect).is_some())
+            .collect();
+        let walls = if in_view.len() <= walls {
+            in_view
+        } else {
+            Vec::new()
+        };
+        for run in compact.into_iter().chain(walls) {
+            for &room in &run.pending {
+                if !wanted.contains(&room) {
+                    wanted.push(room);
+                }
+            }
+        }
+        wanted
+    }
+
+    /// Every run with its pending rooms, bounds and kind.
+    fn run_infos(&self) -> Vec<RunInfo> {
+        self.runs()
+            .into_iter()
+            .filter_map(|run| {
+                let wall = self.run_mark(&run)?.wall;
+                let (first, last) = (*run.first()?, *run.last()?);
+                Some(RunInfo {
+                    pending: run
+                        .iter()
+                        .copied()
+                        .filter(|room| self.rooms.get(room).is_some_and(|room| room.pending))
+                        .collect(),
+                    rect: RoomRect::new(first, last),
+                    wall,
+                })
+            })
+            .collect()
     }
 
     /// Whether the portals of rooms `a` and `b` (both with portals) lead the same way.

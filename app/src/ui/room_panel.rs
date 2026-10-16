@@ -79,6 +79,7 @@ impl RoomData {
                 minimaps: Vec::new(),
                 detail: vec![room],
                 portals: Some(RoomRect::new(room, room)),
+                portal_destinations: vec![room],
             });
             subscription.set_value(Some(watched));
         });
@@ -545,7 +546,8 @@ pub fn RoomInfo(
 }
 
 /// The portals' rows: each destination (seen from `shard`, the shard shown) with how many
-/// portal tiles lead there, when they decay, and "Go to" when `go_to` takes the user there.
+/// portal tiles lead there, when they decay, and "Go to" when `go_to` takes the user there;
+/// `→ …` for the portals whose destination is not known yet.
 fn portal_rows(
     portals: &[Portal],
     shard: Option<&str>,
@@ -554,7 +556,7 @@ fn portal_rows(
     let rows = destinations(portals)
         .into_iter()
         .map(|found| {
-            let name = destination_text(&found.to, shard);
+            let name = destination_text(found.to.as_ref(), shard);
             let mut notes = vec![counted(found.tiles, "tile", "tiles")];
             if let Some(at) = found.expires_at {
                 notes.push(format!("decays from {}", date(at)));
@@ -562,8 +564,10 @@ fn portal_rows(
             if let Some(tick) = found.decay_time {
                 notes.push(format!("gone at tick {tick}"));
             }
-            let destination = found.to;
-            let button = go_to.map(|go_to| {
+            if found.to.is_none() {
+                notes.push("destination loading".to_owned());
+            }
+            let button = found.to.zip(go_to).map(|(destination, go_to)| {
                 view! {
                     <button
                         type="button"

@@ -89,7 +89,8 @@ pub struct Surface {
 /// When the feed last heard from the viewer.
 #[derive(Clone, Copy, Default)]
 struct InterestClock {
-    sent: Option<(CameraState, (f32, f32, f32))>,
+    /// The camera, canvas size and [`Viewer::interest_revision`] of the latest send.
+    sent: Option<(CameraState, (f32, f32, f32), u64)>,
     at: f64,
     trailing: bool,
 }
@@ -207,11 +208,14 @@ impl Surface {
         }
     }
 
-    /// Sends the interest when the camera or size changed, at most every
-    /// [`INTEREST_INTERVAL_MS`]; schedules a trailing send otherwise. A camera that moved
-    /// under a hovering pointer updates the hover.
+    /// Sends the interest when the camera, size or [`Viewer::interest_revision`] changed
+    /// (the hovered or selected room, portals arriving whose destinations the map wants), at
+    /// most every [`INTEREST_INTERVAL_MS`]; schedules a trailing send otherwise. A camera
+    /// that moved under a hovering pointer updates the hover.
     fn after_frame(self) {
-        let Some(camera) = self.with_viewer_quiet(Viewer::camera) else {
+        let Some((camera, revision)) =
+            self.with_viewer_quiet(|viewer| (viewer.camera(), viewer.interest_revision()))
+        else {
             return;
         };
         if self.pointer.get_value().is_some() && self.hover.get_value().1 != Some(camera) {
@@ -220,7 +224,7 @@ impl Surface {
         let Some(clock) = self.interest.try_get_value() else {
             return;
         };
-        let current = (camera, self.size.get_value());
+        let current = (camera, self.size.get_value(), revision);
         if clock.sent == Some(current) || clock.trailing {
             return;
         }
@@ -300,18 +304,22 @@ impl Surface {
             .try_get_value()
             .flatten()
             .and_then(|hooks| hooks.interest.clone());
-        let Some(Some((camera, interest))) = self.viewer.try_with_value(|viewer| {
+        let Some(Some((camera, revision, interest))) = self.viewer.try_with_value(|viewer| {
             viewer.as_ref().map(|viewer| {
                 if let Some(hook) = &hook {
                     hook(viewer);
                 }
-                (viewer.camera(), viewer.interest())
+                (
+                    viewer.camera(),
+                    viewer.interest_revision(),
+                    viewer.interest(),
+                )
             })
         }) else {
             return;
         };
         self.interest.set_value(InterestClock {
-            sent: Some((camera, self.size.get_value())),
+            sent: Some((camera, self.size.get_value(), revision)),
             at: now(),
             trailing: false,
         });

@@ -226,16 +226,34 @@ impl Overlay {
         }
     }
 
-    /// Sets a room's portals.
-    pub fn set_portals(&mut self, room: RoomCoord, portals: &[Portal]) {
+    /// Sets a room's portals; returns whether anything changed.
+    pub fn set_portals(&mut self, room: RoomCoord, portals: &[Portal]) -> bool {
         let (changed, names_changed) = self.portals.set(room, portals);
         self.portals_stale |= changed;
         self.labels_stale |= names_changed;
+        changed
     }
 
     /// Sets the hovered room.
     pub const fn set_hover(&mut self, room: Option<RoomCoord>) {
         self.hover = room;
+    }
+
+    /// The hovered room.
+    pub const fn hovered(&self) -> Option<RoomCoord> {
+        self.hover
+    }
+
+    /// The rooms whose pending portal destinations the map needs now, most important first:
+    /// the hovered and the `selected` room, the compact runs meeting `visible`, then the walls
+    /// meeting it while their arcs show (at most [`WALL_LINKS_IN_VIEW`] in view).
+    pub fn wanted_destinations(
+        &self,
+        visible: RoomRect,
+        selected: Option<RoomCoord>,
+    ) -> Vec<RoomCoord> {
+        self.portals
+            .wanted(visible, [self.hover, selected], WALL_LINKS_IN_VIEW)
     }
 
     /// The outline of the hovered room, when it is in `bounds`.

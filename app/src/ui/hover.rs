@@ -115,7 +115,10 @@ pub fn tip(
         }
     }
     for found in destinations(portals.unwrap_or_default()) {
-        rows.push(format!("Portal → {}", destination_text(&found.to, shard)));
+        rows.push(format!(
+            "Portal → {}",
+            destination_text(found.to.as_ref(), shard)
+        ));
     }
     Tip {
         room: room.to_string(),
@@ -289,12 +292,12 @@ mod tests {
             room: room("W5N5"),
             x: 20,
             y: 20,
-            destination: PortalDestination {
+            destination: Some(PortalDestination {
                 room: room(to),
                 shard: shard.map(str::to_owned),
                 x: None,
                 y: None,
-            },
+            }),
             expires_at: None,
             decay_time: None,
         }
@@ -306,6 +309,7 @@ mod tests {
             portal("W0N0", None),
             portal("W0N0", None),
             portal("E10S20", Some("shard2")),
+            Portal::pending(room("W5N5"), 30, 30),
         ];
         assert_eq!(
             tip(
@@ -325,6 +329,8 @@ mod tests {
                     "Safe mode".to_owned(),
                     "Portal → W0N0".to_owned(),
                     "Portal → shard2 E10S20".to_owned(),
+                    // A destination not fetched yet.
+                    "Portal → …".to_owned(),
                 ],
             }
         );

@@ -2,7 +2,7 @@
 //! pointer gestures, level of detail, interest and picking.
 
 use glam::{Vec2, Vec3};
-use overseer::map::{Interest, RoomCoord, RoomRect};
+use overseer::map::{Interest, Portal, RoomCoord, RoomRect};
 
 use crate::camera::{self, Camera, room_at, room_centre};
 use crate::mesh::{Instance, WALL_HEIGHT, linear};
@@ -144,6 +144,9 @@ pub struct View {
     moved: bool,
     flight: Option<Flight>,
     selected: Option<(RoomCoord, u8, u8)>,
+    /// Bumped whenever the interest may change without the camera moving: the hovered or
+    /// selected room, or portals arriving.
+    interest_revision: u64,
     /// Pan inertia and eased wheel zoom are on.
     smooth: bool,
     /// The latest positions of a panning pointer (time, CSS point), newest last.
@@ -238,6 +241,7 @@ impl View {
             moved: false,
             flight: None,
             selected: None,
+            interest_revision: 0,
             smooth: true,
             trail: [(f64::NEG_INFINITY, Vec2::ZERO); TRAIL],
             glide: None,
@@ -583,6 +587,7 @@ impl View {
                 minimaps: vec![room],
                 detail: vec![room],
                 portals: Some(RoomRect::new(room, room)),
+                portal_destinations: Vec::new(),
             };
         }
         let lod = self.lod();
@@ -590,6 +595,10 @@ impl View {
         let mut interest = Interest {
             stats: Some(visible),
             portals: Some(visible),
+            portal_destinations: self
+                .world
+                .overlay
+                .wanted_destinations(visible, self.selected.map(|(room, ..)| room)),
             ..Interest::default()
         };
         // Terrain for every room in view at every level of detail: rooms stay resident once
@@ -645,13 +654,31 @@ impl View {
     }
 
     /// Highlights a tile.
-    pub const fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
+    pub fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
+        if tile.map(|(room, ..)| room) != self.selected.map(|(room, ..)| room) {
+            self.interest_revision += 1;
+        }
         self.selected = tile;
     }
 
     /// Outlines a room (`None`: none).
-    pub const fn set_hover(&mut self, room: Option<RoomCoord>) {
+    pub fn set_hover(&mut self, room: Option<RoomCoord>) {
+        if self.world.overlay.hovered() != room {
+            self.interest_revision += 1;
+        }
         self.world.overlay.set_hover(room);
+    }
+
+    /// Sets a room's portals.
+    pub fn set_portals(&mut self, room: RoomCoord, portals: &[Portal]) {
+        if self.world.overlay.set_portals(room, portals) {
+            self.interest_revision += 1;
+        }
+    }
+
+    /// Bumped whenever [`Self::interest`] may change without the camera moving.
+    pub const fn interest_revision(&self) -> u64 {
+        self.interest_revision
     }
 
     /// What the overlay's labels and portal arcs are made for.

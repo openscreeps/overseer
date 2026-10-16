@@ -21,13 +21,15 @@ struct Record {
     portals: Vec<Entry>,
 }
 
-/// A portal of a [`Record`]: its tile, and its destination's room, shard and tile, when it
-/// starts to decay (`exp`, milliseconds since the epoch) and the tick it disappears.
+/// A portal of a [`Record`]: its tile, and its destination's room (none: pending), shard and
+/// tile, when it starts to decay (`exp`, milliseconds since the epoch) and the tick it
+/// disappears.
 #[derive(Serialize, Deserialize)]
 struct Entry {
     x: u8,
     y: u8,
-    to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shard: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,15 +50,18 @@ pub fn portals_json(portals: &[Portal], scanned_at: u64) -> String {
         at: scanned_at,
         portals: portals
             .iter()
-            .map(|portal| Entry {
-                x: portal.x,
-                y: portal.y,
-                to: portal.destination.room.to_string(),
-                shard: portal.destination.shard.clone(),
-                tx: portal.destination.x,
-                ty: portal.destination.y,
-                exp: portal.expires_at,
-                decay: portal.decay_time,
+            .map(|portal| {
+                let destination = portal.destination.as_ref();
+                Entry {
+                    x: portal.x,
+                    y: portal.y,
+                    to: destination.map(|destination| destination.room.to_string()),
+                    shard: destination.and_then(|destination| destination.shard.clone()),
+                    tx: destination.and_then(|destination| destination.x),
+                    ty: destination.and_then(|destination| destination.y),
+                    exp: portal.expires_at,
+                    decay: portal.decay_time,
+                }
             })
             .collect(),
     };
@@ -78,16 +83,20 @@ pub fn parse_portals(record: &str, room: RoomCoord) -> Option<(Vec<Portal>, u64)
             if tiles.into_iter().flatten().any(|tile| tile >= 50) {
                 return None;
             }
+            let destination = match entry.to {
+                Some(to) => Some(PortalDestination {
+                    room: to.parse().ok()?,
+                    shard: entry.shard,
+                    x: entry.tx,
+                    y: entry.ty,
+                }),
+                None => None,
+            };
             Some(Portal {
                 room,
                 x: entry.x,
                 y: entry.y,
-                destination: PortalDestination {
-                    room: entry.to.parse().ok()?,
-                    shard: entry.shard,
-                    x: entry.tx,
-                    y: entry.ty,
-                },
+                destination,
                 expires_at: entry.exp,
                 decay_time: entry.decay,
             })
@@ -96,11 +105,12 @@ pub fn parse_portals(record: &str, room: RoomCoord) -> Option<(Vec<Portal>, u64)
     Some((portals, record.at))
 }
 
-/// Where a room's portals lead: one entry per destination room (and shard).
+/// Where a room's portals lead: one entry per destination room (and shard), and one for the
+/// portals whose destination is not known yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Destination {
-    /// Where they lead; the tile is the first portal's.
-    pub to: PortalDestination,
+    /// Where they lead (the tile is the first portal's); `None`: not known yet.
+    pub to: Option<PortalDestination>,
     /// Portal tiles leading there.
     pub tiles: usize,
     /// The earliest time one of them starts to decay, in milliseconds since the epoch.
@@ -113,21 +123,23 @@ pub struct Destination {
 pub fn destinations(portals: &[Portal]) -> Vec<Destination> {
     let mut found: Vec<Destination> = Vec::new();
     for portal in portals {
-        let target = &portal.destination;
+        let target = portal.destination.as_ref();
         let earliest = |a: Option<u64>, b: Option<u64>| match (a, b) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        if let Some(entry) = found
-            .iter_mut()
-            .find(|entry| entry.to.room == target.room && entry.to.shard == target.shard)
-        {
+        let same = |entry: &Destination| match (&entry.to, target) {
+            (Some(to), Some(target)) => to.room == target.room && to.shard == target.shard,
+            (None, None) => true,
+            _ => false,
+        };
+        if let Some(entry) = found.iter_mut().find(|entry| same(entry)) {
             entry.tiles += 1;
             entry.expires_at = earliest(entry.expires_at, portal.expires_at);
             entry.decay_time = earliest(entry.decay_time, portal.decay_time);
         } else {
             found.push(Destination {
-                to: target.clone(),
+                to: target.cloned(),
                 tiles: 1,
                 expires_at: portal.expires_at,
                 decay_time: portal.decay_time,
@@ -138,8 +150,11 @@ pub fn destinations(portals: &[Portal]) -> Vec<Destination> {
 }
 
 /// A destination in words, seen from `shard` (the shard shown; `None` on single-world
-/// servers): `W10N5`, or `shard1 W10N5` on another shard.
-pub fn destination_text(destination: &PortalDestination, shard: Option<&str>) -> String {
+/// servers): `W10N5`, or `shard1 W10N5` on another shard; `…` while not known yet.
+pub fn destination_text(destination: Option<&PortalDestination>, shard: Option<&str>) -> String {
+    let Some(destination) = destination else {
+        return "…".to_owned();
+    };
     match destination.shard.as_deref() {
         Some(other) if Some(other) != shard => format!("{other} {}", destination.room),
         _ => destination.room.to_string(),
@@ -180,12 +195,12 @@ mod tests {
             room: room("W5N5"),
             x,
             y: 20,
-            destination: PortalDestination {
+            destination: Some(PortalDestination {
                 room: room(to),
                 shard: shard.map(str::to_owned),
                 x: shard.is_none().then_some(x + 2),
                 y: shard.is_none().then_some(22),
-            },
+            }),
             expires_at: None,
             decay_time: None,
         }
@@ -196,7 +211,11 @@ mod tests {
         let mut decaying = portal(11, "W0N0", None);
         decaying.expires_at = Some(1_700_000_000_000);
         decaying.decay_time = Some(123_456);
-        let portals = vec![decaying, portal(12, "E10S20", Some("shard2"))];
+        let portals = vec![
+            decaying,
+            portal(12, "E10S20", Some("shard2")),
+            Portal::pending(room("W5N5"), 13, 20),
+        ];
         let record = portals_json(&portals, 1_700_000_000_123);
         assert_eq!(
             parse_portals(&record, room("W5N5")),
@@ -218,7 +237,7 @@ mod tests {
             r#"{"v":2,"at":1,"portals":[]}"#,
             r#"{"v":1,"portals":[]}"#,
             r#"{"v":1,"at":1}"#,
-            r#"{"v":1,"at":1,"portals":[{"x":1,"y":2}]}"#,
+            r#"{"v":1,"at":1,"portals":[{"y":2}]}"#,
             r#"{"v":1,"at":1,"portals":[{"x":1,"y":2,"to":"nowhere"}]}"#,
             r#"{"v":1,"at":1,"portals":[{"x":50,"y":2,"to":"W1N1"}]}"#,
             r#"{"v":1,"at":1,"portals":[{"x":1,"y":2,"to":"W1N1","shard":3}]}"#,
@@ -239,6 +258,8 @@ mod tests {
             later,
             portal(14, "W0N0", Some("shard1")),
             sooner,
+            Portal::pending(room("W5N5"), 15, 20),
+            Portal::pending(room("W5N5"), 16, 20),
         ]);
         assert_eq!(
             found,
@@ -255,15 +276,23 @@ mod tests {
                     expires_at: None,
                     decay_time: None,
                 },
+                // Pending destinations: one entry, shown as pending.
+                Destination {
+                    to: None,
+                    tiles: 2,
+                    expires_at: None,
+                    decay_time: None,
+                },
             ]
         );
+        assert_eq!(destination_text(None, None), "…");
     }
 
     #[test]
     fn go_to_switches_shards_only_for_another_shard() {
-        let here = portal(11, "W0N0", None).destination;
-        let there = portal(11, "E10S20", Some("shard2")).destination;
-        let same = portal(11, "E10S20", Some("shard3")).destination;
+        let here = portal(11, "W0N0", None).destination.unwrap();
+        let there = portal(11, "E10S20", Some("shard2")).destination.unwrap();
+        let same = portal(11, "E10S20", Some("shard3")).destination.unwrap();
         assert_eq!(GoTo::of(&here, Some("shard3")), GoTo::Room(room("W0N0")));
         assert_eq!(GoTo::of(&here, None), GoTo::Room(room("W0N0")));
         assert_eq!(
@@ -271,8 +300,11 @@ mod tests {
             GoTo::Shard("shard2".to_owned(), room("E10S20"))
         );
         assert_eq!(GoTo::of(&same, Some("shard3")), GoTo::Room(room("E10S20")));
-        assert_eq!(destination_text(&here, Some("shard3")), "W0N0");
-        assert_eq!(destination_text(&there, Some("shard3")), "shard2 E10S20");
-        assert_eq!(destination_text(&same, Some("shard3")), "E10S20");
+        assert_eq!(destination_text(Some(&here), Some("shard3")), "W0N0");
+        assert_eq!(
+            destination_text(Some(&there), Some("shard3")),
+            "shard2 E10S20"
+        );
+        assert_eq!(destination_text(Some(&same), Some("shard3")), "E10S20");
     }
 }

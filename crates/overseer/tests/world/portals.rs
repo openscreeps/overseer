@@ -1,12 +1,12 @@
 //! Portals on the world map: every room scanned (usual portal rooms first, nearest first)
-//! within the subscription cap,
-//! destinations of the rooms with portals only (intra- and inter-shard), no rescans, seeding,
-//! expiry, live minimaps counting as scans, timed-out scans retried.
+//! within the subscription cap, reported with pending destinations, then the destinations of
+//! the rooms with portals only (intra- and inter-shard), no rescans, seeding, expiry by room
+//! kind, live minimaps counting as scans, timed-out scans retried.
 //!
 //! Tests on paused time drive [`WorldMap::next`] by yielding (see [`drive`]): a runtime that
 //! never idles never advances paused time on its own, so only `tokio::time::advance` moves it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -252,18 +252,32 @@ pub(crate) fn count(events: &[WorldEvent]) -> usize {
     portals(events).len()
 }
 
+/// The latest portals reported of each room.
+fn latest(events: &[WorldEvent]) -> BTreeMap<RoomCoord, Arc<[Portal]>> {
+    portals(events).into_iter().collect()
+}
+
+/// The rooms whose latest report has every destination (or no portal): a room with portals
+/// is reported with pending destinations when scanned, then again with its destinations.
+pub(crate) fn settled(events: &[WorldEvent]) -> usize {
+    latest(events)
+        .values()
+        .filter(|portals| portals.iter().all(|portal| portal.destination.is_some()))
+        .count()
+}
+
 /// A portal of `room` leading to `E5S5`.
 fn portal(room_name: &str, expires_at: Option<u64>) -> Portal {
     Portal {
         room: room(room_name),
         x: 5,
         y: 6,
-        destination: PortalDestination {
+        destination: Some(PortalDestination {
             room: room("E5S5"),
             shard: None,
             x: Some(1),
             y: Some(2),
-        },
+        }),
         expires_at,
         decay_time: None,
     }
@@ -302,7 +316,7 @@ async fn every_room_is_scanned_usual_rooms_first_within_the_cap_and_only_rooms_w
     assert!(!progress.is_complete());
 
     let events = drive(&mut world, &mut socket, |events| {
-        count(events) == rooms.len()
+        settled(events) == rooms.len()
     })
     .await;
     // Every room once, never more than the cap: those where portals usually stand (sector
@@ -339,12 +353,11 @@ async fn every_room_is_scanned_usual_rooms_first_within_the_cap_and_only_rooms_w
     asked.sort();
     assert_eq!(asked, ["E5S5", "W0N0", "W0S0", "W1N1"]);
 
-    let found = portals(&events);
-    let with_portals = found
-        .iter()
-        .filter(|(_, portals)| !portals.is_empty())
-        .count();
+    let found = latest(&events);
+    let with_portals = found.values().filter(|portals| !portals.is_empty()).count();
     assert_eq!(with_portals, 4);
+    // Each room with portals is reported at most twice: scanned (pending), then fetched.
+    assert!(count(&events) <= rooms.len() + with_portals);
     let inter_shard = world.portals(room("W0N0")).unwrap();
     assert_eq!(
         *inter_shard,
@@ -352,12 +365,12 @@ async fn every_room_is_scanned_usual_rooms_first_within_the_cap_and_only_rooms_w
             room: room("W0N0"),
             x: 20,
             y: 21,
-            destination: PortalDestination {
+            destination: Some(PortalDestination {
                 room: room("W0N0"),
                 shard: Some("shard1".to_owned()),
                 x: None,
                 y: None,
-            },
+            }),
             expires_at: None,
             decay_time: None,
         }]
@@ -366,12 +379,12 @@ async fn every_room_is_scanned_usual_rooms_first_within_the_cap_and_only_rooms_w
     assert_eq!(intra_shard.len(), 2);
     assert_eq!(
         intra_shard[1].destination,
-        PortalDestination {
+        Some(PortalDestination {
             room: room("W15N15"),
             shard: None,
             x: Some(10),
             y: Some(12),
-        }
+        })
     );
     assert_eq!(intra_shard[0].expires_at, Some(4_102_444_800_000));
     assert_eq!(
@@ -459,16 +472,17 @@ async fn seeded_scans_are_used_until_stale_or_a_portal_becomes_unstable() {
     // The unstable portal's room once it becomes unstable.
     advance(&mut world, &mut socket, Duration::from_secs(9)).await;
     advance(&mut world, &mut socket, Duration::from_secs(2)).await;
-    let events = drive(&mut world, &mut socket, |events| count(events) == 1).await;
+    // Reported pending when scanned, then with its destinations.
+    let events = drive(&mut world, &mut socket, |events| settled(events) == 1).await;
     assert_eq!(socket.scanned()[2..], ["W0S0"]);
     assert_eq!(room_objects(&server), ["W0S0"]);
-    let (room_name, portals) = portals(&events).remove(0);
+    let (room_name, portals) = latest(&events).pop_first().unwrap();
     assert_eq!((room_name, portals[0].expires_at), (room("W0S0"), None));
 
     // The day-old seed once a day old.
     advance(&mut world, &mut socket, Duration::from_secs(8)).await;
     advance(&mut world, &mut socket, Duration::from_secs(2)).await;
-    drive(&mut world, &mut socket, |events| count(events) == 1).await;
+    drive(&mut world, &mut socket, |events| settled(events) == 1).await;
     assert_eq!(socket.scanned()[3..], ["W0N0"]);
     assert_eq!(room_objects(&server), ["W0S0", "W0N0"]);
     // Fresh scans are not repeated.
@@ -501,7 +515,7 @@ async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
     tokio::time::advance(PORTAL_SCAN_SETTLE + Duration::from_millis(1)).await;
     events.extend(
         drive(&mut world, &mut socket, |more| {
-            count(more) + count(&events) == 13
+            settled(&[events.as_slice(), more].concat()) == 13
         })
         .await,
     );
@@ -514,7 +528,7 @@ async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
         rooms.iter().map(String::as_str).collect::<BTreeSet<_>>()
     );
     assert_eq!(socket.subscribed.len(), 16);
-    let found = portals(&events)
+    let found = latest(&events)
         .into_iter()
         .map(|(room, portals)| (room.to_string(), portals.len()))
         .collect::<Vec<_>>();
@@ -530,10 +544,13 @@ async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
     // A room's minimap answers its scan; a minimap showing portals brings their destinations.
     socket.send("W0N0").await;
     socket.send("W1N1").await;
-    let events = drive(&mut world, &mut socket, |events| count(events) == 2).await;
-    let mut fetched = portals(&events)
+    let events = drive(&mut world, &mut socket, |events| settled(events) == 2).await;
+    let mut fetched = latest(&events)
         .into_iter()
-        .map(|(room, portals)| (room.to_string(), portals[0].destination.room))
+        .map(|(room, portals)| {
+            let destination = portals[0].destination.as_ref().unwrap();
+            (room.to_string(), destination.room)
+        })
         .collect::<Vec<_>>();
     fetched.sort();
     assert_eq!(
@@ -573,4 +590,43 @@ async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
         (16, 16)
     );
     assert_eq!(room_objects(&server).len(), 3);
+}
+
+#[tokio::test]
+async fn rooms_where_portals_rarely_stand_stay_without_them_for_a_week() {
+    // The 4 × 4 world W1N1..E1S1, every room scanned without portals 25 hours ago.
+    let (_server, overseer, websocket) = connect(routes(4, false)).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let mut socket = Socket::new(websocket, []);
+    tokio::time::pause();
+    let rooms = world.bounds().iter().collect::<Vec<_>>();
+    for &room in &rooms {
+        world.insert_portals(room, Arc::from([]), epoch_millis() - 25 * 3_600_000);
+    }
+    world.set_interest(&Interest {
+        portals: Some(world.bounds()),
+        ..Interest::default()
+    });
+    // Highway rooms (and the sector centres) are scanned again after a day; the four rooms
+    // that are neither keep their absence of portals for a week.
+    let highways = rooms
+        .iter()
+        .filter(|&&room| may_have_portals(room))
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(highways.len(), 12);
+    drive(&mut world, &mut socket, |events| {
+        latest(events).len() == highways.len()
+    })
+    .await;
+    drive_for(&mut world, &mut socket).await;
+    assert_eq!(
+        socket
+            .scanned()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>(),
+        highways
+    );
+    assert_eq!(socket.scanned().len(), highways.len());
 }

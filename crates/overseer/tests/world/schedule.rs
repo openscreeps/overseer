@@ -15,7 +15,7 @@ use overseer::map::{
 };
 use serde_json::Value;
 
-use crate::portals::{Socket, count, drive as drive_portals, room_objects};
+use crate::portals::{Socket, drive as drive_portals, room_objects, settled};
 use crate::server::{self, Request, Response, Server, Ws};
 use crate::{PATIENCE, connect, receive, terrain_document};
 
@@ -428,7 +428,13 @@ async fn live_rooms_update_overviews_and_portals_at_once_and_win_over_older_resp
     // Its portals with their destinations, without any request.
     let portals = knowledge.portals(viewed).unwrap();
     assert_eq!(portals.len(), 1);
-    assert_eq!(portals[0].destination.room, room("E0S0"));
+    assert_eq!(
+        portals[0]
+            .destination
+            .as_ref()
+            .map(|destination| destination.room),
+        Some(room("E0S0"))
+    );
     assert_eq!(world.portals(viewed), Some(portals));
     assert_eq!(room_objects(&server), [] as [String; 0]);
     assert!(revisions.has_changed().unwrap());
@@ -605,7 +611,7 @@ async fn portal_destinations_go_together_on_servers_without_rate_limits() {
         ..Interest::default()
     });
     // The clock never moves: the four rooms with portals are asked without pauses.
-    drive_portals(&mut world, &mut socket, |events| count(events) == 1600).await;
+    drive_portals(&mut world, &mut socket, |events| settled(events) == 1600).await;
     let mut asked = room_objects(&server);
     asked.sort();
     assert_eq!(asked, ["E5S5", "W0N0", "W0S0", "W1N1"]);
@@ -625,6 +631,7 @@ async fn no_room_is_asked_twice_whatever_the_interests() {
         detail: vec![room("W1N1"), room("W1N1")],
         portals: None,
         minimaps: Vec::new(),
+        portal_destinations: Vec::new(),
     };
     let there = Interest {
         stats: Some(rect("E3S3", "E8S8")),
@@ -632,6 +639,7 @@ async fn no_room_is_asked_twice_whatever_the_interests() {
         detail: vec![room("E5S5")],
         portals: None,
         minimaps: Vec::new(),
+        portal_destinations: Vec::new(),
     };
     for interest in [&here, &there, &here, &there, &here] {
         world.set_interest(interest);
@@ -696,9 +704,11 @@ async fn a_failing_portal_room_backs_off_alone() {
         portals: Some(world.bounds()),
         ..Interest::default()
     });
-    // Every other room is known although the nearest room with portals fails.
-    drive_portals(&mut world, &mut socket, |events| count(events) == 1599).await;
-    assert!(world.portals(room("W0N0")).is_none());
+    // Every other room is known although the nearest room with portals fails, which keeps
+    // its pending destinations.
+    drive_portals(&mut world, &mut socket, |events| settled(events) == 1599).await;
+    let failing = world.portals(room("W0N0")).unwrap();
+    assert!(failing.iter().all(|portal| portal.destination.is_none()));
     assert!(world.portals(room("E5S5")).is_some() && world.portals(room("W0S0")).is_some());
     let asked = |name: &str| {
         room_objects(&server)

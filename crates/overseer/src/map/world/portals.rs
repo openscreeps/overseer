@@ -19,7 +19,7 @@ use overseer_net::core::socket::{Channel, Payload};
 use overseer_net::rt::{self, BoxFuture, Instant};
 use overseer_net::{Client, Error as NetError};
 
-use super::focus::{Budget, Focus, Server, Tier};
+use super::focus::{Budget, Focus, Server, Tier, distance};
 use super::stats::epoch_millis;
 use super::terrain::{Terrains, reset_at};
 use super::{MINIMAP_CAP, WorldEvent};
@@ -33,6 +33,11 @@ use crate::{Closed, Error, Overseer, RoomSnapshot, Watch};
 /// again, unless one of them becomes unstable earlier ([`Portal::expires_at`]).
 pub const PORTAL_TTL: Duration = Duration::from_hours(24);
 
+/// How long the absence of portals is used in a room where portals rarely stand (neither a
+/// sector centre nor a highway, see [`may_have_portals`]): such rooms rarely change, and a
+/// live minimap or live room corrects them at once.
+pub const PORTAL_QUIET_TTL: Duration = Duration::from_hours(24 * 7);
+
 /// How long the portals of a room with a decaying portal ([`Portal::decay_time`]) are used:
 /// its end is counted in game ticks, so the room is looked at again within the hour.
 pub const PORTAL_DECAYING_TTL: Duration = Duration::from_hours(1);
@@ -45,9 +50,9 @@ pub const PORTAL_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// to reach the request budget at screeps.com's latencies (0.3 to 2 s each).
 pub const PORTAL_IN_FLIGHT: usize = 6;
 
-/// Most scan subscriptions of background rooms at once, so that the rooms coming into view
-/// always find free subscriptions.
-pub const PORTAL_BACKGROUND_SCANS: usize = 64;
+/// Of [`PORTAL_IN_FLIGHT`], the most background room-objects requests: the rest is kept for
+/// the destinations wanted now (a hovered room), which then go out at once.
+pub const PORTAL_BACKGROUND_IN_FLIGHT: usize = 4;
 
 /// How long a scan subscription waits for the room's first `roomMap2` update before it is
 /// released; the room is scanned again 30 s later. Servers answer a subscription as soon as
@@ -107,7 +112,6 @@ struct Known {
 /// A scan subscription waiting for the room's first update.
 struct Scan {
     room: RoomCoord,
-    background: bool,
     /// When it was subscribed, in milliseconds since the Unix epoch.
     started_at: u64,
     watch: Watch<RoomMap>,
@@ -154,6 +158,9 @@ pub(super) struct Portals {
     scans: Vec<Scan>,
     /// Rooms whose map view shows portals, waiting for their destinations.
     found: HashSet<RoomCoord>,
+    /// Rooms whose destinations are wanted now, most important first (see
+    /// [`Self::set_wanted`]).
+    wanted: Vec<RoomCoord>,
     /// The portal tiles of each room's latest map view that showed some.
     tiles: HashMap<RoomCoord, Vec<Tile>>,
     /// The fetched or live portals of the shard (not inferred ones) by the room and tile they
@@ -184,6 +191,7 @@ impl Portals {
             minimaps: 0,
             scans: Vec::new(),
             found: HashSet::new(),
+            wanted: Vec::new(),
             tiles: HashMap::new(),
             incoming: HashMap::new(),
             retry: HashMap::new(),
@@ -238,13 +246,30 @@ impl Portals {
         self.minimaps = count;
     }
 
+    /// Makes `rooms` (most important first) the rooms whose destinations are wanted now:
+    /// they are fetched before all others but the viewed rooms. Returns whether they changed.
+    pub(super) fn set_wanted(&mut self, rooms: &[RoomCoord]) -> bool {
+        if self.wanted == rooms {
+            return false;
+        }
+        rooms.clone_into(&mut self.wanted);
+        true
+    }
+
+    /// How many rooms with portals wait for their destinations.
+    pub(super) fn pending(&self) -> usize {
+        self.found.len()
+    }
+
     /// Whether the known portals of `room` were inferred from the rooms they lead to.
     pub(super) fn is_inferred(&self, room: RoomCoord) -> bool {
         self.known.get(&room).is_some_and(|known| known.inferred)
     }
 
     /// Seeds the portals of `room` scanned at `scanned_at` (milliseconds since the Unix epoch)
-    /// from the app's cache. Ignored when a newer scan is known.
+    /// from the app's cache. Ignored when a newer scan is known. Seeded portals whose
+    /// destination is pending are fetched (or inferred) in the background; the others tell
+    /// the portals they lead to.
     pub(super) fn insert(&mut self, room: RoomCoord, portals: Arc<[Portal]>, scanned_at: u64) {
         if self
             .known
@@ -253,7 +278,7 @@ impl Portals {
         {
             return;
         }
-        let stale_at = stale_at(&portals, scanned_at, Instant::now(), epoch_millis());
+        let stale_at = stale_at(room, &portals, scanned_at, Instant::now(), epoch_millis());
         self.known.insert(
             room,
             Known {
@@ -264,6 +289,25 @@ impl Portals {
                 stale_at,
             },
         );
+        if portals.iter().any(|portal| portal.destination.is_none()) {
+            self.tiles.insert(
+                room,
+                portals.iter().map(|portal| (portal.x, portal.y)).collect(),
+            );
+            self.found.insert(room);
+        } else {
+            self.found.remove(&room);
+            for portal in portals.iter() {
+                if let Some((to, tile)) = lands(portal) {
+                    self.incoming
+                        .entry(to)
+                        .or_default()
+                        .entry(tile)
+                        .or_default()
+                        .push(portal.clone());
+                }
+            }
+        }
         self.knowledge.set_portals(room, portals);
         self.check_at(stale_at);
         self.progress.set(None);
@@ -318,7 +362,7 @@ impl Portals {
                 known.stale_at =
                     known
                         .stale_at
-                        .max(stale_at(&portals, millis, Instant::now(), millis));
+                        .max(stale_at(room, &portals, millis, Instant::now(), millis));
             }
             _ => self.record(room, portals, Some(millis), events),
         }
@@ -356,14 +400,11 @@ impl Portals {
 
     /// Releases the scans that timed out, subscribes the rooms of the world neither known
     /// (fresh), absent (`terrain`), scanned nor waiting for their destinations, by tier
-    /// (viewed, then those of the wanted rooms or visible, then the background, at most
-    /// [`PORTAL_BACKGROUND_SCANS`] at once), the rooms where portals usually stand
-    /// ([`may_have_portals`]) first but for viewed ones, nearest the centre first, as far as
-    /// [`MINIMAP_CAP`] allows; then requests the destinations of the rooms with portals (by
-    /// tier, then those with the most portal tiles their paired rooms do not tell, nearest
-    /// first), up to [`PORTAL_IN_FLIGHT`] at once, as far as the request `budget` and the
-    /// endpoint's rate limit allow. Returns when to plan again (a scan times out, a retry or
-    /// a request is due, or portals go stale).
+    /// (viewed, then those of the wanted rooms or visible, then the background), the rooms
+    /// where portals usually stand ([`may_have_portals`]) first but for viewed ones, nearest
+    /// the centre first, as far as [`MINIMAP_CAP`] allows; then requests destinations
+    /// ([`Self::fetch`]). Returns when to plan again (a scan times out, a retry or a request
+    /// is due, or portals go stale).
     pub(super) fn plan(
         &mut self,
         map: &Map,
@@ -399,16 +440,10 @@ impl Portals {
             due.at(at);
         }
         let mut free = MINIMAP_CAP.saturating_sub(self.minimaps + self.scans.len());
-        let mut background = self.scans.iter().filter(|scan| scan.background).count();
         let millis = epoch_millis();
         while free > 0
-            && let Some(&room) = self.queue.front()
+            && let Some(room) = self.queue.pop_front()
         {
-            let is_background = tier(room) == Tier::Background;
-            if is_background && background >= PORTAL_BACKGROUND_SCANS {
-                break;
-            }
-            self.queue.pop_front();
             let fresh = self
                 .known
                 .get(&room)
@@ -431,7 +466,6 @@ impl Portals {
             });
             self.scans.push(Scan {
                 room,
-                background: is_background,
                 started_at: millis,
                 watch,
                 deadline: now + PORTAL_SCAN_TIMEOUT,
@@ -439,88 +473,141 @@ impl Portals {
             });
             due.at(now + PORTAL_SCAN_TIMEOUT);
             free -= 1;
-            background += usize::from(is_background);
         }
-        // Rooms still being scanned where portals usually stand may be the partners of rooms
-        // found: their fetches wait for those scans to settle, so that a fetch can tell its
-        // partner instead of racing it.
-        let settling = self
-            .scans
-            .iter()
-            .filter(|scan| scan.settled > now && may_have_portals(scan.room))
-            .map(|scan| (tier(scan.room), scan.settled))
-            .collect::<Vec<_>>();
-        let mut waiting = Due::default();
-        let mut queue = self
-            .found
-            .iter()
-            .copied()
-            .filter(|&room| !self.fetches.iter().any(|fetch| fetch.room == room))
-            .filter(|&room| {
-                if let Some(failure) = self.failed.get(&room)
-                    && failure.until > now
-                {
-                    waiting.at(failure.until);
-                    return false;
-                }
-                let tier = tier(room);
-                let mut held = false;
-                for &(scanning, settled) in &settling {
-                    if tier != Tier::Viewed && scanning <= tier {
-                        waiting.at(settled);
-                        held = true;
-                    }
-                }
-                !held
-            })
-            .collect::<Vec<_>>();
-        queue.sort_unstable_by_key(|&room| {
-            let (tier, rank, _, distance, y, x) = key(room);
-            (tier, rank, Reverse(self.untold(room)), distance, y, x)
-        });
-        let mut queue = queue.into_iter();
-        while self.fetches.len() < PORTAL_IN_FLIGHT {
-            let Some(room) = queue.next() else {
-                if let Some(at) = waiting.0 {
-                    due.at(at);
-                }
-                break;
-            };
-            // A room whose portal tiles have the shape of those of a room being fetched may
-            // be its partner: it waits for that fetch, which may tell its portals (the
-            // completion plans again).
-            let shape = self.shape(room);
-            if tier(room) != Tier::Viewed
-                && self
-                    .fetches
-                    .iter()
-                    .any(|fetch| self.shape(fetch.room) == shape)
-            {
-                continue;
-            }
+        if self.fetches.len() < PORTAL_IN_FLIGHT {
             let ready = self.ready_at(overseer.client(), now);
             if ready > now {
                 due.at(ready);
-                break;
+            } else {
+                self.not_before = None;
+                self.fetch(map, shard, (now, millis, focus), budget, &mut due);
             }
-            if let Err(at) = budget.take(tier(room)) {
-                due.at(at);
-                break;
-            }
-            self.not_before = None;
-            let (map, shard, name) = (map.clone(), shard.map(str::to_owned), room.to_string());
-            let request = Box::pin(async move {
-                rt::timeout(PORTAL_FETCH_TIMEOUT, map.portals(&name, shard.as_deref()))
-                    .await
-                    .ok()
-            });
-            self.fetches.push(Fetch {
-                room,
-                sent_at: millis,
-                request,
-            });
         }
         due.0
+    }
+
+    /// Requests the destinations of rooms with portals, up to [`PORTAL_IN_FLIGHT`] at once,
+    /// as far as the request `budget` allows: first the viewed rooms and the rooms whose
+    /// destinations are wanted now ([`Self::set_wanted`]), in their order, at the viewed
+    /// priority; then the others at the background priority, up to
+    /// [`PORTAL_BACKGROUND_IN_FLIGHT`] in flight, those whose fetch tells the most
+    /// portal tiles not known otherwise first, nearest the centre first. The others wait
+    /// while scans of rooms where portals usually stand are in flight, at most
+    /// [`PORTAL_SCAN_SETTLE`], and while a room with the same shape of portal tiles is being
+    /// fetched (they may be partners, told by that fetch). A room whose fetch failed waits
+    /// for its retry.
+    fn fetch(
+        &mut self,
+        map: &Map,
+        shard: Option<&str>,
+        (now, millis, focus): (Instant, u64, &Focus),
+        budget: &mut Budget<'_>,
+        due: &mut Due,
+    ) {
+        let mut waiting = Due::default();
+        let available = |portals: &Self, room: RoomCoord, waiting: &mut Due| {
+            if !portals.found.contains(&room)
+                || portals.fetches.iter().any(|fetch| fetch.room == room)
+            {
+                return false;
+            }
+            match portals.failed.get(&room) {
+                Some(failure) if failure.until > now => {
+                    waiting.at(failure.until);
+                    false
+                }
+                _ => true,
+            }
+        };
+        let mut urgent = Vec::new();
+        for &room in focus.viewed().iter().chain(&self.wanted) {
+            if !urgent.contains(&room) && available(self, room, &mut waiting) {
+                urgent.push(room);
+            }
+        }
+        for &room in &urgent {
+            if self.fetches.len() >= PORTAL_IN_FLIGHT {
+                return;
+            }
+            if let Err(at) = budget.take(Tier::Viewed) {
+                due.at(at);
+                return;
+            }
+            self.start(map, shard, room, millis);
+        }
+        if self.fetches.len() >= PORTAL_IN_FLIGHT {
+            return;
+        }
+        if let Some(settled) = self
+            .scans
+            .iter()
+            .filter(|scan| scan.settled > now && may_have_portals(scan.room))
+            .map(|scan| scan.settled)
+            .min()
+        {
+            due.at(settled);
+            return;
+        }
+        let centre = focus.centre();
+        if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT {
+            return;
+        }
+        let mut rest = self
+            .found
+            .iter()
+            .copied()
+            .filter(|room| !urgent.contains(room))
+            .collect::<Vec<_>>();
+        rest.retain(|&room| available(self, room, &mut waiting));
+        let mut rest = rest
+            .into_iter()
+            .map(|room| {
+                let key = (
+                    Reverse(self.untold(room)),
+                    distance(room, centre),
+                    room.y,
+                    room.x,
+                );
+                (key, room)
+            })
+            .collect::<Vec<_>>();
+        rest.sort_unstable();
+        for (_, room) in rest {
+            if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT {
+                return;
+            }
+            let shape = self.shape(room);
+            if self
+                .fetches
+                .iter()
+                .any(|fetch| self.shape(fetch.room) == shape)
+            {
+                continue;
+            }
+            if let Err(at) = budget.take(Tier::Background) {
+                due.at(at);
+                return;
+            }
+            self.start(map, shard, room, millis);
+        }
+        if let Some(at) = waiting.0 {
+            due.at(at);
+        }
+    }
+
+    /// Requests the destinations of `room` now.
+    fn start(&mut self, map: &Map, shard: Option<&str>, room: RoomCoord, millis: u64) {
+        let (map, shard, name) = (map.clone(), shard.map(str::to_owned), room.to_string());
+        let request = Box::pin(async move {
+            rt::timeout(PORTAL_FETCH_TIMEOUT, map.portals(&name, shard.as_deref()))
+                .await
+                .ok()
+        });
+        self.fetches.push(Fetch {
+            room,
+            sent_at: millis,
+            request,
+        });
     }
 
     /// The shape of the portal tiles of `room`'s map view: the tiles moved to the origin, in
@@ -649,10 +736,12 @@ impl Portals {
             .is_some_and(|live_at| live_at >= since)
     }
 
-    /// A room's map view arrived: its destinations are wanted when it shows portals (unless
-    /// its paired portals tell them), else it has none.
+    /// A room's map view arrived. Without portals, the room has none. With portals, their
+    /// tiles are known at once and reported with pending destinations (the map draws them),
+    /// unless the known portals stand on the same tiles (their destinations stay shown until
+    /// fetched again); the destinations are wanted (unless its paired portals tell them).
     fn scanned(&mut self, room: RoomCoord, view: &RoomMap, events: &mut VecDeque<WorldEvent>) {
-        let tiles = view
+        let mut tiles = view
             .p
             .iter()
             .flatten()
@@ -661,10 +750,24 @@ impl Portals {
         if tiles.is_empty() {
             self.tiles.remove(&room);
             self.record(room, Vec::new(), None, events);
-        } else {
-            self.tiles.insert(room, tiles);
-            self.found.insert(room);
-            self.infer(room, events);
+            return;
+        }
+        tiles.sort_unstable_by_key(|&(x, y)| (y, x));
+        tiles.dedup();
+        let unchanged = self.knowledge.portals(room).is_some_and(|known| {
+            known
+                .iter()
+                .map(|portal| (portal.x, portal.y))
+                .eq(tiles.iter().copied())
+        });
+        self.tiles.insert(room, tiles.clone());
+        self.found.insert(room);
+        if !self.infer(room, events) && !unchanged {
+            let pending = tiles
+                .into_iter()
+                .map(|(x, y)| Portal::pending(room, x, y))
+                .collect();
+            self.record(room, pending, None, events);
         }
     }
 
@@ -691,12 +794,12 @@ impl Portals {
                     room,
                     x: tile.0,
                     y: tile.1,
-                    destination: PortalDestination {
+                    destination: Some(PortalDestination {
                         room: source.room,
                         shard: None,
                         x: Some(source.x),
                         y: Some(source.y),
-                    },
+                    }),
                     expires_at: source.expires_at,
                     decay_time: source.decay_time,
                 })
@@ -764,7 +867,7 @@ impl Portals {
     ) {
         let scanned_at = epoch_millis();
         let portals = Arc::<[Portal]>::from(portals);
-        let stale_at = stale_at(&portals, scanned_at, Instant::now(), scanned_at);
+        let stale_at = stale_at(room, &portals, scanned_at, Instant::now(), scanned_at);
         self.known.insert(
             room,
             Known {
@@ -812,9 +915,9 @@ impl Due {
 }
 
 /// The room and tile a portal lands on in the same shard; `None` for inter-shard portals,
-/// which name only the room.
+/// which name only the room, and pending ones.
 fn lands(portal: &Portal) -> Option<(RoomCoord, Tile)> {
-    let destination = &portal.destination;
+    let destination = portal.destination.as_ref()?;
     if destination.shard.is_some() || destination.room == portal.room {
         return None;
     }
@@ -828,15 +931,24 @@ fn shows_portals(view: &RoomMap) -> bool {
         .is_some_and(|positions| !positions.is_empty())
 }
 
-/// When portals scanned at `scanned_at` go stale, as an [`Instant`] (`now` is `now_ms`
-/// milliseconds since the Unix epoch): after [`PORTAL_TTL`] ([`PORTAL_DECAYING_TTL`] with a
-/// decaying portal), or when the first becomes unstable ([`PORTAL_DECAYING_TTL`] after the scan
-/// when it already was).
-fn stale_at(portals: &[Portal], scanned_at: u64, now: Instant, now_ms: u64) -> Instant {
+/// When the portals of `room` scanned at `scanned_at` go stale, as an [`Instant`] (`now` is
+/// `now_ms` milliseconds since the Unix epoch): after [`PORTAL_TTL`] ([`PORTAL_DECAYING_TTL`]
+/// with a decaying portal, [`PORTAL_QUIET_TTL`] for no portals in a room where they rarely
+/// stand), or when the first becomes unstable ([`PORTAL_DECAYING_TTL`] after the scan when it
+/// already was).
+fn stale_at(
+    room: RoomCoord,
+    portals: &[Portal],
+    scanned_at: u64,
+    now: Instant,
+    now_ms: u64,
+) -> Instant {
     let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
     let decaying = scanned_at.saturating_add(millis(PORTAL_DECAYING_TTL));
     let mut at = if portals.iter().any(|portal| portal.decay_time.is_some()) {
         decaying
+    } else if portals.is_empty() && !may_have_portals(room) {
+        scanned_at.saturating_add(millis(PORTAL_QUIET_TTL))
     } else {
         scanned_at.saturating_add(millis(PORTAL_TTL))
     };
@@ -856,23 +968,27 @@ mod tests {
 
     use overseer_net::rt::Instant;
 
-    use super::{PORTAL_DECAYING_TTL, PORTAL_TTL, stale_at};
+    use super::{PORTAL_DECAYING_TTL, PORTAL_QUIET_TTL, PORTAL_TTL, stale_at};
     use crate::map::{Portal, PortalDestination, RoomCoord};
 
     const SCANNED: u64 = 1_800_000_000_000;
 
+    fn room(name: &str) -> RoomCoord {
+        name.parse().unwrap()
+    }
+
     fn portal(expires_at: Option<u64>, decay_time: Option<u64>) -> Portal {
-        let room: RoomCoord = "W5N5".parse().unwrap();
+        let room = room("W5N5");
         Portal {
             room,
             x: 1,
             y: 2,
-            destination: PortalDestination {
+            destination: Some(PortalDestination {
                 room,
                 shard: None,
                 x: Some(3),
                 y: Some(4),
-            },
+            }),
             expires_at,
             decay_time,
         }
@@ -882,9 +998,15 @@ mod tests {
     fn portals_go_stale_after_a_day_when_unstable_or_within_the_hour_when_decaying() {
         let now = Instant::now();
         let hour = 3_600_000;
-        let stale = |portals: &[Portal]| stale_at(portals, SCANNED, now, SCANNED) - now;
+        let centre = room("W5N5");
+        let stale = |portals: &[Portal]| stale_at(centre, portals, SCANNED, now, SCANNED) - now;
         assert_eq!(stale(&[]), PORTAL_TTL);
         assert_eq!(stale(&[portal(None, None)]), PORTAL_TTL);
+        assert_eq!(
+            stale(&[Portal::pending(centre, 1, 2)]),
+            PORTAL_TTL,
+            "pending destinations"
+        );
         assert_eq!(
             stale(&[portal(None, None), portal(Some(SCANNED + 5 * hour), None)]),
             Duration::from_hours(5)
@@ -900,9 +1022,25 @@ mod tests {
             PORTAL_DECAYING_TTL
         );
         // Seeded from a scan two hours ago.
-        let seeded = stale_at(&[], SCANNED, now, SCANNED + 2 * hour) - now;
+        let seeded = stale_at(centre, &[], SCANNED, now, SCANNED + 2 * hour) - now;
         assert_eq!(seeded, Duration::from_hours(22));
-        let expired = stale_at(&[], SCANNED, now, SCANNED + 25 * hour);
+        let expired = stale_at(centre, &[], SCANNED, now, SCANNED + 25 * hour);
         assert_eq!(expired, now);
+    }
+
+    #[test]
+    fn rooms_where_portals_rarely_stand_stay_without_them_for_a_week() {
+        let now = Instant::now();
+        let stale = |name: &str, portals: &[Portal]| {
+            stale_at(room(name), portals, SCANNED, now, SCANNED) - now
+        };
+        // Neither a sector centre nor a highway: a week without portals.
+        assert_eq!(stale("W3N7", &[]), PORTAL_QUIET_TTL);
+        // Sector centres and highways: a day.
+        for name in ["W5N5", "W10N3", "E4S0", "W0N0"] {
+            assert_eq!(stale(name, &[]), PORTAL_TTL, "{name}");
+        }
+        // A rare room with portals: a day, like any.
+        assert_eq!(stale("W3N7", &[portal(None, None)]), PORTAL_TTL);
     }
 }

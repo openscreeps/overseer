@@ -184,10 +184,14 @@ pub fn StatusBar() -> impl IntoView {
         })
     });
     let loading = Memo::new(move |_| progress.with(Option::is_some));
+    let title = Memo::new(move |_| {
+        map.progress
+            .with(|progress| crate::feed::progress_title(progress.as_ref()))
+    });
     let progress = move || {
         loading.get().then(|| {
             view! {
-                <span class="status-item status-progress" role="status" title="Loading the world">
+                <span class="status-item status-progress" role="status" title=move || title.get()>
                     <span class="spinner small" aria-hidden="true"></span>
                     <span class="status-text">{move || progress.get().unwrap_or_default()}</span>
                 </span>

@@ -1539,12 +1539,12 @@ fn frames_render_through_the_noop_backend() {
             room: room(at),
             x: 25,
             y: 25,
-            destination: overseer::map::PortalDestination {
+            destination: Some(overseer::map::PortalDestination {
                 room: room(to),
                 shard: shard.map(str::to_owned),
                 x: Some(25),
                 y: Some(25),
-            },
+            }),
             expires_at: None,
             decay_time: None,
         };

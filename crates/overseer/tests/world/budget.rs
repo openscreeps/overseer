@@ -1,7 +1,9 @@
 //! The request budget the world map shares with everything else of the session (a sliding
 //! minute of every request, user actions included; priorities; HTTP 429; lifted limits;
 //! servers without limits), portals inferred from their pairs (exact pairs only), and portals
-//! outside the usual rooms found at full zoom-out, the usual rooms scanned first.
+//! outside the usual rooms found at full zoom-out, the usual rooms scanned first; portal
+//! destinations wanted now (hovered, arcs drawn) before the background fill, and background
+//! scans up to the subscription cap.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -259,14 +261,15 @@ async fn the_budget_counts_every_request_of_the_window_and_leaves_room_by_priori
         ..Interest::default()
     });
     let wanted = candidates(&world).len();
-    assert!(wanted > Priority::Visible.budget());
+    assert!(wanted > Priority::Background.budget());
     drive(&mut world, &mut socket, |_, _| {
-        client.requests_in_window() >= Priority::Visible.budget()
+        client.requests_in_window() >= Priority::Background.budget()
     })
     .await;
     drive_for(&mut world, &mut socket).await;
-    // Visible work stops at its share of the window, the user's requests included.
-    assert_eq!(client.requests_in_window(), Priority::Visible.budget());
+    // Background destinations stop at their share of the window, the user's requests
+    // included.
+    assert_eq!(client.requests_in_window(), Priority::Background.budget());
     let first = room_objects(&server).len();
     assert!(first < wanted);
 
@@ -488,10 +491,11 @@ async fn exact_pairs_are_inferred_and_nothing_else() {
     let leads = inferred
         .iter()
         .map(|portal| {
+            let destination = portal.destination.as_ref().unwrap();
             (
                 (portal.x, portal.y),
-                portal.destination.room,
-                (portal.destination.x, portal.destination.y),
+                destination.room,
+                (destination.x, destination.y),
                 portal.expires_at,
             )
         })
@@ -632,15 +636,19 @@ async fn portals_anywhere_are_found_at_full_zoom_out() {
         terrain: bounds.iter().collect(),
         ..Interest::default()
     });
+    // The map is complete once every room is scanned; destinations follow in the background.
     drive(&mut world, &mut socket, |world, _| {
         let progress = world.progress();
-        progress.portals_wanted == bounds.len() && progress.portals_scanned == bounds.len()
+        progress.portals_wanted == bounds.len()
+            && progress.portals_scanned == bounds.len()
+            && progress.portals_pending == 0
     })
     .await;
     for name in ["W5N0", "E3S3"] {
         let portals = world.portals(room(name)).unwrap();
         assert_eq!(portals.len(), 1, "{name}");
-        assert!(portals[0].destination.shard.is_some(), "{name}");
+        let destination = portals[0].destination.as_ref().unwrap();
+        assert!(destination.shard.is_some(), "{name}");
     }
     let mut asked = room_objects(&server);
     asked.sort();
@@ -704,4 +712,126 @@ async fn background_scans_take_the_usual_portal_rooms_first_then_the_rest() {
     });
     drive_for(&mut world, &mut socket).await;
     assert_eq!(socket.subscribed.len(), bounds.len());
+}
+
+/// The candidate rooms nobody asked for yet, farthest from the centre first.
+fn unasked(world: &WorldMap, server: &Server) -> Vec<RoomCoord> {
+    let asked = room_objects(server);
+    let mut rooms = candidates(world)
+        .into_iter()
+        .filter(|room| !asked.contains(&room.to_string()))
+        .collect::<Vec<_>>();
+    rooms.sort_by_key(|room| std::cmp::Reverse(room.x.pow(2) + room.y.pow(2)));
+    rooms
+}
+
+#[tokio::test]
+async fn wanted_destinations_go_first_then_the_background_fills_in() {
+    let (server, _overseer, mut world, mut socket) = busy_world(false).await;
+    tokio::time::pause();
+    let bounds = world.bounds();
+    world.set_interest(&Interest {
+        portals: Some(bounds),
+        ..Interest::default()
+    });
+    drive(&mut world, &mut socket, |_, _| {
+        room_objects(&server).len() >= 20
+    })
+    .await;
+    // The hovered room, then two rooms whose arcs the map draws: the farthest from the
+    // centre, which the background would ask last.
+    let wanted = unasked(&world, &server)[..3].to_vec();
+    let before = room_objects(&server).len();
+    world.set_interest(&Interest {
+        portals: Some(bounds),
+        portal_destinations: wanted.clone(),
+        ..Interest::default()
+    });
+    drive(&mut world, &mut socket, |world, _| {
+        wanted.iter().all(|&room| {
+            world
+                .portals(room)
+                .is_some_and(|portals| portals.iter().all(|portal| portal.destination.is_some()))
+        })
+    })
+    .await;
+    // At once: only background requests already in flight went before (requests in flight
+    // together reach the server in any order).
+    let after = room_objects(&server)[before..].to_vec();
+    let first =
+        &after[..(overseer::map::PORTAL_BACKGROUND_IN_FLIGHT + wanted.len()).min(after.len())];
+    for room in &wanted {
+        assert!(first.contains(&room.to_string()), "{room}: {after:?}");
+    }
+    // Then every other destination fills in, each room once.
+    drive(&mut world, &mut socket, |world, _| {
+        let progress = world.progress();
+        progress.is_complete() && progress.portals_pending == 0
+    })
+    .await;
+    let asked = room_objects(&server);
+    assert_eq!(asked.len(), candidates(&world).len());
+    assert_eq!(asked.iter().collect::<HashSet<_>>().len(), asked.len());
+}
+
+#[tokio::test]
+async fn a_hovered_room_is_asked_at_once_when_the_background_used_its_share() {
+    let (server, overseer, mut world, mut socket) = busy_world(true).await;
+    tokio::time::pause();
+    let client = overseer.client().clone();
+    let bounds = world.bounds();
+    world.set_interest(&Interest {
+        portals: Some(bounds),
+        ..Interest::default()
+    });
+    drive(&mut world, &mut socket, |_, _| {
+        client.requests_in_window() >= Priority::Background.budget()
+    })
+    .await;
+    drive_for(&mut world, &mut socket).await;
+    assert_eq!(client.requests_in_window(), Priority::Background.budget());
+    let asked = room_objects(&server).len();
+    // The background waits for the window; the hovered room goes out at the viewed share.
+    let hovered = unasked(&world, &server)[0];
+    world.set_interest(&Interest {
+        portals: Some(bounds),
+        portal_destinations: vec![hovered],
+        ..Interest::default()
+    });
+    let at = tokio::time::Instant::now();
+    drive(&mut world, &mut socket, |_, _| {
+        room_objects(&server).len() > asked
+    })
+    .await;
+    drive_for(&mut world, &mut socket).await;
+    assert_eq!(tokio::time::Instant::now(), at);
+    assert_eq!(room_objects(&server)[asked..], [hovered.to_string()]);
+}
+
+#[tokio::test]
+async fn background_scans_use_every_subscription_of_the_cap() {
+    // A 40 × 40 world (1 600 rooms) whose scans are never answered.
+    let fake = Fake {
+        size: 40,
+        limited: false,
+        objects: Arc::default(),
+        refuse: Arc::default(),
+    };
+    let (_server, overseer, websocket) = connect(fake.routes()).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let silent = world.bounds().iter().map(|room| room.to_string()).collect();
+    let mut socket = Socket::new(websocket, HashMap::new(), silent);
+    tokio::time::pause();
+    world.set_interest(&Interest {
+        portals: Some(world.bounds()),
+        ..Interest::default()
+    });
+    let start = std::time::Instant::now();
+    while socket.subscribed.len() < overseer::map::MINIMAP_CAP {
+        assert!(start.elapsed() < PATIENCE, "subscribed in time");
+        drive_for(&mut world, &mut socket).await;
+    }
+    // As many scans as the cap allows, and no more while none is answered.
+    drive_for(&mut world, &mut socket).await;
+    assert_eq!(socket.subscribed.len(), overseer::map::MINIMAP_CAP);
 }

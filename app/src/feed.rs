@@ -278,7 +278,8 @@ fn replay(world: &WorldMap, reach: Reach, deliver: &Deliver) {
 /// - overviews: the world subscribers' rectangle (a room control's room is then normally in
 ///   it, and its overview cached); without one, the rectangle around the room controls'
 ///   rooms; portals likewise;
-/// - terrain and minimaps: the world subscribers' rooms, then the room controls';
+/// - terrain, minimaps and portal destinations wanted now: the world subscribers' rooms, then
+///   the room controls';
 /// - live rooms: the world's first (the room under the map's centre), then the room
 ///   controls' (the drawer's room, popped-out rooms). These are the viewed rooms: the world
 ///   refreshes their overviews and portals first, regardless of age, and from their live
@@ -319,11 +320,19 @@ pub fn merge(interests: &[(Reach, &Interest)]) -> Interest {
         portals: rect(|interest| interest.portals),
         ..Interest::default()
     };
-    let (mut terrain, mut minimaps, mut detail) =
-        (Unique::default(), Unique::default(), Unique::default());
+    let (mut terrain, mut minimaps, mut detail, mut destinations) = (
+        Unique::default(),
+        Unique::default(),
+        Unique::default(),
+        Unique::default(),
+    );
     for interest in world().chain(rooms()) {
         terrain.extend(&mut merged.terrain, &interest.terrain);
         minimaps.extend(&mut merged.minimaps, &interest.minimaps);
+        destinations.extend(
+            &mut merged.portal_destinations,
+            &interest.portal_destinations,
+        );
     }
     for interest in world() {
         detail.extend(
@@ -404,6 +413,19 @@ pub fn progress_label(progress: &WorldProgress, now: u64) -> Option<String> {
     )
 }
 
+/// The status bar's loading tooltip: `Loading the world`, and how many rooms' portal
+/// destinations are still on their way in the background (they never hold the map back).
+pub fn progress_title(progress: Option<&WorldProgress>) -> String {
+    match progress.map_or(0, |progress| progress.portals_pending) {
+        0 => "Loading the world".to_owned(),
+        1 => "Loading the world · portal destinations of 1 room loading".to_owned(),
+        pending => format!(
+            "Loading the world · portal destinations of {} rooms loading",
+            grouped(pending)
+        ),
+    }
+}
+
 /// `count` with its thousands separated by narrow no-break spaces (`12 345`).
 fn grouped(count: usize) -> String {
     let digits = count.to_string();
@@ -421,7 +443,7 @@ fn grouped(count: usize) -> String {
 mod tests {
     use overseer::map::{Interest, RoomCoord, RoomRect, WorldProgress};
 
-    use super::{Reach, merge, progress_label};
+    use super::{Reach, merge, progress_label, progress_title};
 
     fn room(name: &str) -> RoomCoord {
         name.parse().unwrap()
@@ -446,6 +468,7 @@ mod tests {
             minimaps: rooms(&["W3N3"]),
             detail: rooms(&["W3N3", "W2N3", "W4N3"]),
             portals: Some(rect("W5N5", "W1N1")),
+            portal_destinations: rooms(&["W5N5", "W1N5"]),
         };
         let control = Interest {
             stats: None,
@@ -453,6 +476,7 @@ mod tests {
             minimaps: rooms(&["W9N9"]),
             detail: rooms(&["W9N9"]),
             portals: Some(rect("W9N9", "W9N9")),
+            portal_destinations: rooms(&["W9N9", "W5N5"]),
         };
         let same = Interest {
             detail: rooms(&["W3N3"]),
@@ -468,6 +492,7 @@ mod tests {
         assert_eq!(merged.terrain, rooms(&["W3N3", "W2N3", "W9N9"]));
         assert_eq!(merged.minimaps, rooms(&["W3N3", "W9N9"]));
         assert_eq!(merged.detail, rooms(&["W3N3", "W9N9"]));
+        assert_eq!(merged.portal_destinations, rooms(&["W5N5", "W1N5", "W9N9"]));
     }
 
     #[test]
@@ -511,6 +536,30 @@ mod tests {
     }
 
     #[test]
+    fn pending_destinations_show_in_the_tooltip_only() {
+        let mut progress = WorldProgress {
+            portals_scanned: 331,
+            portals_wanted: 331,
+            portals_pending: 12_345,
+            ..WorldProgress::default()
+        };
+        // Scans done: the map is complete, whatever destinations still load.
+        assert_eq!(progress_label(&progress, 0), None);
+        assert_eq!(
+            progress_title(Some(&progress)),
+            "Loading the world · portal destinations of 12\u{202f}345 rooms loading"
+        );
+        progress.portals_pending = 1;
+        assert_eq!(
+            progress_title(Some(&progress)),
+            "Loading the world · portal destinations of 1 room loading"
+        );
+        progress.portals_pending = 0;
+        assert_eq!(progress_title(Some(&progress)), "Loading the world");
+        assert_eq!(progress_title(None), "Loading the world");
+    }
+
+    #[test]
     fn progress_shows_until_everything_is_known() {
         let now = 1_700_000_000_000;
         let loading = WorldProgress {
@@ -522,6 +571,7 @@ mod tests {
             stats_paused_until: None,
             portals_scanned: 0,
             portals_wanted: 0,
+            portals_pending: 0,
         };
         assert_eq!(
             progress_label(&loading, now).as_deref(),

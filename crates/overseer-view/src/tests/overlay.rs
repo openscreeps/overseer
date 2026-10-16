@@ -355,12 +355,12 @@ fn portal(at: (&str, u8, u8), to: (&str, Option<&str>, Option<(u8, u8)>)) -> Por
         room: room(at.0),
         x: at.1,
         y: at.2,
-        destination: PortalDestination {
+        destination: Some(PortalDestination {
             room: room(to.0),
             shard: to.1.map(str::to_owned),
             x: to.2.map(|tile| tile.0),
             y: to.2.map(|tile| tile.1),
-        },
+        }),
         expires_at: None,
         decay_time: None,
     }
@@ -771,4 +771,50 @@ fn hover_outlines_a_room_of_the_scope() {
     let labels = view.world.overlay.room_labels();
     assert!(labels.iter().any(|label| label.text == "E2S2"));
     assert!(labels.iter().all(|label| label.text != "E4S2"));
+}
+
+#[test]
+fn pending_destinations_are_wanted_focus_first_then_runs_in_view_then_few_walls() {
+    let mut world = World::new(shard(), Limits::WEBGL2);
+    // A pending cluster in a sector centre, a known one, and a pending wall along a highway.
+    let cluster =
+        |name: &str| [(24, 25), (25, 25), (26, 25)].map(|(x, y)| Portal::pending(room(name), x, y));
+    world.overlay.set_portals(room("W5N5"), &cluster("W5N5"));
+    world.overlay.set_portals(room("E5N5"), &cluster("E5N5"));
+    world.overlay.set_portals(
+        room("E5S5"),
+        &[portal(("E5S5", 25, 25), ("W5N5", None, Some((25, 25))))],
+    );
+    let wall: Vec<Portal> = (1..=40)
+        .map(|x| Portal::pending(room("W10N3"), x, 0))
+        .collect();
+    world.overlay.set_portals(room("W10N3"), &wall);
+    let all = RoomRect::new(room("W19N19"), room("E19S19"));
+    // Few walls in view: compact runs nearest the centre, then the wall; the known room is
+    // not wanted.
+    let wanted = world.overlay.wanted_destinations(all, None);
+    assert_eq!(wanted, [room("W5N5"), room("E5N5"), room("W10N3")]);
+    // The hovered and the selected room first.
+    world.overlay.set_hover(Some(room("W10N3")));
+    assert_eq!(
+        world.overlay.wanted_destinations(all, Some(room("W5N5"))),
+        [room("W10N3"), room("W5N5"), room("E5N5")]
+    );
+    world.overlay.set_hover(None);
+    // Many walls in view: no wall is wanted (their arcs do not show), compact runs still are.
+    for row in [13, 23, 33, 43, 53, 63] {
+        let wall: Vec<Portal> = (1..=40)
+            .map(|x| Portal::pending(room(&format!("W10N{row}")), x, 0))
+            .collect();
+        world
+            .overlay
+            .set_portals(room(&format!("W10N{row}")), &wall);
+    }
+    let wide = RoomRect::new(room("W79N79"), room("E79S79"));
+    let wanted = world.overlay.wanted_destinations(wide, None);
+    assert_eq!(wanted.len(), 2);
+    assert!(!wanted.contains(&room("W10N3")));
+    // Out of view: nothing.
+    let away = RoomRect::new(room("E30S30"), room("E39S39"));
+    assert_eq!(world.overlay.wanted_destinations(away, None), []);
 }

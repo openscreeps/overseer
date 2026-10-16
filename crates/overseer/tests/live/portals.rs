@@ -5,7 +5,7 @@
 //! API (`OVERSEER_LIVE_ADMIN_TOKEN`); worlds of 21 rooms and more also have the generator's
 //! portals between their sector centres.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use overseer::core::api::types::{
@@ -87,7 +87,9 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     .await
     .expect("the map views list the portals");
 
-    // Every room of the world is scanned and reported once.
+    // Every room of the world is scanned and reported once; a room with portals is reported
+    // with pending destinations when scanned (unless its pair tells them at once), and again
+    // once they are fetched or inferred in the background.
     let candidates = bounds.iter().collect::<BTreeSet<_>>();
     world.set_interest(&Interest {
         portals: Some(RoomRect::new(
@@ -103,26 +105,47 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
         ..Interest::default()
     });
     assert_eq!(world.progress().portals_wanted, candidates.len());
-    let mut reported = Vec::new();
+    let mut reported: BTreeMap<RoomCoord, Vec<bool>> = BTreeMap::new();
     // OpenScreeps answers scans behind its ticks (about a second each when many wait); a scan
     // it does not answer within its timeout is tried again 30 s later.
     timeout(PATIENCE * 20, async {
-        while reported.len() < candidates.len() {
+        loop {
+            // Until every room is reported with its destinations (the world's progress runs
+            // ahead of the events still queued).
+            let progress = world.progress();
+            if progress.is_complete()
+                && progress.portals_pending == 0
+                && reported.len() == candidates.len()
+                && reported
+                    .values()
+                    .all(|reports| reports.last() == Some(&false))
+            {
+                return;
+            }
             if let WorldEvent::Portals(room, portals) =
                 world.next().await.expect("the session stays open")
             {
                 assert!(portals.iter().all(|portal| portal.room == room), "{room}");
-                reported.push(room);
+                let pending = portals.iter().any(|portal| portal.destination.is_none());
+                reported.entry(room).or_default().push(pending);
             }
         }
     })
     .await
     .unwrap_or_else(|_| panic!("every room scanned in time: {reported:?} of {candidates:?}"));
     assert_eq!(
-        reported.iter().copied().collect::<BTreeSet<_>>(),
+        reported.keys().copied().collect::<BTreeSet<_>>(),
         candidates
     );
-    assert_eq!(reported.len(), candidates.len(), "each room once");
+    for (room, reports) in &reported {
+        // At most one pending report (the scan), then the destinations: never scanned twice.
+        // Inferred portals may be reported again when a fetch already in flight replaces them.
+        let pending = reports.iter().take_while(|&&pending| pending).count();
+        assert!(
+            pending <= 1 && reports[pending..].iter().all(|&pending| !pending),
+            "{room}: {reports:?}"
+        );
+    }
     let progress = world.progress();
     assert_eq!(progress.portals_scanned, progress.portals_wanted);
 
@@ -135,13 +158,16 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
             .portals(from)
             .expect("scanned")
             .iter()
-            .filter(|portal| portal.destination.room == to)
-            .all(|portal| {
+            .filter_map(|portal| Some((portal, portal.destination.as_ref()?)))
+            .filter(|(_, destination)| destination.room == to)
+            .all(|(portal, destination)| {
                 there.iter().any(|back| {
-                    (Some(back.x), Some(back.y)) == (portal.destination.x, portal.destination.y)
-                        && back.destination.room == from
-                        && (back.destination.x, back.destination.y)
-                            == (Some(portal.x), Some(portal.y))
+                    let Some(home) = &back.destination else {
+                        return false;
+                    };
+                    (Some(back.x), Some(back.y)) == (destination.x, destination.y)
+                        && home.room == from
+                        && (home.x, home.y) == (Some(portal.x), Some(portal.y))
                         && (back.expires_at, back.decay_time)
                             == (portal.expires_at, portal.decay_time)
                 })
@@ -163,12 +189,13 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
         assert_eq!(portals.len(), listed, "{from}: every portal known");
         let leading = portals
             .iter()
-            .filter(|portal| portal.destination.room == to)
+            .filter_map(|portal| portal.destination.as_ref())
+            .filter(|destination| destination.room == to)
             .collect::<Vec<_>>();
         assert!(leading.len() >= 8, "{from}: {portals:?}");
-        for portal in leading {
-            assert_eq!(portal.destination.shard, None);
-            assert!(portal.destination.x.is_some() && portal.destination.y.is_some());
+        for destination in leading {
+            assert_eq!(destination.shard, None);
+            assert!(destination.x.is_some() && destination.y.is_some());
         }
         assert!(lands_back(from, to), "{from} -> {to}: {portals:?}");
     }
@@ -183,7 +210,8 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
         let portals = world.portals(*centre).expect("scanned");
         let partners = portals
             .iter()
-            .map(|portal| portal.destination.room)
+            .filter_map(|portal| portal.destination.as_ref())
+            .map(|destination| destination.room)
             .filter(|to| to != centre && centres.contains(to))
             .collect::<BTreeSet<_>>();
         match partners.iter().next() {
@@ -202,7 +230,8 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     // Every portal of the world leads into it.
     for room in &candidates {
         for portal in world.portals(*room).expect("scanned").iter() {
-            assert!(bounds.contains(portal.destination.room), "{portal:?}");
+            let destination = portal.destination.as_ref().expect("fetched or inferred");
+            assert!(bounds.contains(destination.room), "{portal:?}");
         }
     }
     // `Map::portals` reads the same.

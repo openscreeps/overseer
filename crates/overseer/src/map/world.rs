@@ -10,8 +10,8 @@ mod terrain;
 
 pub use focus::PREFETCH_RING;
 pub use portals::{
-    PORTAL_BACKGROUND_SCANS, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_IN_FLIGHT,
-    PORTAL_SCAN_SETTLE, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
+    PORTAL_BACKGROUND_IN_FLIGHT, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_IN_FLIGHT,
+    PORTAL_QUIET_TTL, PORTAL_SCAN_SETTLE, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
 };
 pub use stats::{
     STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_IN_FLIGHT, STATS_TTL,
@@ -68,9 +68,13 @@ pub struct Interest {
     pub minimaps: Vec<RoomCoord>,
     /// Rooms wanted live in full detail, most important first: the viewed rooms.
     pub detail: Vec<RoomCoord>,
-    /// Rooms whose portals are wanted: those of its rooms that [may have
-    /// portals](super::may_have_portals) are scanned first (see [`WorldMap`]).
+    /// Rooms whose portals are wanted: all of them are scanned, those where portals [usually
+    /// stand](super::may_have_portals) first (see [`WorldMap`]).
     pub portals: Option<RoomRect>,
+    /// Rooms whose portal destinations are wanted now, most important first: the hovered and
+    /// the selected room, then the rooms whose portals the map draws arcs for. They are
+    /// fetched first; all others fill in in the background.
+    pub portal_destinations: Vec<RoomCoord>,
 }
 
 /// The live state of a room wanted in detail.
@@ -136,16 +140,19 @@ pub struct WorldProgress {
     /// milliseconds since the Unix epoch. `None` when not paused.
     pub stats_paused_until: Option<u64>,
     /// Rooms of [`Interest::portals`] whose portals (or their absence) are known, possibly
-    /// stale.
+    /// stale; their destinations may be pending.
     pub portals_scanned: usize,
     /// Rooms of [`Interest::portals`] inside the world (but those the server has no terrain
     /// for), while a user is signed in, else none: every room is scanned.
     pub portals_wanted: usize,
+    /// Rooms with portals whose destinations are pending (fetched or inferred in the
+    /// background); not part of [`Self::is_complete`].
+    pub portals_pending: usize,
 }
 
 impl WorldProgress {
     /// Whether every wanted terrain, overview and portal room is known (or known not to
-    /// exist).
+    /// exist); portal destinations may still be pending.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.terrain_known + self.terrain_absent >= self.terrain_wanted
@@ -180,10 +187,11 @@ impl WorldProgress {
 /// | Background | the rest of the world, while anything of the kind is wanted | nearest the same centre |
 ///
 /// Background work only takes what higher tiers leave: one of the [`TERRAIN_IN_FLIGHT`]
-/// terrain requests, [`PORTAL_BACKGROUND_SCANS`] scan subscriptions, and the smallest share
-/// of the request budget (below). Viewed rooms refresh at once regardless of their lifetime,
-/// then stay fresh while viewed: their live room (see **Live rooms**) and one overview
-/// request (see **Overviews**).
+/// terrain requests, the scan subscriptions left after the viewed and visible rooms queued
+/// first, and the smallest share of the request budget (below). Portal destinations go by
+/// what is wanted now ([`Interest::portal_destinations`], see **Portals**). Viewed rooms
+/// refresh at once regardless of their lifetime, then stay fresh while viewed: their live
+/// room (see **Live rooms**) and one overview request (see **Overviews**).
 ///
 /// # Pacing per server
 ///
@@ -211,7 +219,7 @@ impl WorldProgress {
 /// | Terrain (`POST /api/game/rooms`) | [`TERRAIN_IN_FLIGHT`] at a time, within the request budget | [`TERRAIN_IN_FLIGHT`] at a time |
 /// | Overviews (`POST /api/game/map-stats`) | one at a time, within the request budget and the endpoint's hourly budget (see below) | [`STATS_IN_FLIGHT`] at a time, no hourly budget |
 /// | Portal scans (`roomMap2`) | no HTTP; within [`MINIMAP_CAP`] subscriptions | the same |
-/// | Portal destinations (`GET /api/game/room-objects`) | [`PORTAL_IN_FLIGHT`] at a time, within the request budget | [`PORTAL_IN_FLIGHT`] at a time |
+/// | Portal destinations (`GET /api/game/room-objects`) | [`PORTAL_IN_FLIGHT`] at a time ([`PORTAL_BACKGROUND_IN_FLIGHT`] in the background), within the request budget | the same, without the budget |
 ///
 /// # Policies
 ///
@@ -269,15 +277,28 @@ impl WorldProgress {
 ///   subscribed to `roomMap2`, whose first update (sent as soon as the server processes the
 ///   subscription) lists portal positions (`p`), and released when it arrives (or after
 ///   [`PORTAL_SCAN_TIMEOUT`], 30 s; scanned again 30 s later). Scans and live minimaps
-///   together stay within [`MINIMAP_CAP`] subscriptions, background scans within
-///   [`PORTAL_BACKGROUND_SCANS`]: each answer frees a subscription for the next room, a steady
-///   rate the server sets by how fast it answers (scans waiting on a reconnect are sent again
-///   with the reconnect's subscriptions, at most the cap; none starts over). A live minimap
-///   counts as a scan of its room, or of any room of the world whose portals appear or vanish. A
-///   room without portals is reported with none; for a room with portals, one
-///   `GET /api/game/room-objects` brings their destinations ([`Portal`]), by tier, then the
-///   rooms whose fetch tells the most portal tiles not known otherwise, paced per server
-///   (above); the endpoint has no limit of its own on screeps.com. A request that fails or
+///   together use up to [`MINIMAP_CAP`] subscriptions, all of them for scans while nothing
+///   else needs them: each answer frees a subscription for the next room, a steady rate the
+///   server sets by how fast it answers (scans waiting on a reconnect are sent again with the
+///   reconnect's subscriptions, at most the cap; none starts over). Measured on screeps.com
+///   `shard0` (October 2026): all 33 124 rooms scanned in 68 s with 256 in flight (about 490
+///   rooms per second, half a second per answer, 5.8 MB over the socket), without a refusal or
+///   a disconnect; a disposable `OpenScreeps` world of 441 rooms in 4 s. A live minimap
+///   counts as a scan of its room, or of any room of the world whose portals appear or
+///   vanish.
+///
+///   A scan tells where a room's portals stand, not where they lead: the room is reported
+///   at once with its portals' tiles and pending destinations ([`Portal::destination`]
+///   `None`), which is all the map needs to draw them, and counts as scanned
+///   ([`WorldProgress::portals_scanned`]; [`WorldProgress::portals_pending`] counts those
+///   waiting). One `GET /api/game/room-objects` per room brings the destinations: first the
+///   viewed rooms and those of [`Interest::portal_destinations`] (the hovered and selected
+///   room, the rooms whose arcs the map draws), in their order at the viewed priority of the
+///   request budget; then all others in the background, at the background priority and at
+///   most [`PORTAL_BACKGROUND_IN_FLIGHT`] of the [`PORTAL_IN_FLIGHT`] requests (so a hovered
+///   room's request goes out at once), the rooms whose fetch tells the most portal tiles not
+///   known otherwise first. The
+///   endpoint has no limit of its own on screeps.com. A request that fails or
 ///   takes longer than [`PORTAL_FETCH_TIMEOUT`] holds back only its room: it is asked again
 ///   after 30 s, doubling with each failure in a row up to an hour, while the other rooms go
 ///   on. Paired portals save requests: on screeps.com every intra-shard portal lands exactly
@@ -285,19 +306,21 @@ impl WorldProgress {
 ///   [`Portal::expires_at`] (sampled on `shard0`, October 2026: 144 of 144 in `W42N0`,
 ///   `E31S40` and their partners, and the sector-centre pairs such as `E55N45` ↔ `E55N15`);
 ///   `OpenScreeps` generates such pairs too. So when exactly one known portal of the shard
-///   (fetched or live, never inferred ones, never inter-shard ones) lands on each portal
-///   tile of a room's map view, that room's portals are inferred to lead back to them (decay
-///   included), and it is not fetched; a room only partly accounted for is fetched. To let
-///   one fetch tell its partner rather than race it, destinations wait (except for viewed
-///   rooms) while scans of rooms of their tier where portals usually stand are in flight, at
-///   most [`PORTAL_SCAN_SETTLE`], and a room whose portal tiles have the shape of those of a room
-///   being fetched waits for that fetch. A live room or a later fetch replaces inferred
+///   (fetched, live or seeded with its destination, never inter-shard ones) lands on each
+///   portal tile of a room's map view, that room's portals are inferred to lead back to them
+///   (decay included), and it is not fetched; a room only partly accounted for is fetched.
+///   To let one fetch tell its partner rather than race it, background destinations wait
+///   while scans of rooms where portals usually stand are in flight, at most
+///   [`PORTAL_SCAN_SETTLE`] each, and a room whose portal tiles have the shape of those of a
+///   room being fetched waits for that fetch. A live room or a later fetch replaces inferred
 ///   portals ([`Self::portals_inferred`] tells them apart). Each scan is reported
-///   ([`WorldEvent::Portals`]) and used for [`PORTAL_TTL`] (24 hours),
-///   [`PORTAL_DECAYING_TTL`] (1 hour) for a room with a decaying portal, or until a portal
-///   becomes unstable ([`Portal::expires_at`]), before the room is scanned again;
-///   [`Self::insert_portals`] seeds scans from the app's cache, stale after the same time
-///   since they were made.
+///   ([`WorldEvent::Portals`]) and used for [`PORTAL_TTL`] (24 hours), [`PORTAL_QUIET_TTL`]
+///   (7 days) for no portals in a room where they rarely stand (neither a sector centre nor
+///   a highway), [`PORTAL_DECAYING_TTL`] (1 hour) for a room with a decaying portal, or until
+///   a portal becomes unstable ([`Portal::expires_at`]), before the room is scanned again;
+///   live minimaps and live rooms correct any room at once. [`Self::insert_portals`] seeds
+///   scans from the app's cache (pending destinations included, fetched in the
+///   background), stale after the same time since they were made.
 /// - **Live rooms**: each update of a room wanted in detail updates what is known of it at
 ///   once, with no request: its overview (owner and level, reservation, safe mode and
 ///   mineral, see [`RoomStat`]; the status stays the known one) when it tells something
@@ -462,6 +485,28 @@ impl WorldMap {
             return;
         }
         let user = self.overseer.user_id().is_some();
+        let wanted = if user && self.minimaps.is_some() {
+            &interest.portal_destinations[..]
+        } else {
+            &[]
+        };
+        if self.work.portals.set_wanted(wanted) {
+            self.work.dirty = true;
+        }
+        // Only the destinations wanted changed (the hovered room, portals arriving in view):
+        // nothing else to redo.
+        let old = &self.interest;
+        let same_but_destinations = interest.stats == old.stats
+            && interest.portals == old.portals
+            && interest.detail == old.detail
+            && interest.minimaps == old.minimaps
+            && interest.terrain == old.terrain;
+        if same_but_destinations {
+            self.interest
+                .portal_destinations
+                .clone_from(&interest.portal_destinations);
+            return;
+        }
         let work = &mut self.work;
         work.dirty = true;
         work.stats.rect = interest
@@ -594,6 +639,7 @@ impl WorldMap {
             stats_paused_until: self.work.stats.paused(),
             portals_scanned,
             portals_wanted,
+            portals_pending: self.work.portals.pending(),
         }
     }
 

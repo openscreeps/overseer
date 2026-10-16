@@ -127,6 +127,11 @@ impl Focus {
         }
     }
 
+    /// The viewed rooms, most important first.
+    pub(super) fn viewed(&self) -> &[RoomCoord] {
+        &self.viewed
+    }
+
     /// The visible rooms and the prefetch ring, inside the world.
     pub(super) const fn visible(&self) -> Option<RoomRect> {
         self.visible

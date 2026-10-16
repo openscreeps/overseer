@@ -606,12 +606,20 @@ impl Viewer {
     /// drawn as a thin line whose arcs show only when few are in view or one of its rooms is
     /// hovered or selected. Zoomed in, each portal tile is marked.
     pub fn set_portals(&mut self, room: RoomCoord, portals: &[Portal]) {
-        self.view.world.overlay.set_portals(room, portals);
+        self.view.set_portals(room, portals);
     }
 
     /// Outlines a room subtly (`None`: none), e.g. the room under the pointer.
-    pub const fn set_hover(&mut self, room: Option<RoomCoord>) {
+    pub fn set_hover(&mut self, room: Option<RoomCoord>) {
         self.view.set_hover(room);
+    }
+
+    /// Bumped whenever [`Self::interest`] may change without the camera moving (the hovered
+    /// or selected room, portals arriving whose destinations the map needs): resend the
+    /// interest when it changes.
+    #[must_use]
+    pub const fn interest_revision(&self) -> u64 {
+        self.view.interest_revision()
     }
 
     /// The camera, to persist.
@@ -728,7 +736,7 @@ impl Viewer {
     }
 
     /// Highlights a room's tile (`None` clears the highlight).
-    pub const fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
+    pub fn select(&mut self, tile: Option<(RoomCoord, u8, u8)>) {
         self.view.select(tile);
     }
 
