@@ -8,7 +8,7 @@
 // too), every page runs `<factor>` times slower with slower responses (the fixtures, through
 // CDP) and two workers run, as in CI.
 
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 import type { Mode } from './tests/fixtures';
 
@@ -23,8 +23,9 @@ const proxy =
   process.env.OVERSEER_E2E_PROXY ??
   resolve(__dirname, '../target/e2e/overseer-proxy' + (process.platform === 'win32' ? '.exe' : ''));
 const upstream = process.env.OVERSEER_LIVE_URL ?? 'http://127.0.0.1:21025/';
-// The proxy logs every request; keep them next to the server's log instead of the test output.
-const proxyLog = resolve(__dirname, '../target/e2e/proxy.log');
+// The proxy logs every request; keep them next to the server's log (the harness's
+// `<target>/e2e`, also when `CARGO_TARGET_DIR` moves it) instead of the test output.
+const proxyLog = resolve(dirname(proxy), 'proxy.log');
 
 export default defineConfig<{ mode: Mode }>({
   testDir: './tests',
