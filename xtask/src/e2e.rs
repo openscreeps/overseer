@@ -436,8 +436,7 @@ fn playwright(prepared: &Prepared, options: &Options) -> Command {
 
 /// Sets what both targets' tests read: `OVERSEER_E2E_DIST` (the built web app),
 /// `OVERSEER_E2E_PROXY` (the `overseer-proxy` binary) and two free ports for the Playwright
-/// web servers (`OVERSEER_E2E_DIRECT_PORT`, `OVERSEER_E2E_PROXY_PORT`). `NO_COLOR` keeps the
-/// proxy's log plain.
+/// web servers (`OVERSEER_E2E_DIRECT_PORT`, `OVERSEER_E2E_PROXY_PORT`).
 fn common_environment(command: &mut Command, prepared: &Prepared) -> Result<(), Error> {
     let direct = TcpListener::bind("127.0.0.1:0")?;
     let proxied = TcpListener::bind("127.0.0.1:0")?;
@@ -451,8 +450,7 @@ fn common_environment(command: &mut Command, prepared: &Prepared) -> Result<(), 
         .env(
             "OVERSEER_E2E_PROXY_PORT",
             proxied.local_addr()?.port().to_string(),
-        )
-        .env("NO_COLOR", "1");
+        );
     Ok(())
 }
 
