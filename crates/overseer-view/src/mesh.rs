@@ -180,16 +180,20 @@ pub mod mark {
     pub const BADGE: u32 = 0;
     /// A reserving user's badge, small and faded.
     pub const RESERVED: u32 = 1;
-    /// The portals of a room leading within the shard.
+    /// A run of rooms whose portals lead within the shard (`overlay::portals`).
     pub const PORTAL: u32 = 2;
-    /// The portals of a room leading to another shard.
+    /// A run of rooms whose portals lead to other shards.
     pub const SHARD_PORTAL: u32 = 3;
     /// The outline of the hovered room.
     pub const HOVER: u32 = 4;
+    /// A portal tile leading within the shard.
+    pub const PORTAL_TILE: u32 = 5;
+    /// A portal tile leading to another shard.
+    pub const SHARD_PORTAL_TILE: u32 = 6;
 }
 
-/// A mark of the overlay: a disc (badge, portal) or square (hover) centred on a ground
-/// point, sized in tiles within a range of CSS pixels.
+/// A mark of the overlay: a disc (badge, portal tile), capsule (a run of portal rooms) or
+/// square (hover) centred on a ground point, sized in tiles within a range of CSS pixels.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct MarkInstance {
@@ -197,7 +201,8 @@ pub struct MarkInstance {
     pub centre: [f32; 2],
     /// Radius in tiles, then its least and greatest size in CSS pixels.
     pub radius: [f32; 3],
-    /// Badge atlas rectangle: corner and side (`0..1`), and the layer.
+    /// Badge atlas rectangle: corner and side (`0..1`). Runs of portal rooms: the half
+    /// of the capsule's spine in tiles (`x`, `y`; zero for a disc).
     pub uv: [f32; 4],
     /// sRGB colour and opacity.
     pub color: [u8; 4],

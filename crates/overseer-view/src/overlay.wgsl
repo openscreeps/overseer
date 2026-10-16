@@ -9,7 +9,8 @@ struct Overlay {
     // Opacity of labels by class: x sectors, y rooms, z shard names; w: clip-space w of the
     // camera's target (rooms elsewhere are `w / their w` as large: perspective).
     labels: vec4<f32>,
-    // Opacity of x badges, y portal arcs, z portal marks, w the hover outline.
+    // Opacity of x badges, y portal runs (marks and arcs), z portal tiles, w the hover
+    // outline.
     marks: vec4<f32>,
     // Detail scenes: xy their room's centre (world), z their opacity.
     details: array<vec4<f32>, 4>,
@@ -93,6 +94,11 @@ struct MarkOut {
     @location(4) @interpolate(flat) radius: f32,
 }
 
+// The half of the spine of a run's capsule (tiles; zero for a disc): portal runs only.
+fn capsule_half(kind: u32, uv: vec4<f32>) -> vec2<f32> {
+    return select(vec2<f32>(0.0), uv.xy, kind == 2u || kind == 3u);
+}
+
 @vertex
 fn mark_vertex(@builtin(vertex_index) index: u32, in: MarkIn) -> MarkOut {
     var out: MarkOut;
@@ -106,11 +112,14 @@ fn mark_vertex(@builtin(vertex_index) index: u32, in: MarkIn) -> MarkOut {
     var opacity = overlay.marks.w;
     if kind <= 1u {
         opacity = overlay.marks.x * (1.0 - detail_at(in.centre));
-    } else if kind <= 3u {
+    } else if kind == 2u || kind == 3u {
+        opacity = overlay.marks.y;
+    } else if kind >= 5u {
         opacity = overlay.marks.z;
     }
     out.color = premultiplied(in.color, opacity);
-    out.local = (overlay_corner(index) * 2.0 - vec2<f32>(1.0)) * (radius + 2.0 * tiles_per_px);
+    let extent = abs(capsule_half(kind, in.uv)) + vec2<f32>(radius + 2.0 * tiles_per_px);
+    out.local = (overlay_corner(index) * 2.0 - vec2<f32>(1.0)) * extent;
     out.uv = in.uv;
     out.kind = in.kind;
     out.radius = radius;
@@ -149,15 +158,20 @@ fn mark_fragment(in: MarkOut) -> @location(0) vec4<f32> {
         let line = coverage(abs(edge + 1.25 * px) - 0.75 * px, px);
         return vec4<f32>(tint, 1.0) * opacity * line;
     }
-    // Portals: a translucent disc in a ring, a dot in the middle; another shard's a
-    // second ring.
-    var acc = vec4<f32>(tint, 1.0) * 0.22 * coverage(d, px);
-    var ring = coverage(abs(d + 1.25 * px) - 0.75 * px, px);
-    if kind == 3u {
-        ring = max(ring, coverage(abs(d + in.radius * 0.45) - 0.6 * px, px));
+    // Portals: a translucent disc (or capsule along a run) in a ring, a dot (a line along
+    // a run) in the middle; another shard's a second ring. Tiles have no dot: the tile
+    // shows its portal.
+    let half = capsule_half(kind, in.uv);
+    let along = clamp(dot(in.local, half) / max(dot(half, half), 1e-6), -1.0, 1.0);
+    let spine = length(in.local - half * along);
+    let edge = spine - in.radius;
+    var acc = vec4<f32>(tint, 1.0) * 0.22 * coverage(edge, px);
+    var ring = coverage(abs(edge + 1.25 * px) - 0.75 * px, px);
+    if kind == 3u || kind == 6u {
+        ring = max(ring, coverage(abs(edge + in.radius * 0.45) - 0.6 * px, px));
     }
-    let dot = coverage(length(in.local) - max(in.radius * 0.18, 1.2 * px), px);
-    let line = max(ring, dot);
+    let middle = coverage(spine - max(in.radius * 0.18, 1.2 * px), px);
+    let line = max(ring, select(middle, 0.0, kind >= 5u));
     acc = acc * (1.0 - line) + vec4<f32>(tint, 1.0) * line;
     return acc * opacity;
 }

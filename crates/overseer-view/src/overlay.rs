@@ -1,8 +1,9 @@
-//! The overlay over the world map: owners' badges, portals (marks, arcs between linked
-//! rooms, the names of the shards they lead to), room coordinates as labels and the
-//! hovered room's outline. Sizes are CSS pixels (within tile sizes for marks), so the
-//! overlay reads the same at every zoom; each part fades by level of detail
-//! ([`Overlay::fades`]) in the shader, so zooming changes no instance.
+//! The overlay over the world map: owners' badges, portals (runs of rooms leading the same
+//! way with arcs between linked runs and the names of the shards they lead to, zoomed out;
+//! each portal tile, zoomed in), room coordinates as labels and the hovered room's
+//! outline. Sizes are CSS pixels (within tile sizes for marks), so the overlay reads the
+//! same at every zoom; each part fades by level of detail ([`Overlay::fades`]) in the
+//! shader, so zooming changes no instance.
 //!
 //! Instances are rebuilt only when their data changes: badges and portal marks when an
 //! owner, reservation, badge or portal changes; sector labels with the bounds and portals;
@@ -30,8 +31,9 @@ const SECTOR_LABELS_PX: (f32, f32) = (TERRAIN_PX_PER_ROOM * 0.75, TERRAIN_PX_PER
 const ROOM_LABELS_PX: (f32, f32) = (TERRAIN_PX_PER_ROOM, TERRAIN_PX_PER_ROOM * 1.25);
 /// Room sizes (CSS pixels) over which badges fade in (smaller rooms leave no room).
 const BADGES_PX: (f32, f32) = (BADGE_PX_PER_ROOM, BADGE_PX_PER_ROOM * 1.5);
-/// Room sizes (CSS pixels) over which the arcs between linked portals fade out.
-const ARCS_PX: (f32, f32) = (TERRAIN_PX_PER_ROOM, MINIMAP_PX_PER_ROOM);
+/// Room sizes (CSS pixels) over which portal runs and the arcs between them fade out and
+/// portal tiles fade in.
+const PORTAL_TILES_PX: (f32, f32) = (TERRAIN_PX_PER_ROOM, MINIMAP_PX_PER_ROOM);
 /// Most room labels made at once.
 const ROOM_LABELS: usize = 6000;
 /// Badge of an owned room: radius in tiles (60 % of the room wide) and in CSS pixels at
@@ -49,7 +51,7 @@ const HOVER_COLOR: [u8; 4] = rgba(0xff_ff_ff, 200);
 pub struct Fades {
     /// Sector, room and shard labels, by [`labels::class`] (`w` unused).
     pub labels: [f32; 4],
-    /// Badges, portal arcs, portal marks and the hover outline.
+    /// Badges, portal runs (marks and arcs), portal tiles and the hover outline.
     pub marks: [f32; 4],
 }
 
@@ -62,8 +64,8 @@ impl Fades {
             labels: [1.0 - ramp(SECTOR_LABELS_PX), ramp(ROOM_LABELS_PX), 1.0, 0.0],
             marks: [
                 ramp(BADGES_PX) * (1.0 - detail),
-                1.0 - ramp(ARCS_PX),
-                1.0 - 0.5 * detail,
+                1.0 - ramp(PORTAL_TILES_PX),
+                ramp(PORTAL_TILES_PX) * (1.0 - 0.5 * detail),
                 1.0,
             ],
         }
@@ -121,9 +123,9 @@ pub struct Overlay {
     hover: Option<RoomCoord>,
     /// Owners' and reservers' badges.
     pub marks: Layer<MarkInstance>,
-    /// Portal marks.
+    /// Portal marks: runs, then tiles.
     pub portal_marks: Layer<MarkInstance>,
-    /// Arcs between linked portals.
+    /// Arcs between linked portal runs.
     pub arcs: Layer<ArcInstance>,
     /// Sector and shard labels and their glyphs.
     overview: Vec<Label>,

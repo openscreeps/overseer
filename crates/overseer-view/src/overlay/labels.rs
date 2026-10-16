@@ -5,7 +5,7 @@
 //! - **Sector labels** name the highway crossroads (`W10N20`, both numbers multiples of
 //!   ten: the corners of the sectors), centred just above the crossroad's centre, while
 //!   zoomed out ([`Lod::Overview`](crate::Lod::Overview)).
-//! - **Shard labels** name the shards a room's portals lead to, under its portal mark.
+//! - **Shard labels** name the shards a run of portal rooms leads to, under its mark.
 //! - **Room labels** name each room in its north-west corner from
 //!   [`Lod::Terrain`](crate::Lod::Terrain).
 //!

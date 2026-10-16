@@ -6,7 +6,7 @@ use overseer::map::{Portal, PortalDestination, RoomCoord, RoomRect, RoomReservat
 
 use super::{ME, room, shard, stat, terrain, world_view};
 use crate::camera::{room_centre, room_origin};
-use crate::mesh::mark;
+use crate::mesh::{MarkInstance, mark};
 use crate::overlay::badges::{BADGE, Badges, CELLS_PER_LAYER, LEVELS};
 use crate::overlay::labels::{GAP, Label, ROOM_TIERS, class};
 use crate::overlay::{self, Fades};
@@ -211,11 +211,15 @@ fn overlay_fades_follow_the_zoom() {
         Fades::at(30.0, 1.0).marks[0] <= 0.0,
         "detail scenes show the controller"
     );
-    assert!(fades(5.0).marks[1] > 0.99, "arcs zoomed out");
-    assert!(fades(150.0).marks[1] <= 0.0, "no arcs zoomed in");
     assert!(
-        fades(1.0).marks[2] > 0.99 && fades(1000.0).marks[2] > 0.0,
-        "portals always"
+        fades(5.0).marks[1] > 0.99,
+        "portal runs and arcs zoomed out"
+    );
+    assert!(fades(150.0).marks[1] <= 0.0, "no runs nor arcs zoomed in");
+    assert!(fades(5.0).marks[2] <= 0.0, "no portal tiles zoomed out");
+    assert!(
+        fades(150.0).marks[2] > 0.99 && Fades::at(1000.0, 1.0).marks[2] > 0.0,
+        "portal tiles zoomed in, over detail scenes too"
     );
     let mut view = world_view();
     place(&mut view, Vec2::ZERO, 30.0);
@@ -396,8 +400,9 @@ fn portals_link_pairs_once_and_name_other_shards() {
         ends("E5N5", "E15N5"),
         "to where an unscanned room's portals arrive"
     );
-    let marks = &world.overlay.portal_marks.items;
+    let marks = run_marks(&world.overlay.portal_marks.items);
     assert_eq!(marks.len(), 4);
+    assert_eq!(tile_marks(&world.overlay.portal_marks.items), 10);
     let shard_marks: Vec<_> = marks
         .iter()
         .filter(|mark| mark.kind == mark::SHARD_PORTAL)
@@ -425,12 +430,158 @@ fn portals_link_pairs_once_and_name_other_shards() {
     world.overlay.set_portals(room("W5N5"), &[]);
     assert!(!world.overlay.portals.contains(room("W5N5")));
     world.update_overlay(&frame);
-    assert_eq!(world.overlay.portal_marks.items.len(), 3);
+    assert_eq!(run_marks(&world.overlay.portal_marks.items).len(), 3);
     assert_eq!(
         world.overlay.arcs.items.len(),
         2,
         "E5S5 still leads to W5N5"
     );
+}
+
+/// The marks of portal runs among `marks`.
+fn run_marks(marks: &[MarkInstance]) -> Vec<MarkInstance> {
+    marks
+        .iter()
+        .filter(|mark| matches!(mark.kind, mark::PORTAL | mark::SHARD_PORTAL))
+        .copied()
+        .collect()
+}
+
+/// How many portal tiles `marks` mark.
+fn tile_marks(marks: &[MarkInstance]) -> usize {
+    marks
+        .iter()
+        .filter(|mark| matches!(mark.kind, mark::PORTAL_TILE | mark::SHARD_PORTAL_TILE))
+        .count()
+}
+
+/// A wall of 48 portals along row `y` of `at` (as on screeps.com's highways), each leading
+/// to the tile across the room in `to`.
+fn wall(at: &str, to: &str, y: u8) -> Vec<Portal> {
+    (1..=48)
+        .map(|x| portal((at, x, y), (to, None, Some((x, 49 - y)))))
+        .collect()
+}
+
+/// The portals of `rooms` (named), and the overlay at a world zoom.
+fn portal_world(rooms: &[(String, Vec<Portal>)]) -> World {
+    let mut world = World::new(shard(), Limits::WEBGL2);
+    for (name, portals) in rooms {
+        world.overlay.set_portals(room(name), portals);
+    }
+    world.update_overlay(&overlay::Frame {
+        bounds: shard(),
+        visible: shard(),
+        px_per_room: 5.0,
+        world: true,
+    });
+    world
+}
+
+#[test]
+fn many_portals_in_a_room_make_one_mark_and_one_arc_per_destination() {
+    // 48 portals leading to one room, then two walls leading to two rooms.
+    let world = portal_world(&[("W5N5".to_owned(), wall("W5N5", "E5S5", 2))]);
+    let marks = &world.overlay.portal_marks.items;
+    assert_eq!(run_marks(marks).len(), 1);
+    assert_eq!(tile_marks(marks), 48);
+    assert_eq!(world.overlay.arcs.items.len(), 1);
+    let mut both = wall("E31S40", "E31S30", 1);
+    both.extend(wall("E31S40", "E31S50", 48));
+    let world = portal_world(&[("E31S40".to_owned(), both)]);
+    let marks = &world.overlay.portal_marks.items;
+    assert_eq!(run_marks(marks).len(), 1);
+    assert_eq!(tile_marks(marks), 96);
+    let arcs = &world.overlay.arcs.items;
+    assert_eq!(arcs.len(), 2, "one per destination");
+    let arrival = |name: &str, y: f32| room_origin(room(name)) + Vec2::new(25.0, y);
+    for (to, y) in [("E31S30", 48.5), ("E31S50", 1.5)] {
+        assert!(
+            arcs.iter().any(|arc| [arc.from, arc.to]
+                .iter()
+                .any(|end| Vec2::from(*end).distance(arrival(to, y)) < 1e-3)),
+            "to where the portals to {to} arrive"
+        );
+    }
+}
+
+#[test]
+fn portal_highways_make_one_run_per_segment_and_one_arc_per_linked_pair() {
+    let mut rooms = Vec::new();
+    for index in 1..=9 {
+        // A highway segment leading to the parallel one and back (north of it).
+        let (south, north) = (format!("W{index}N20"), format!("W{index}N30"));
+        rooms.push((south.clone(), wall(&south, &north, 1)));
+        rooms.push((north.clone(), wall(&north, &south, 48)));
+        // A segment whose rooms lead both ways, to segments not scanned yet.
+        let row = format!("E{index}S20");
+        let mut both = wall(&row, &format!("E{index}S10"), 1);
+        both.extend(wall(&row, &format!("E{index}S30"), 48));
+        rooms.push((row, both));
+        // A column leading west.
+        let column = format!("W20N{index}");
+        rooms.push((column.clone(), wall(&column, &format!("W30N{index}"), 5)));
+    }
+    // Beside the row's east end, two rooms leading to another shard: a run of their own.
+    for name in ["E10S20", "E11S20"] {
+        rooms.push((
+            name.to_owned(),
+            [(24, 25), (25, 25), (26, 25)]
+                .map(|(x, y)| portal((name, x, y), (name, Some("shard1"), None)))
+                .to_vec(),
+        ));
+    }
+    let mut world = portal_world(&rooms);
+    let marks = &world.overlay.portal_marks.items;
+    assert_eq!(tile_marks(marks), 9 * 48 * 5 + 6, "every tile");
+    let runs = run_marks(marks);
+    assert_eq!(runs.len(), 5, "{runs:?}");
+    let along = |half: [f32; 4]| Vec2::new(half[0], half[1]);
+    let rows = runs
+        .iter()
+        .filter(|mark| along(mark.uv).x.abs() > 150.0 && along(mark.uv).y.abs() < 1e-3)
+        .count();
+    let columns = runs
+        .iter()
+        .filter(|mark| along(mark.uv).y.abs() > 150.0 && along(mark.uv).x.abs() < 1e-3)
+        .count();
+    assert_eq!((rows, columns), (3, 1), "capsules along the segments");
+    let shard_runs: Vec<_> = runs
+        .iter()
+        .filter(|mark| mark.kind == mark::SHARD_PORTAL)
+        .collect();
+    assert_eq!(shard_runs.len(), 1);
+    assert!((along(shard_runs[0].uv).x.abs() - 25.0).abs() < 1e-3);
+    let arcs = world.overlay.arcs.items.clone();
+    assert_eq!(
+        arcs.len(),
+        4,
+        "N20↔N30 once, S20 both ways, the column: {arcs:?}"
+    );
+    // The segments' arc joins the middles of their walls.
+    let wall_centre = |name: &str, y: f32| room_origin(room(name)) + Vec2::new(25.0, y);
+    assert!(arcs.iter().any(|arc| {
+        Vec2::from(arc.from).distance(wall_centre("W5N30", 48.5)) < 1e-3
+            && Vec2::from(arc.to).distance(wall_centre("W5N20", 1.5)) < 1e-3
+    }));
+    let names: Vec<&Label> = world
+        .overlay
+        .overview_labels()
+        .iter()
+        .filter(|label| label.class == class::SHARD)
+        .collect();
+    assert_eq!(names.len(), 1, "one shard label per run");
+    assert_eq!(names[0].text, "shard1");
+    // A segment broken in two: two runs, still one arc to the segment they lead to.
+    world.overlay.set_portals(room("W5N20"), &[]);
+    world.update_overlay(&overlay::Frame {
+        bounds: shard(),
+        visible: shard(),
+        px_per_room: 5.0,
+        world: true,
+    });
+    assert_eq!(run_marks(&world.overlay.portal_marks.items).len(), 6);
+    assert_eq!(world.overlay.arcs.items.len(), 4);
 }
 
 #[test]

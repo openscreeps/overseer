@@ -162,8 +162,9 @@
 //! | sector labels | [`Lod::Overview`], fading out from 18 to 24 pixels per room | the highway crossroads' names (`W10N20`) above their centre |
 //! | room labels | from [`Lod::Terrain`] (24 to 30 pixels per room) | each room's name in its north-west corner |
 //! | badges ([`Viewer::set_badge`]) | from [`BADGE_PX_PER_ROOM`] (10, fading in up to 15) until detail scenes fade in (per room as its scene arrives) | the owner's badge centred in owned rooms (60 % of the room, 10 to 40 pixels), a small faded one in reserved rooms |
-//! | portal marks ([`Viewer::set_portals`]) | always (half as strong over detail scenes) | a cyan ring around a room's portals (at least 11 pixels wide); lilac with a second ring and the shards' names below for portals to other shards |
-//! | portal arcs | fading out from 24 to 100 pixels per room | a thin curved line between rooms whose portals link within the shard (once per pair; to where portals arrive while the other room is unknown) |
+//! | portal runs ([`Viewer::set_portals`]) | fading out from 24 to 100 pixels per room | one mark per run of rooms side by side whose portals lead the same way (however many portals each holds): a cyan ring around a single room's portals (at least 11 pixels wide), a capsule along a longer run (at least 8); lilac with a second ring and the shards' names below for portals to other shards |
+//! | portal arcs | with the runs | a thin curved line per run and room offset its portals lead to within the shard (once per pair of linked runs; to where portals arrive while the other rooms are unknown) |
+//! | portal tiles | fading in from 24 to 100 pixels per room (half as strong over detail scenes) | a small ring on each portal tile (at least 4 pixels wide), lilac for portals to other shards |
 //! | hover ([`Viewer::set_hover`]) | always | a white line inside the room's border |
 //!
 //! Labels never overlap and are drawn with a dark halo over any terrain. Sector and shard
@@ -598,8 +599,9 @@ impl Viewer {
     }
 
     /// Sets a room's portals (`WorldEvent::Portals`; empty: none), replacing those given
-    /// before: a mark at every zoom, arcs to the rooms they link within the shard, the
-    /// names of the shards they lead to.
+    /// before. Zoomed out, the room counts once in its run of rooms leading the same way
+    /// (one mark, one arc per room offset linked within the shard, the names of the shards
+    /// they lead to), however many portals it holds; zoomed in, each portal tile is marked.
     pub fn set_portals(&mut self, room: RoomCoord, portals: &[Portal]) {
         self.view.world.overlay.set_portals(room, portals);
     }
