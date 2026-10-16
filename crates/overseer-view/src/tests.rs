@@ -1555,6 +1555,16 @@ fn frames_render_through_the_noop_backend() {
             room("W10N10"),
             &[portal("W10N10", "W10N10", Some("shard1"))],
         );
+        // A wall of portals along W1N1's north edge, linked to W1N11; hovering W1N1 draws
+        // its link as the focus.
+        let wall: Vec<_> = (1..=48_u8)
+            .map(|x| overseer::map::Portal {
+                x,
+                y: 1,
+                ..portal("W1N1", "W1N11", None)
+            })
+            .collect();
+        view.world.overlay.set_portals(room("W1N1"), &wall);
         view.set_hover(Some(room("W1N1")));
         for (mode, px_per_room) in [
             (ViewMode::Perspective, 2.0),

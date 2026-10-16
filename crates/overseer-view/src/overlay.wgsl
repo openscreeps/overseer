@@ -9,9 +9,12 @@ struct Overlay {
     // Opacity of labels by class: x sectors, y rooms, z shard names; w: clip-space w of the
     // camera's target (rooms elsewhere are `w / their w` as large: perspective).
     labels: vec4<f32>,
-    // Opacity of x badges, y portal runs (marks and arcs), z portal tiles, w the hover
-    // outline.
+    // Opacity of x badges, y compact portal runs (marks and links), z portal tiles, w the
+    // hover outline.
     marks: vec4<f32>,
+    // Opacity of x portal walls, y their links (while few are in view), z the links of the
+    // focused rooms.
+    links: vec4<f32>,
     // Detail scenes: xy their room's centre (world), z their opacity.
     details: array<vec4<f32>, 4>,
 }
@@ -29,6 +32,8 @@ const LIFT: f32 = 0.05;
 // Segments of an arc, and half its width in CSS pixels.
 const ARC_SEGMENTS: u32 = 24u;
 const ARC_HALF_WIDTH: f32 = 0.75;
+// CSS pixels between the beads of a portal wall.
+const WALL_BEAD_PX: f32 = 6.0;
 
 fn overlay_corner(index: u32) -> vec2<f32> {
     var corners = array<vec2<f32>, 6>(
@@ -94,9 +99,10 @@ struct MarkOut {
     @location(4) @interpolate(flat) radius: f32,
 }
 
-// The half of the spine of a run's capsule (tiles; zero for a disc): portal runs only.
+// The half of the spine of a run's capsule (tiles; zero for a disc): compact portal runs
+// and walls only.
 fn capsule_half(kind: u32, uv: vec4<f32>) -> vec2<f32> {
-    return select(vec2<f32>(0.0), uv.xy, kind == 2u || kind == 3u);
+    return select(vec2<f32>(0.0), uv.xy, kind == 2u || kind == 3u || kind == 7u);
 }
 
 @vertex
@@ -114,8 +120,10 @@ fn mark_vertex(@builtin(vertex_index) index: u32, in: MarkIn) -> MarkOut {
         opacity = overlay.marks.x * (1.0 - detail_at(in.centre));
     } else if kind == 2u || kind == 3u {
         opacity = overlay.marks.y;
-    } else if kind >= 5u {
+    } else if kind == 5u || kind == 6u {
         opacity = overlay.marks.z;
+    } else if kind == 7u {
+        opacity = overlay.links.x;
     }
     out.color = premultiplied(in.color, opacity);
     let extent = abs(capsule_half(kind, in.uv)) + vec2<f32>(radius + 2.0 * tiles_per_px);
@@ -158,13 +166,24 @@ fn mark_fragment(in: MarkOut) -> @location(0) vec4<f32> {
         let line = coverage(abs(edge + 1.25 * px) - 0.75 * px, px);
         return vec4<f32>(tint, 1.0) * opacity * line;
     }
-    // Portals: a translucent disc (or capsule along a run) in a ring, a dot (a line along
-    // a run) in the middle; another shard's a second ring. Tiles have no dot: the tile
-    // shows its portal.
     let half = capsule_half(kind, in.uv);
     let along = clamp(dot(in.local, half) / max(dot(half, half), 1e-6), -1.0, 1.0);
     let spine = length(in.local - half * along);
     let edge = spine - in.radius;
+    if kind == 7u {
+        // A wall: a faint line beaded every `WALL_BEAD_PX` pixels from its west (north)
+        // end, like the row of portals it stands for.
+        let length_tiles = length(half);
+        let from_start = (along + 1.0) * length_tiles;
+        let spacing = WALL_BEAD_PX * px;
+        let offset = (fract(from_start / spacing) - 0.5) * spacing;
+        let bead = coverage(length(vec2<f32>(offset, spine)) - (in.radius + 0.6 * px), px);
+        let line = max(0.4 * coverage(edge, px), bead);
+        return vec4<f32>(tint, 1.0) * line * opacity;
+    }
+    // Compact portal runs: a translucent disc (or capsule along several rooms) in a ring, a
+    // dot (a line along several rooms) in the middle; another shard's a second ring. Tiles
+    // have no dot: the tile shows its portal.
     var acc = vec4<f32>(tint, 1.0) * 0.22 * coverage(edge, px);
     var ring = coverage(abs(edge + 1.25 * px) - 0.75 * px, px);
     if kind == 3u || kind == 6u {
@@ -181,6 +200,8 @@ struct ArcIn {
     @location(1) b: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) bend: f32,
+    // `mesh::arc`: 0 a compact runs' link, 1 a walls' link, 2 a focused room's link.
+    @location(4) kind: u32,
 }
 
 struct ArcOut {
@@ -216,7 +237,13 @@ fn arc_vertex(@builtin(vertex_index) index: u32, in: ArcIn) -> ArcOut {
     let reach = ARC_HALF_WIDTH + 1.0;
     out.across = side * reach;
     out.position = nudge(here, vec2<f32>(normal.x, -normal.y) * out.across);
-    out.color = premultiplied(in.color, overlay.marks.y);
+    var opacity = overlay.marks.y;
+    if in.kind == 1u {
+        opacity = overlay.links.y;
+    } else if in.kind == 2u {
+        opacity = overlay.links.z;
+    }
+    out.color = premultiplied(in.color, opacity);
     if out.color.a <= 0.0 || here.w <= 0.0 {
         out.position = HIDDEN;
     }

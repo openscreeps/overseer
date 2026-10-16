@@ -180,9 +180,9 @@ pub mod mark {
     pub const BADGE: u32 = 0;
     /// A reserving user's badge, small and faded.
     pub const RESERVED: u32 = 1;
-    /// A run of rooms whose portals lead within the shard (`overlay::portals`).
+    /// A compact run of rooms whose portals lead within the shard (`overlay::portals`).
     pub const PORTAL: u32 = 2;
-    /// A run of rooms whose portals lead to other shards.
+    /// A compact run of rooms whose portals lead to other shards.
     pub const SHARD_PORTAL: u32 = 3;
     /// The outline of the hovered room.
     pub const HOVER: u32 = 4;
@@ -190,10 +190,13 @@ pub mod mark {
     pub const PORTAL_TILE: u32 = 5;
     /// A portal tile leading to another shard.
     pub const SHARD_PORTAL_TILE: u32 = 6;
+    /// A wall of portals: a thin beaded line.
+    pub const WALL: u32 = 7;
 }
 
-/// A mark of the overlay: a disc (badge, portal tile), capsule (a run of portal rooms) or
-/// square (hover) centred on a ground point, sized in tiles within a range of CSS pixels.
+/// A mark of the overlay: a disc (badge, portal tile), capsule (a run of portal rooms, a
+/// wall) or square (hover) centred on a ground point, sized in tiles within a range of CSS
+/// pixels.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct MarkInstance {
@@ -201,13 +204,23 @@ pub struct MarkInstance {
     pub centre: [f32; 2],
     /// Radius in tiles, then its least and greatest size in CSS pixels.
     pub radius: [f32; 3],
-    /// Badge atlas rectangle: corner and side (`0..1`). Runs of portal rooms: the half
-    /// of the capsule's spine in tiles (`x`, `y`; zero for a disc).
+    /// Badge atlas rectangle: corner and side (`0..1`). Runs of portal rooms and walls: the
+    /// half of the capsule's spine in tiles (`x`, `y`; zero for a disc).
     pub uv: [f32; 4],
     /// sRGB colour and opacity.
     pub color: [u8; 4],
     /// One of [`mark`].
     pub kind: u32,
+}
+
+/// Kinds of [`ArcInstance`]: which of the overlay's fades it follows.
+pub mod arc {
+    /// A link of compact runs of portal rooms: shown zoomed out.
+    pub const LINK: u32 = 0;
+    /// A link of walls of portals: shown while few are in view.
+    pub const WALL: u32 = 1;
+    /// A link of the room under the pointer or selected: shown at every zoom.
+    pub const FOCUS: u32 = 2;
 }
 
 /// A thin arc of the overlay on the ground between two points (linked portals).
@@ -223,6 +236,8 @@ pub struct ArcInstance {
     /// How far the middle bows out, as a share of the length (to the left of `from` →
     /// `to`).
     pub bend: f32,
+    /// One of [`arc`].
+    pub kind: u32,
 }
 
 /// A glyph of an overlay label: a rectangle of the glyph atlas at a CSS-pixel offset from

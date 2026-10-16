@@ -119,8 +119,9 @@ impl Overlays {
             ("mark_vertex", "mark_fragment"),
             instances(size_of::<MarkInstance>(), &mark_attributes),
         );
-        let arc_attributes =
-            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4, 3 => Float32];
+        let arc_attributes = wgpu::vertex_attr_array![
+            0 => Float32x2, 1 => Float32x2, 2 => Unorm8x4, 3 => Float32, 4 => Uint32
+        ];
         let arcs = build(
             "overlay arcs",
             ("arc_vertex", "arc_fragment"),

@@ -8,7 +8,14 @@
 //! Instances are rebuilt only when their data changes: badges and portal marks when an
 //! owner, reservation, badge or portal changes; sector labels with the bounds and portals;
 //! room labels when the view leaves the rectangle they were made for (the view and a
-//! margin around it) or zooms to another grid ([`labels::room_tier`]).
+//! margin around it) or zooms to another grid ([`labels::room_tier`]); portal arcs with
+//! the portals, the focus (the hovered and the selected room) and the walls' links in
+//! view.
+//!
+//! Portal arcs: the links of compact runs always (fading out as you zoom in); the links of
+//! walls only while at most [`WALL_LINKS_IN_VIEW`] of them may cross the view (so a world
+//! with a few walls shows them all, and one lined with walls only when zoomed in on a few),
+//! and every link of the focused rooms, brighter, at every zoom.
 
 pub mod badges;
 pub mod labels;
@@ -17,13 +24,13 @@ pub mod portals;
 use overseer::map::{Portal, RoomCoord, RoomRect};
 
 use crate::camera::room_centre;
-use crate::mesh::{ArcInstance, LabelGlyph, MarkInstance, mark, rgba};
+use crate::mesh::{ArcInstance, LabelGlyph, MarkInstance, arc, mark, rgba};
 use crate::text::Atlas;
 use crate::world::Cells;
-use crate::{BADGE_PX_PER_ROOM, MINIMAP_PX_PER_ROOM, TERRAIN_PX_PER_ROOM};
+use crate::{BADGE_PX_PER_ROOM, DETAIL_PX_PER_ROOM, MINIMAP_PX_PER_ROOM, TERRAIN_PX_PER_ROOM};
 pub use badges::Badges;
 pub use labels::Label;
-pub use portals::Portals;
+pub use portals::{Link, Portals};
 
 /// Room sizes (CSS pixels) over which sector labels fade out: room labels take over.
 const SECTOR_LABELS_PX: (f32, f32) = (TERRAIN_PX_PER_ROOM * 0.75, TERRAIN_PX_PER_ROOM);
@@ -34,6 +41,17 @@ const BADGES_PX: (f32, f32) = (BADGE_PX_PER_ROOM, BADGE_PX_PER_ROOM * 1.5);
 /// Room sizes (CSS pixels) over which portal runs and the arcs between them fade out and
 /// portal tiles fade in.
 const PORTAL_TILES_PX: (f32, f32) = (TERRAIN_PX_PER_ROOM, MINIMAP_PX_PER_ROOM);
+/// Room sizes (CSS pixels) over which portal walls grow from [`WALLS_FAR`] to full
+/// strength: calm borders zoomed out.
+const WALLS_PX: (f32, f32) = (BADGE_PX_PER_ROOM, TERRAIN_PX_PER_ROOM);
+/// Opacity of portal walls zoomed out.
+const WALLS_FAR: f32 = 0.5;
+/// Opacity of portal walls zoomed in (until their tiles take over).
+const WALLS_NEAR: f32 = 0.9;
+/// Room sizes (CSS pixels) over which the walls' links fade out: detail scenes take over.
+const WALL_LINKS_PX: (f32, f32) = (MINIMAP_PX_PER_ROOM, DETAIL_PX_PER_ROOM);
+/// Most walls' links drawn in view: more, and none are (only the focused rooms').
+pub const WALL_LINKS_IN_VIEW: usize = 6;
 /// Most room labels made at once.
 const ROOM_LABELS: usize = 6000;
 /// Badge of an owned room: radius in tiles (60 % of the room wide) and in CSS pixels at
@@ -51,8 +69,11 @@ const HOVER_COLOR: [u8; 4] = rgba(0xff_ff_ff, 200);
 pub struct Fades {
     /// Sector, room and shard labels, by [`labels::class`] (`w` unused).
     pub labels: [f32; 4],
-    /// Badges, portal runs (marks and arcs), portal tiles and the hover outline.
+    /// Badges, compact portal runs (marks and links), portal tiles and the hover outline.
     pub marks: [f32; 4],
+    /// Portal walls, the walls' links (while few are in view), the focused rooms' links
+    /// (`w` unused).
+    pub links: [f32; 4],
 }
 
 impl Fades {
@@ -60,13 +81,20 @@ impl Fades {
     /// detail layer at `detail` (`view::Fades::detail`).
     pub fn at(px_per_room: f32, detail: f32) -> Self {
         let ramp = |(from, to): (f32, f32)| smoothstep(from, to, px_per_room);
+        let runs = 1.0 - ramp(PORTAL_TILES_PX);
         Self {
             labels: [1.0 - ramp(SECTOR_LABELS_PX), ramp(ROOM_LABELS_PX), 1.0, 0.0],
             marks: [
                 ramp(BADGES_PX) * (1.0 - detail),
-                1.0 - ramp(PORTAL_TILES_PX),
+                runs,
                 ramp(PORTAL_TILES_PX) * (1.0 - 0.5 * detail),
                 1.0,
+            ],
+            links: [
+                (WALLS_FAR + (WALLS_NEAR - WALLS_FAR) * ramp(WALLS_PX)) * runs,
+                1.0 - ramp(WALL_LINKS_PX),
+                1.0,
+                0.0,
             ],
         }
     }
@@ -75,6 +103,7 @@ impl Fades {
     pub const ROOM: Self = Self {
         labels: [0.0; 4],
         marks: [0.0, 0.0, 0.0, 1.0],
+        links: [0.0; 4],
     };
 }
 
@@ -94,6 +123,8 @@ pub struct Frame {
     pub px_per_room: f32,
     /// A world scope (a room scope draws no labels).
     pub world: bool,
+    /// The selected room: its portals' links are drawn.
+    pub selected: Option<RoomCoord>,
 }
 
 /// GPU data that changes as a whole: the items and a version bumped on every change.
@@ -125,8 +156,12 @@ pub struct Overlay {
     pub marks: Layer<MarkInstance>,
     /// Portal marks: runs, then tiles.
     pub portal_marks: Layer<MarkInstance>,
-    /// Arcs between linked portal runs.
+    /// Arcs between linked portal runs: see the module documentation.
     pub arcs: Layer<ArcInstance>,
+    /// The links of the portal runs.
+    links: Vec<Link>,
+    /// What the arcs were made for: the walls' links drawn and the focused rooms.
+    arcs_key: Option<(Vec<usize>, [Option<RoomCoord>; 2])>,
     /// Sector and shard labels and their glyphs.
     overview: Vec<Label>,
     pub overview_glyphs: Layer<LabelGlyph>,
@@ -154,6 +189,8 @@ impl Overlay {
             marks: Layer::default(),
             portal_marks: Layer::default(),
             arcs: Layer::default(),
+            links: Vec::new(),
+            arcs_key: None,
             overview: Vec::new(),
             overview_glyphs: Layer::default(),
             rooms: Vec::new(),
@@ -246,8 +283,10 @@ impl Overlay {
         if std::mem::take(&mut self.portals_stale) {
             let portals = &self.portals;
             self.portal_marks.replace(|out| portals.marks(out));
-            self.arcs.replace(|out| portals.arcs(out));
+            self.links = portals.links();
+            self.arcs_key = None;
         }
+        self.update_arcs(frame);
         if !frame.world {
             return;
         }
@@ -278,6 +317,54 @@ impl Overlay {
         let rooms = &self.rooms;
         self.room_glyphs
             .replace(|out| labels::glyphs(rooms, atlas, out));
+    }
+
+    /// Makes the arcs again when the walls' links to draw or the focused rooms changed: the
+    /// links of compact runs, the walls' links when at most [`WALL_LINKS_IN_VIEW`] may cross
+    /// the view, and the links of the hovered and the selected room again on top.
+    fn update_arcs(&mut self, frame: &Frame) {
+        let selected = frame.selected.filter(|room| Some(*room) != self.hover);
+        let focus = [self.hover, selected];
+        let links = &self.links;
+        let in_view = || {
+            links
+                .iter()
+                .enumerate()
+                .filter(|(_, link)| link.is_wall() && link.meets(frame.visible))
+                .map(|(index, _)| index)
+        };
+        let crowded = in_view().nth(WALL_LINKS_IN_VIEW).is_some();
+        let walls = || in_view().take_while(|_| !crowded);
+        let same = self.arcs_key.as_ref().is_some_and(|(drawn, made_for)| {
+            *made_for == focus && drawn.iter().copied().eq(walls())
+        });
+        if same {
+            return;
+        }
+        let key = (walls().collect::<Vec<_>>(), focus);
+        self.arcs.replace(|out| {
+            out.extend(
+                links
+                    .iter()
+                    .filter(|link| !link.is_wall())
+                    .map(|link| link.arc),
+            );
+            out.extend(
+                key.0
+                    .iter()
+                    .filter_map(|&index| links.get(index))
+                    .map(|link| link.arc),
+            );
+            for room in focus.into_iter().flatten() {
+                out.extend(
+                    links
+                        .iter()
+                        .filter(|link| link.touches(room))
+                        .map(|link| link.drawn(arc::FOCUS)),
+                );
+            }
+        });
+        self.arcs_key = Some(key);
     }
 
     /// The grid of room labels wanted at `frame` (`None`: none, zoomed out too far).

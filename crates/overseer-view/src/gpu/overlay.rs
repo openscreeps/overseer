@@ -19,6 +19,7 @@ struct Uniforms {
     view: [f32; 4],
     labels: [f32; 4],
     marks: [f32; 4],
+    links: [f32; 4],
     details: [[f32; 4]; DETAIL_SLOTS],
 }
 
@@ -224,6 +225,7 @@ impl OverlayGpu {
                 overlay.target_w,
             ],
             marks: overlay.fades.marks,
+            links: overlay.fades.links,
             details,
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));

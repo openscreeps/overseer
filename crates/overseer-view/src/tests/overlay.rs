@@ -6,7 +6,7 @@ use overseer::map::{Portal, PortalDestination, RoomCoord, RoomRect, RoomReservat
 
 use super::{ME, room, shard, stat, terrain, world_view};
 use crate::camera::{room_centre, room_origin};
-use crate::mesh::{MarkInstance, mark};
+use crate::mesh::{MarkInstance, arc, mark};
 use crate::overlay::badges::{BADGE, Badges, CELLS_PER_LAYER, LEVELS};
 use crate::overlay::labels::{GAP, Label, ROOM_TIERS, class};
 use crate::overlay::{self, Fades};
@@ -221,6 +221,16 @@ fn overlay_fades_follow_the_zoom() {
         fades(150.0).marks[2] > 0.99 && Fades::at(1000.0, 1.0).marks[2] > 0.0,
         "portal tiles zoomed in, over detail scenes too"
     );
+    let walls = |px_per_room| fades(px_per_room).links[0];
+    assert!(
+        (walls(3.0) - 0.5).abs() < 1e-3 && walls(40.0) > 0.7 && walls(150.0) <= 0.0,
+        "walls calm zoomed out, stronger zoomed in, their tiles take over"
+    );
+    assert!(
+        fades(3.0).links[1] > 0.99 && fades(100.0).links[1] > 0.99 && fades(400.0).links[1] <= 0.0,
+        "walls' links (while few are in view) until detail scenes"
+    );
+    assert!(fades(3.0).links[2] > 0.99 && Fades::at(1000.0, 1.0).links[2] > 0.99);
     let mut view = world_view();
     place(&mut view, Vec2::ZERO, 30.0);
     assert!(view.overlay_fades().marks[0] > 0.0);
@@ -301,6 +311,7 @@ fn owners_and_reservers_show_their_badges() {
         visible: shard(),
         px_per_room: 10.0,
         world: true,
+        selected: None,
     };
     let (owned, reserved, other) = (room("W3N3"), room("W4N3"), room("W5N3"));
     world.set_stat(owned, Some(&stat(RoomStatus::Normal, Some((ME, 4)))));
@@ -381,6 +392,7 @@ fn portals_link_pairs_once_and_name_other_shards() {
         visible: shard(),
         px_per_room: 5.0,
         world: true,
+        selected: None,
     };
     world.update_overlay(&frame);
     let arcs = &world.overlay.arcs.items;
@@ -438,11 +450,11 @@ fn portals_link_pairs_once_and_name_other_shards() {
     );
 }
 
-/// The marks of portal runs among `marks`.
+/// The marks of portal runs (compact and walls) among `marks`.
 fn run_marks(marks: &[MarkInstance]) -> Vec<MarkInstance> {
     marks
         .iter()
-        .filter(|mark| matches!(mark.kind, mark::PORTAL | mark::SHARD_PORTAL))
+        .filter(|mark| matches!(mark.kind, mark::PORTAL | mark::SHARD_PORTAL | mark::WALL))
         .copied()
         .collect()
 }
@@ -474,6 +486,7 @@ fn portal_world(rooms: &[(String, Vec<Portal>)]) -> World {
         visible: shard(),
         px_per_room: 5.0,
         world: true,
+        selected: None,
     });
     world
 }
@@ -579,9 +592,161 @@ fn portal_highways_make_one_run_per_segment_and_one_arc_per_linked_pair() {
         visible: shard(),
         px_per_room: 5.0,
         world: true,
+        selected: None,
     });
     assert_eq!(run_marks(&world.overlay.portal_marks.items).len(), 6);
     assert_eq!(world.overlay.arcs.items.len(), 4);
+}
+
+/// A world frame over `visible`, with `selected` selected.
+fn frame_over(visible: RoomRect, selected: Option<&str>) -> overlay::Frame {
+    overlay::Frame {
+        bounds: shard(),
+        visible,
+        px_per_room: 5.0,
+        world: true,
+        selected: selected.map(room),
+    }
+}
+
+#[test]
+fn walls_and_compact_runs_are_told_apart_by_how_their_portals_line_up() {
+    let to = |at: &str, x: u8, y: u8| portal((at, x, y), ("E40S40", None, Some((x, y))));
+    let spread = |at: &'static str, count: u8| -> Vec<Portal> {
+        (0..count).map(|index| to(at, 10 + 2 * index, 20)).collect()
+    };
+    let cluster: Vec<Portal> = (0..9_u8)
+        .filter(|index| *index != 4)
+        .map(|index| to("W5N5", 24 + index % 3, 24 + index / 3))
+        .collect();
+    let crossroad = [(15, 14), (33, 33)]
+        .map(|(x, y)| portal(("W10N10", x, y), ("W10N10", Some("shard1"), None)))
+        .to_vec();
+    let column = (1..=48).map(|y| to("W50N50", 3, y)).collect();
+    let world = portal_world(&[
+        ("W5N5".to_owned(), cluster),
+        ("W10N10".to_owned(), crossroad),
+        ("W20N20".to_owned(), wall("W20N20", "W20N30", 2)),
+        ("W30N30".to_owned(), spread("W30N30", 12)),
+        ("W40N40".to_owned(), spread("W40N40", 11)),
+        ("W50N50".to_owned(), column),
+    ]);
+    let marks = run_marks(&world.overlay.portal_marks.items);
+    let at = |name: &str| {
+        let (origin, end) = (
+            room_origin(room(name)),
+            room_origin(room(name)) + Vec2::splat(50.0),
+        );
+        marks
+            .iter()
+            .find(|mark| {
+                let centre = Vec2::from(mark.centre);
+                centre.cmpge(origin).all() && centre.cmplt(end).all()
+            })
+            .copied()
+            .unwrap()
+    };
+    assert_eq!(at("W5N5").kind, mark::PORTAL, "a sector centre's cluster");
+    assert_eq!(
+        at("W10N10").kind,
+        mark::SHARD_PORTAL,
+        "far apart, but two portals"
+    );
+    assert_eq!(
+        at("W40N40").kind,
+        mark::PORTAL,
+        "too few portals for a wall"
+    );
+    for name in ["W20N20", "W30N30", "W50N50"] {
+        let wall = at(name);
+        assert_eq!(wall.kind, mark::WALL, "{name}");
+        assert!(wall.radius[2] <= 2.0, "{name}: a thin line at every zoom");
+    }
+    // Along the longer side, through the middle of the portals.
+    let row = at("W20N20");
+    assert_eq!([row.uv[0], row.uv[1]], [23.5, 0.0]);
+    assert_eq!(row.centre[1], room_origin(room("W20N20")).y + 2.5);
+    let column = at("W50N50");
+    assert_eq!([column.uv[0], column.uv[1]], [0.0, 23.5]);
+    assert_eq!(column.centre[0], room_origin(room("W50N50")).x + 3.5);
+    // The crossroad's portals to another shard keep their label.
+    let names: Vec<&str> = world
+        .overlay
+        .overview_labels()
+        .iter()
+        .filter(|label| label.class == class::SHARD)
+        .map(|label| label.text.as_str())
+        .collect();
+    assert_eq!(names, ["shard1"]);
+}
+
+#[test]
+fn walls_links_show_while_few_are_in_view_and_for_the_focused_rooms() {
+    // Eight highway segments of three rooms lined with walls, each linked both ways with
+    // the parallel segment ten rooms north; a sector centre linked with another.
+    let mut rooms = Vec::new();
+    for segment in 0..8 {
+        for index in 1..=3 {
+            let x = segment * 6 + index;
+            let (south, north) = (format!("W{x}N20"), format!("W{x}N30"));
+            rooms.push((south.clone(), wall(&south, &north, 1)));
+            rooms.push((north.clone(), wall(&north, &south, 48)));
+        }
+    }
+    let cluster = |at: &'static str, to: &'static str| {
+        [(24, 25), (25, 25), (26, 25)].map(|(x, y)| portal((at, x, y), (to, None, Some((x, y)))))
+    };
+    rooms.push(("W5N5".to_owned(), cluster("W5N5", "E5S5").to_vec()));
+    rooms.push(("E5S5".to_owned(), cluster("E5S5", "W5N5").to_vec()));
+    let mut world = portal_world(&rooms);
+    let kinds = |world: &World| {
+        let mut kinds: Vec<u32> = world
+            .overlay
+            .arcs
+            .items
+            .iter()
+            .map(|arc| arc.kind)
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    };
+    assert_eq!(
+        kinds(&world),
+        [arc::LINK],
+        "eight walls' links in view: only the sector centres'"
+    );
+    let version = world.overlay.arcs.version;
+    world.update_overlay(&frame_over(shard(), None));
+    assert_eq!(world.overlay.arcs.version, version, "nothing changed");
+    // Zoomed in on one segment: its link shows.
+    let segment = RoomRect::new(room("W3N30"), room("W1N20"));
+    world.update_overlay(&frame_over(segment, None));
+    assert_eq!(kinds(&world), [arc::LINK, arc::WALL]);
+    let wall_arc = world.overlay.arcs.items[1];
+    assert!(
+        Vec2::from(wall_arc.from).distance(room_origin(room("W2N30")) + Vec2::new(25.0, 48.5))
+            < 1e-3
+    );
+    // Zoomed out again, hovering a room at either end of a segment's link shows it,
+    // brighter.
+    for hovered in ["W8N20", "W9N30"] {
+        world.overlay.set_hover(Some(room(hovered)));
+        world.update_overlay(&frame_over(shard(), None));
+        assert_eq!(kinds(&world), [arc::LINK, arc::FOCUS], "{hovered}");
+        let focus = world.overlay.arcs.items[1];
+        assert!(focus.color[3] > world.overlay.arcs.items[0].color[3]);
+        let x = Vec2::from(focus.to).x;
+        assert!(x > room_origin(room("W9N20")).x && x < room_origin(room("W6N20")).x);
+    }
+    // So does selecting one; a selected compact run's link is drawn again on top.
+    world.overlay.set_hover(None);
+    world.update_overlay(&frame_over(shard(), Some("W14N30")));
+    assert_eq!(kinds(&world), [arc::LINK, arc::FOCUS]);
+    world.update_overlay(&frame_over(shard(), Some("E5S5")));
+    assert_eq!(kinds(&world), [arc::LINK, arc::FOCUS]);
+    // A room with no portals focuses nothing.
+    world.update_overlay(&frame_over(shard(), Some("E50S50")));
+    assert_eq!(kinds(&world), [arc::LINK]);
 }
 
 #[test]

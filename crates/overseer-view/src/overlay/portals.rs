@@ -8,20 +8,27 @@
 //!
 //! - **Runs**, zoomed out: rooms side by side in a row (else a column) whose portals lead
 //!   the same way (the same room offsets within the shard, the same other shards) make one
-//!   run; a room unlike its neighbours makes a run of its own. A run gets one mark (a disc
-//!   around a single room's portals, a capsule along a longer run), one arc per room offset
-//!   it leads to (once per pair of linked runs, either way) and one label naming the other
-//!   shards it leads to, however many portals its rooms hold.
+//!   run; a room unlike its neighbours makes a run of its own. A run gets one mark, one
+//!   [`Link`] per room offset it leads to (once per pair of linked runs, either way) and
+//!   one label naming the other shards it leads to, however many portals its rooms hold.
 //! - **Tiles**, zoomed in: a small mark on each portal tile, lilac when it leads to another
 //!   shard.
+//!
+//! A run is a **wall** when its portals line up: at least [`WALL_TILES`] of them spread
+//! over at least [`WALL_EXTENT`] tiles (a highway lined with portals, any number of
+//! rooms long); otherwise it is **compact** (a cluster in a sector centre, a few portals
+//! at a crossroad, to another shard). Compact runs are what a map is read by: a ring (a
+//! capsule along several rooms) and arcs to where they lead. Walls are only borders: a
+//! thin beaded line through their portals, and their links are drawn only when few are
+//! in view or one of their rooms has the focus (see `Overlay::update`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::Vec2;
-use overseer::map::{Portal, RoomCoord};
+use overseer::map::{Portal, RoomCoord, RoomRect};
 
-use crate::camera::room_centre;
-use crate::mesh::{ArcInstance, MarkInstance, mark, rgba};
+use crate::camera::{room_centre, room_origin};
+use crate::mesh::{ArcInstance, MarkInstance, arc, mark, rgba};
 use crate::world::tile_origin;
 
 /// Colour (sRGB) of portals within the shard: the portal token's cyan.
@@ -30,6 +37,8 @@ pub const PORTAL: u32 = 0x5a_d1_ff;
 pub const SHARD_PORTAL: u32 = 0xc3_9b_ff;
 /// Opacity of the arcs between linked runs.
 const ARC_ALPHA: u8 = 150;
+/// Opacity of the arcs of the runs that have the focus.
+const FOCUS_ALPHA: u8 = 235;
 /// How far an arc's middle bows out, as a share of its length.
 const ARC_BEND: f32 = 0.16;
 /// Smallest radius of a single room's mark, in CSS pixels (it shows at every zoom).
@@ -38,11 +47,16 @@ pub const MARK_MIN_PX: f32 = 5.5;
 const RUN_MIN_PX: f32 = 4.0;
 /// Tiles a run's mark reaches beyond its farthest portal's centre.
 const MARK_MARGIN: f32 = 1.2;
-/// Largest radius of a run's mark, in tiles: a wall of portals along a room's edge is not
-/// circled whole.
+/// Largest radius of a compact run's mark, in tiles.
 const RUN_RADIUS: f32 = 12.0;
 /// A portal tile's mark: radius in tiles, least and greatest radius in CSS pixels.
 const TILE_RADIUS: [f32; 3] = [0.5, 2.0, f32::MAX];
+/// Fewest portals of a wall.
+pub const WALL_TILES: usize = 12;
+/// Fewest tiles a wall's portals spread over, along its longer side.
+pub const WALL_EXTENT: f32 = 15.0;
+/// A wall's line: half its width in tiles, least and greatest in CSS pixels.
+const WALL_RADIUS: [f32; 3] = [0.6, 0.75, 1.5];
 
 /// What the overlay keeps of a room's portals.
 #[derive(Clone, Debug, PartialEq)]
@@ -166,11 +180,63 @@ fn mean(points: impl Iterator<Item = Vec2>) -> Option<Vec2> {
 type Run = Vec<RoomCoord>;
 
 /// The mark of a run: its centre (world), the half of its capsule's spine (tiles; zero for
-/// a disc) and its radius in tiles and CSS pixels.
+/// a disc), its radius in tiles and CSS pixels, and whether the run is a wall.
 struct RunMark {
     centre: Vec2,
     half: Vec2,
     radius: [f32; 3],
+    wall: bool,
+}
+
+/// The link of a run to the rooms its portals lead to within the shard (one room offset),
+/// as an arc.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    /// The arc, [`arc::LINK`] (compact runs) or [`arc::WALL`] (walls).
+    pub arc: ArcInstance,
+    /// The rooms of the run it leaves.
+    run: Run,
+    /// Where the run's rooms lead, in rooms.
+    offset: (i32, i32),
+    /// The arc's bounds (world): its ends and how far its middle bows out.
+    min: Vec2,
+    max: Vec2,
+}
+
+impl Link {
+    /// Whether it joins walls.
+    pub const fn is_wall(&self) -> bool {
+        self.arc.kind == arc::WALL
+    }
+
+    /// Whether `room` is one of the rooms it joins (either end).
+    pub fn touches(&self, room: RoomCoord) -> bool {
+        self.run.contains(&room)
+            || self
+                .run
+                .contains(&shifted(room, (-self.offset.0, -self.offset.1)))
+    }
+
+    /// Whether its arc may cross `rooms`.
+    pub fn meets(&self, rooms: RoomRect) -> bool {
+        let min = room_origin(rooms.min);
+        let max = room_origin(rooms.max) + Vec2::splat(50.0);
+        self.min.cmple(max).all() && self.max.cmpge(min).all()
+    }
+
+    /// Its arc drawn as `kind`, with the focus's opacity for [`arc::FOCUS`].
+    pub fn drawn(&self, kind: u32) -> ArcInstance {
+        let alpha = if kind == arc::FOCUS {
+            FOCUS_ALPHA
+        } else {
+            ARC_ALPHA
+        };
+        ArcInstance {
+            kind,
+            color: rgba(PORTAL, alpha),
+            ..self.arc
+        }
+    }
 }
 
 /// The portals of every room.
@@ -260,9 +326,45 @@ impl Portals {
         run.iter().filter_map(|room| self.rooms.get(room))
     }
 
-    /// The mark of a run: a disc around a single room's portals, a capsule through the
-    /// centres of a longer run's.
+    /// The mark of a run. A wall gets a line along its longer side through the middle of
+    /// its portals; a compact run a disc around a single room's portals, a capsule through
+    /// the centres of a longer run's.
     fn run_mark(&self, run: &[RoomCoord]) -> Option<RunMark> {
+        let tiles: Vec<Vec2> = run
+            .iter()
+            .filter_map(|&room| Some((room, self.rooms.get(&room)?)))
+            .flat_map(|(room, portals)| {
+                portals
+                    .tiles
+                    .iter()
+                    .map(move |&(x, y, _)| tile_centre(room, x, y))
+            })
+            .collect();
+        let start = *tiles.first()?;
+        let (min, max) = tiles.iter().fold((start, start), |(min, max), &tile| {
+            (min.min(tile), max.max(tile))
+        });
+        let size = max - min;
+        if tiles.len() >= WALL_TILES && size.max_element() >= WALL_EXTENT {
+            let middle = mean(tiles.iter().copied())?;
+            let (centre, half) = if size.x >= size.y {
+                (
+                    Vec2::new(f32::midpoint(min.x, max.x), middle.y),
+                    Vec2::new(size.x * 0.5, 0.0),
+                )
+            } else {
+                (
+                    Vec2::new(middle.x, f32::midpoint(min.y, max.y)),
+                    Vec2::new(0.0, size.y * 0.5),
+                )
+            };
+            return Some(RunMark {
+                centre,
+                half,
+                radius: WALL_RADIUS,
+                wall: true,
+            });
+        }
         let first = self.members(run).next()?;
         let last = self.members(run).last()?;
         let reach = self
@@ -279,6 +381,7 @@ impl Portals {
             centre: (first.centre + last.centre) * 0.5,
             half: (last.centre - first.centre) * 0.5,
             radius: [radius, min_px, f32::MAX],
+            wall: false,
         })
     }
 
@@ -288,10 +391,15 @@ impl Portals {
             let (Some(mark), Some(first)) = (self.run_mark(&run), self.members(&run).next()) else {
                 continue;
             };
-            let (color, kind) = if first.shards.is_empty() {
-                (PORTAL, mark::PORTAL)
+            let color = if first.shards.is_empty() {
+                PORTAL
             } else {
-                (SHARD_PORTAL, mark::SHARD_PORTAL)
+                SHARD_PORTAL
+            };
+            let kind = match (mark.wall, first.shards.is_empty()) {
+                (true, _) => mark::WALL,
+                (false, true) => mark::PORTAL,
+                (false, false) => mark::SHARD_PORTAL,
             };
             out.push(MarkInstance {
                 centre: mark.centre.to_array(),
@@ -319,16 +427,18 @@ impl Portals {
         }
     }
 
-    /// Appends an arc per run and room offset its portals lead to within the shard, from
-    /// the centre of the portals leading there to where they arrive (the centre of the
-    /// portals leading back, else of where these arrive, else the rooms' centres). An arc
-    /// is skipped when most of its pairs of rooms are linked already (the other way, by
-    /// the run they lead to), so each pair of linked runs gets one arc, bowing to the left
-    /// of the lesser end towards the greater one.
-    pub fn arcs(&self, out: &mut Vec<ArcInstance>) {
+    /// A link per run and room offset its portals lead to within the shard, from the centre
+    /// of the portals leading there to where they arrive (the centre of the portals leading
+    /// back, else of where these arrive, else the rooms' centres). A link is skipped when
+    /// most of its pairs of rooms are linked already (the other way, by the run they lead
+    /// to), so each pair of linked runs gets one, bowing to the left of the lesser end
+    /// towards the greater one; it joins walls when the run it leaves is one.
+    pub fn links(&self) -> Vec<Link> {
+        let mut links = Vec::new();
         let mut linked = BTreeSet::new();
         for run in self.runs() {
-            let (Some(&first), Some(first_portals)) = (run.first(), self.members(&run).next())
+            let (Some(&first), Some(first_portals), Some(mark)) =
+                (run.first(), self.members(&run).next(), self.run_mark(&run))
             else {
                 continue;
             };
@@ -369,14 +479,23 @@ impl Portals {
                 } else {
                     (to, from)
                 };
-                out.push(ArcInstance {
-                    from: from.to_array(),
-                    to: to.to_array(),
-                    color: rgba(PORTAL, ARC_ALPHA),
-                    bend: ARC_BEND,
+                let bulge = Vec2::splat(from.distance(to) * ARC_BEND);
+                links.push(Link {
+                    arc: ArcInstance {
+                        from: from.to_array(),
+                        to: to.to_array(),
+                        color: rgba(PORTAL, ARC_ALPHA),
+                        bend: ARC_BEND,
+                        kind: if mark.wall { arc::WALL } else { arc::LINK },
+                    },
+                    run: run.clone(),
+                    offset,
+                    min: from.min(to) - bulge,
+                    max: from.max(to) + bulge,
                 });
             }
         }
+        links
     }
 
     /// The runs with portals to other shards: their middle room, where their label goes

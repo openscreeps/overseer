@@ -654,13 +654,14 @@ impl View {
         self.world.overlay.set_hover(room);
     }
 
-    /// What the overlay's labels are made for.
+    /// What the overlay's labels and portal arcs are made for.
     pub fn overlay_frame(&self) -> overlay::Frame {
         overlay::Frame {
             bounds: self.scope.bounds(),
             visible: self.visible_rooms(),
             px_per_room: self.camera.px_per_room(),
             world: matches!(self.scope, Scope::World(_)),
+            selected: self.selected.map(|(room, ..)| room),
         }
     }
 
