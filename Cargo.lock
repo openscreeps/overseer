@@ -3554,6 +3554,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "console_error_panic_hook",
+ "const_format",
  "futures-util",
  "js-sys",
  "leptos",

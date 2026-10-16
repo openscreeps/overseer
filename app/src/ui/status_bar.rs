@@ -15,6 +15,7 @@ use crate::route::Shard;
 use crate::state::AppState;
 use crate::ui::hover::{MapRooms, place_text};
 use crate::ui::rate_limits::{RateLimitsUi, StatusLifted, StatusReset};
+use crate::ui::style;
 use crate::ui::topbar::status_class;
 use crate::ui::world::{MapState, Phase};
 
@@ -191,29 +192,52 @@ pub fn StatusBar() -> impl IntoView {
     let progress = move || {
         loading.get().then(|| {
             view! {
-                <span class="status-item status-progress" role="status" title=move || title.get()>
-                    <span class="spinner small" aria-hidden="true"></span>
-                    <span class="status-text">{move || progress.get().unwrap_or_default()}</span>
+                <span
+                    class="inline-flex flex-initial items-center gap-2 min-w-0"
+                    role="status"
+                    title=move || title.get()
+                >
+                    <span class=style::SPINNER_SMALL aria-hidden="true"></span>
+                    <span class="truncate">{move || progress.get().unwrap_or_default()}</span>
                 </span>
                 <StatusReset />
             }
         })
     };
     view! {
-        <footer class="status-bar" aria-label="Status">
-            <span class="status-item status-connection" title=connection_title>
+        <footer
+            class="flex flex-none items-center gap-5 max-md:gap-3 h-statusbar px-3 overflow-hidden \
+                whitespace-nowrap text-sm tabular-nums text-muted bg-panel border-t border-edge"
+            aria-label="Status"
+        >
+            <span
+                class="inline-flex flex-none items-center gap-2 min-w-[9.5em]"
+                title=connection_title
+            >
                 <span class=move || status_class(state.status.get()) aria-hidden="true"></span>
                 {move || connection_text(state.status.get())}
             </span>
-            {item(place, "status-item status-place", "Game tick")}
-            {item(level, "status-item status-level", "Zoom level")}
-            {item(hover, "status-item status-hover", "Room under the pointer")}
+            {item(place, "inline-flex flex-none items-center gap-2 min-w-[7.5em]", "Game tick")}
+            {item(level, "inline-flex flex-none items-center gap-2 min-w-[4.5em] text-fg", "Zoom level")}
+            {item(
+                hover,
+                "inline-flex flex-none items-center gap-2 min-w-[6.5em] text-fg",
+                "Room under the pointer",
+            )}
             {progress}
             <StatusLifted />
-            <span class="status-end">
-                {item(frame, "status-item status-frame", "CPU time of the last frame")}
-                {item(backend, "status-item status-backend", "Graphics backend")}
-                <span class="status-item status-platform">
+            <span class="inline-flex items-center gap-5 max-md:gap-3 ml-auto">
+                {item(
+                    frame,
+                    "inline-flex flex-none items-center gap-2 min-w-[7.5em]",
+                    "CPU time of the last frame",
+                )}
+                {item(
+                    backend,
+                    "inline-flex flex-none items-center gap-2 max-xs:hidden",
+                    "Graphics backend",
+                )}
+                <span class="inline-flex flex-none items-center gap-2 max-md:hidden">
                     {move || {
                         if state.platform.with_value(Platform::is_tauri) { "Desktop" } else { "Web" }
                     }}

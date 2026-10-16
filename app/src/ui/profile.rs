@@ -19,6 +19,7 @@ use crate::state::AppState;
 use crate::ui::form::{Field, FormError, FormStatus};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
+use crate::ui::style::{self, concatcp};
 
 /// Choices of the notification interval, in minutes (as the official client offers them).
 const INTERVALS: [(u64, &str); 9] = [
@@ -50,16 +51,48 @@ const DEFAULT_INTERVAL: u64 = 60;
 /// The official client's default script error interval.
 const DEFAULT_ERROR_INTERVAL: u64 = 30;
 
+/// The profile's head: badge, name and server.
+const HEAD: &str = "flex items-center gap-4 mb-5";
+/// The account's badge.
+const BADGE: &str = "flex-none size-[64px] rounded-full bg-panel-2";
+/// The badge's placeholder while it loads.
+const BADGE_SKELETON: &str = "flex-none size-[64px] rounded-full bg-linear-90 from-panel-2 \
+    from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] animate-shimmer \
+    motion-reduce:animate-none";
+/// The account's figures: names beside their values, stacked on phones.
+const STATS: &str = "grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 max-xs:grid-cols-1 \
+    max-xs:gap-x-4 max-xs:gap-y-0";
+/// The name of a figure of [`STATS`].
+const STAT_NAME: &str = "text-muted";
+/// The value of a figure of [`STATS`].
+const STAT_VALUE: &str = "flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums max-xs:mb-2";
+/// A placeholder line of [`STATS`] while the profile loads, as tall as a figure.
+const STAT_SKELETON: &str = "inline-block w-24 h-[1.1em] align-middle rounded-sm bg-linear-90 \
+    from-panel-2 from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] \
+    animate-shimmer motion-reduce:animate-none";
+/// A wide [`STAT_SKELETON`].
+const STAT_SKELETON_WIDE: &str = "inline-block w-48 h-[1.1em] align-middle rounded-sm \
+    bg-linear-90 from-panel-2 from-25% via-panel-3 via-50% to-panel-2 to-75% \
+    bg-size-[200%_100%] animate-shimmer motion-reduce:animate-none";
+/// The summary's buttons, set off from the figures by a rule.
+const SUMMARY_ACTIONS: &str = "flex flex-wrap gap-2 mt-5 pt-4 border-t border-edge";
+
 /// The profile screen.
 #[component]
 pub fn Profile() -> impl IntoView {
     let state = AppState::expect();
     let Some(session) = state.session.get_untracked() else {
         return view! {
-            <section class="panel narrow state-card">
-                <span class="state-icon"><Icon kind=IconKind::User /></span>
-                <p>"You are not signed in."</p>
-                <button type="button" on:click=move |_| state.navigate(Route::Servers)>
+            <section class=concatcp!(style::PANEL_NARROW, " ", style::STATE_CARD)>
+                <span class=style::STATE_ICON>
+                    <Icon kind=IconKind::User class=style::STATE_ICON_SVG />
+                </span>
+                <p class=style::STATE_TEXT>"You are not signed in."</p>
+                <button
+                    type="button"
+                    class=style::BUTTON
+                    on:click=move |_| state.navigate(Route::Servers)
+                >
                     "Servers"
                 </button>
             </section>
@@ -86,9 +119,9 @@ pub fn Profile() -> impl IntoView {
     reload(false);
     let reload = StoredValue::new_local(reload);
     view! {
-        <div class="page">
+        <div class=style::PAGE>
             <Summary overseer=overseer.clone() me />
-            <div class="columns">
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(17rem,1fr))] items-start gap-4">
                 <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
                 <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
                 <Password overseer me />
@@ -167,22 +200,24 @@ fn Summary(
     let body = move || {
         match me.get() {
         None => view! {
-            <div class="profile-head" role="status">
-                <span class="badge skeleton" aria-hidden="true"></span>
-                <span class="skeleton line wide" aria-hidden="true"></span>
-                <span class="visually-hidden">"Loading the profile…"</span>
+            <div class=HEAD role="status">
+                <span class=BADGE_SKELETON aria-hidden="true"></span>
+                <span class=style::SKELETON_LINE_WIDE aria-hidden="true"></span>
+                <span class="sr-only">"Loading the profile…"</span>
             </div>
-            <div class="stats skeleton-stats" aria-hidden="true">
+            <div class=STATS aria-hidden="true">
                 {(0..7)
-                    .map(|_| view! { <span class="skeleton line"></span> <span class="skeleton line wide"></span> })
+                    .map(|_| view! { <span class=STAT_SKELETON></span> <span class=STAT_SKELETON_WIDE></span> })
                     .collect_view()}
             </div>
         }
         .into_any(),
         Some(Err(error)) => view! {
-            <div class="state-card inline" role="alert">
-                <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
-                <p class="error">{error}</p>
+            <div class=concatcp!(style::STATE_CARD, " py-4") role="alert">
+                <span class=style::STATE_ICON_ERROR>
+                    <Icon kind=IconKind::Alert class=style::STATE_ICON_SVG />
+                </span>
+                <p class=style::STATE_TEXT>{error}</p>
             </div>
         }
         .into_any(),
@@ -200,44 +235,46 @@ fn Summary(
             let credits = format!("{:.3}", me.money);
             let server = state.session_server().map(|server| server.name);
             view! {
-                <div class="profile-head">
+                <div class=HEAD>
                     {move || {
                         badge
                             .get()
                             .map_or_else(
-                                || view! { <span class="badge skeleton" aria-hidden="true"></span> }.into_any(),
+                                || view! { <span class=BADGE_SKELETON aria-hidden="true"></span> }.into_any(),
                                 |src| {
                                     view! {
-                                        <img class="badge" src=src alt=alt.clone() width="64" height="64" />
+                                        <img class=BADGE src=src alt=alt.clone() width="64" height="64" />
                                     }
                                         .into_any()
                                 },
                             )
                     }}
                     <div>
-                        <h1 id="profile-title">{username}</h1>
-                        {server.map(|server| view! { <p class="muted">{server}</p> })}
+                        <h1 id="profile-title" class="text-xl font-semibold leading-tight">
+                            {username}
+                        </h1>
+                        {server.map(|server| view! { <p class="mt-1 text-muted">{server}</p> })}
                     </div>
                 </div>
-                <dl class="stats">
-                    <dt>"Global Control Level"</dt>
-                    <dd>
+                <dl class=STATS>
+                    <dt class=STAT_NAME>"Global Control Level"</dt>
+                    <dd class=STAT_VALUE>
                         <LevelBar label="GCL" level=gcl />
                     </dd>
-                    <dt>"Power level"</dt>
-                    <dd>
+                    <dt class=STAT_NAME>"Power level"</dt>
+                    <dd class=STAT_VALUE>
                         <LevelBar label="Power level" level=power />
                     </dd>
-                    <dt>"CPU limit"</dt>
-                    <dd>{cpu_limit}</dd>
-                    <dt>"CPU used"</dt>
-                    <dd>{move || cpu.get().map_or_else(|| "waiting for the next tick…".to_owned(), |cpu| cpu_text(&cpu))}</dd>
-                    <dt>"Credits"</dt>
-                    <dd>{credits}</dd>
-                    <dt>"World status"</dt>
-                    <dd>{move || pending_text(world_status.get())}</dd>
-                    <dt>"Start room"</dt>
-                    <dd>
+                    <dt class=STAT_NAME>"CPU limit"</dt>
+                    <dd class=STAT_VALUE>{cpu_limit}</dd>
+                    <dt class=STAT_NAME>"CPU used"</dt>
+                    <dd class=STAT_VALUE>{move || cpu.get().map_or_else(|| "waiting for the next tick…".to_owned(), |cpu| cpu_text(&cpu))}</dd>
+                    <dt class=STAT_NAME>"Credits"</dt>
+                    <dd class=STAT_VALUE>{credits}</dd>
+                    <dt class=STAT_NAME>"World status"</dt>
+                    <dd class=STAT_VALUE>{move || pending_text(world_status.get())}</dd>
+                    <dt class=STAT_NAME>"Start room"</dt>
+                    <dd class=STAT_VALUE>
                         {move || pending_text(start_room.get())}
                         {move || {
                             start_route
@@ -246,7 +283,7 @@ fn Summary(
                                     view! {
                                         <button
                                             type="button"
-                                            class="link"
+                                            class=style::LINK_BUTTON
                                             on:click=move |_| state.navigate(route.clone())
                                         >
                                             "Show on the map"
@@ -262,14 +299,19 @@ fn Summary(
     }
     };
     view! {
-        <section class="panel profile" aria-labelledby="profile-title">
+        <section class=style::PANEL aria-labelledby="profile-title">
             {body}
-            <div class="actions">
-                <button type="button" class="primary" on:click=move |_| open_map(state)>
+            <div class=SUMMARY_ACTIONS>
+                <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| open_map(state)>
                     <Icon kind=IconKind::Globe />
                     "Open the map"
                 </button>
-                <button type="button" class="danger" on:click=sign_out disabled=move || signing_out.get()>
+                <button
+                    type="button"
+                    class=style::BUTTON_DANGER
+                    on:click=sign_out
+                    disabled=move || signing_out.get()
+                >
                     <Icon kind=IconKind::SignOut />
                     "Sign out"
                 </button>
@@ -282,7 +324,7 @@ fn Summary(
 fn pending_text(value: Option<String>) -> AnyView {
     value.map_or_else(
         || {
-            view! { <span class="skeleton line" role="status" aria-label="Loading"></span> }
+            view! { <span class=style::SKELETON_LINE role="status" aria-label="Loading"></span> }
                 .into_any()
         },
         IntoAny::into_any,
@@ -306,13 +348,14 @@ fn LevelBar(label: &'static str, level: LevelProgress) -> impl IntoView {
         format_points(level.total)
     );
     view! {
-        <span class="level">{format!("Level {}", level.level)}</span>
+        <span class="min-w-[4.5em]">{format!("Level {}", level.level)}</span>
         <progress
+            class=style::PROGRESS
             max="100"
             value=format!("{percent:.1}")
             aria-label=format!("{label} progress to level {}", level.level + 1)
         ></progress>
-        <span class="muted">{text}</span>
+        <span class="text-muted">{text}</span>
     }
 }
 
@@ -438,36 +481,36 @@ fn NotifyPrefs(
         }
     };
     view! {
-        <section class="panel" aria-labelledby="notify-title">
-            <h2 id="notify-title">"Notifications"</h2>
-            <form on:submit=submit aria-busy=move || busy.get().to_string()>
-                <div class="check-field">
-                    <input id="notify-enabled" type="checkbox" bind:checked=enabled />
+        <section class=style::PANEL aria-labelledby="notify-title">
+            <h2 id="notify-title" class=style::H2>"Notifications"</h2>
+            <form class=style::FORM on:submit=submit aria-busy=move || busy.get().to_string()>
+                <div class=style::CHECK_FIELD>
+                    <input id="notify-enabled" class=style::CHECKBOX type="checkbox" bind:checked=enabled />
                     <label for="notify-enabled">"Send notification e-mails"</label>
                 </div>
-                <div class="check-field">
-                    <input id="notify-messages" type="checkbox" bind:checked=messages />
+                <div class=style::CHECK_FIELD>
+                    <input id="notify-messages" class=style::CHECKBOX type="checkbox" bind:checked=messages />
                     <label for="notify-messages">"Notify about new messages"</label>
                 </div>
-                <div class="check-field">
-                    <input id="notify-online" type="checkbox" bind:checked=online />
+                <div class=style::CHECK_FIELD>
+                    <input id="notify-online" class=style::CHECKBOX type="checkbox" bind:checked=online />
                     <label for="notify-online">"Notify even while I am online"</label>
                 </div>
-                <div class="field">
-                    <label for="notify-interval">"Send interval"</label>
-                    <select id="notify-interval" bind:value=interval>
+                <div class=style::FIELD>
+                    <label for="notify-interval" class=style::LABEL>"Send interval"</label>
+                    <select id="notify-interval" class=style::INPUT bind:value=interval>
                         {options(&INTERVALS, interval)}
                     </select>
                 </div>
-                <div class="field">
-                    <label for="notify-errors">"Script error reports"</label>
-                    <select id="notify-errors" bind:value=errors_interval>
+                <div class=style::FIELD>
+                    <label for="notify-errors" class=style::LABEL>"Script error reports"</label>
+                    <select id="notify-errors" class=style::INPUT bind:value=errors_interval>
                         {options(&ERROR_INTERVALS, errors_interval)}
                     </select>
                 </div>
                 <FormError error />
                 <FormStatus message=saved />
-                <button type="submit" class="primary" disabled=move || busy.get()>
+                <button type="submit" class=style::BUTTON_PRIMARY disabled=move || busy.get()>
                     "Save notifications"
                 </button>
             </form>
@@ -532,13 +575,13 @@ fn Email(
         });
     };
     view! {
-        <section class="panel" aria-labelledby="email-title">
-            <h2 id="email-title">"E-mail"</h2>
-            <form on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
+        <section class=style::PANEL aria-labelledby="email-title">
+            <h2 id="email-title" class=style::H2>"E-mail"</h2>
+            <form class=style::FORM on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
                 <Field id="profile-email" label="E-mail address" kind="email" autocomplete="email" value=email error=field_error />
                 <FormError error />
                 <FormStatus message=saved />
-                <button type="submit" class="primary" disabled=move || busy.get()>
+                <button type="submit" class=style::BUTTON_PRIMARY disabled=move || busy.get()>
                     "Save e-mail"
                 </button>
             </form>
@@ -625,9 +668,9 @@ fn Password(
         });
     };
     view! {
-        <section class="panel" aria-labelledby="password-title">
-            <h2 id="password-title">"Password"</h2>
-            <form on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
+        <section class=style::PANEL aria-labelledby="password-title">
+            <h2 id="password-title" class=style::H2>"Password"</h2>
+            <form class=style::FORM on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
                 <Show when=has_password>
                     <Field id="password-old" label="Current password" kind="password" autocomplete="current-password" value=old />
                 </Show>
@@ -650,7 +693,7 @@ fn Password(
                 />
                 <FormError error />
                 <FormStatus message=saved />
-                <button type="submit" class="primary" disabled=move || busy.get()>
+                <button type="submit" class=style::BUTTON_PRIMARY disabled=move || busy.get()>
                     "Change password"
                 </button>
             </form>

@@ -16,6 +16,9 @@ use overseer::core::api::types::{GameRoomObject, GameRoomObjectStore};
 use overseer::core::socket::types::RoomUser;
 use overseer::map::{Portal, PortalDestination};
 
+use crate::ui::style;
+use crate::ui::style::concatcp;
+
 /// What an object's fields are read against.
 #[derive(Clone, Copy, Debug)]
 pub struct Context<'a> {
@@ -63,12 +66,12 @@ pub enum Tone {
 }
 
 impl Tone {
-    /// The CSS class.
+    /// The classes of the meter's bar (`<progress>`).
     pub const fn class(self) -> &'static str {
         match self {
-            Self::Hits => "meter hits",
-            Self::Energy => "meter energy",
-            Self::Progress => "meter progress",
+            Self::Hits => style::METER_BAR_HITS,
+            Self::Energy => style::METER_BAR_ENERGY,
+            Self::Progress => style::METER_BAR_PROGRESS,
         }
     }
 }
@@ -648,13 +651,16 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
     }
 }
 
-/// The CSS class of a resource's colour: `energy`, `power`, the base mineral of a mineral or
-/// compound (`res-u` for `UH2O`), else `res-other`.
+/// What every resource swatch shares.
+const SWATCH: &str = "flex-none size-[0.7rem] rounded-xs";
+
+/// The swatch of a resource's colour: `energy`, `power`, the base mineral of a mineral or
+/// compound (`U` for `UH2O`), else muted.
 pub fn resource_class(resource: &str) -> &'static str {
     match resource {
-        "energy" => "res res-energy",
-        "power" => "res res-power",
-        "ops" => "res res-ops",
+        "energy" => concatcp!(SWATCH, " bg-res-energy"),
+        "power" => concatcp!(SWATCH, " bg-res-power"),
+        "ops" => concatcp!(SWATCH, " bg-res-ops"),
         _ => {
             let base = resource
                 .chars()
@@ -666,14 +672,14 @@ pub fn resource_class(resource: &str) -> &'static str {
                         .filter(|first| matches!(first, 'H' | 'O' | 'X'))
                 });
             match base {
-                Some('U') => "res res-u",
-                Some('L') => "res res-l",
-                Some('K') => "res res-k",
-                Some('Z') => "res res-z",
-                Some('G') => "res res-g",
-                Some('X') => "res res-x",
-                Some('H' | 'O') => "res res-ho",
-                _ => "res res-other",
+                Some('U') => concatcp!(SWATCH, " bg-res-u"),
+                Some('L') => concatcp!(SWATCH, " bg-res-l"),
+                Some('K') => concatcp!(SWATCH, " bg-res-k"),
+                Some('Z') => concatcp!(SWATCH, " bg-res-z"),
+                Some('G') => concatcp!(SWATCH, " bg-res-g"),
+                Some('X') => concatcp!(SWATCH, " bg-res-x"),
+                Some('H' | 'O') => concatcp!(SWATCH, " bg-res-ho"),
+                _ => concatcp!(SWATCH, " bg-muted"),
             }
         }
     }
@@ -731,6 +737,29 @@ struct Detail {
     /// Its document, pretty-printed.
     json: String,
 }
+/// What every body part shares: dimmed once dead (`data-dead`), ringed when boosted
+/// (`data-boosted`).
+const PART: &str = "size-[0.85rem] rounded-xs data-dead:opacity-25 \
+    data-boosted:shadow-[0_0_0_2px_var(--color-sunken),0_0_0_3px_var(--color-fg)]";
+
+/// The square of a body part of kind `kind` (`move`, `ranged_attack`, …) in its colour, muted
+/// for an unknown kind.
+fn part_class(kind: &str) -> &'static str {
+    match kind {
+        "move" => concatcp!(PART, " bg-part-move"),
+        "work" => concatcp!(PART, " bg-part-work"),
+        "carry" => concatcp!(PART, " bg-part-carry"),
+        "attack" => concatcp!(PART, " bg-part-attack"),
+        "ranged_attack" => concatcp!(PART, " bg-part-ranged-attack"),
+        "heal" => concatcp!(PART, " bg-part-heal"),
+        "claim" => concatcp!(PART, " bg-part-claim"),
+        "tough" => concatcp!(PART, " bg-part-tough"),
+        _ => concatcp!(PART, " bg-muted"),
+    }
+}
+
+/// An empty inspector's message.
+const EMPTY: &str = "flex flex-col items-center gap-2 p-4 text-sm text-muted text-center";
 
 /// The selected object of the room, its tile's other objects, and its raw JSON.
 ///
@@ -788,20 +817,23 @@ pub fn Inspector(
     let state = Memo::new(move |_| shown.with(Shown::state));
     let content = move || match state.get() {
         State::Nothing => view! {
-            <p class="empty-state">"Select an object in the list or on the map."</p>
+            <p class=EMPTY>"Select an object in the list or on the map."</p>
         }
         .into_any(),
         State::NotLive => view! {
-            <p class="empty-state">"The room is not live: its objects are unknown."</p>
+            <p class=EMPTY>"The room is not live: its objects are unknown."</p>
         }
         .into_any(),
-        State::Gone => {
-            view! { <p class="empty-state" role="status">"The object is gone."</p> }.into_any()
-        }
+        State::Gone => view! { <p class=EMPTY role="status">"The object is gone."</p> }.into_any(),
         State::Object => detail_view(shown, on_select, go_to).into_any(),
     };
+    // A message alone takes only its height; an object takes the room the list leaves.
     view! {
-        <section class="inspector" aria-label="Inspector">
+        <section
+            class="flex-[1_1_55%] has-[>p]:flex-none min-h-0 overflow-auto p-3 bg-panel-2 border-t \
+                border-edge"
+            aria-label="Inspector"
+        >
             {content}
         </section>
     }
@@ -863,17 +895,17 @@ fn detail_view(
             })
         });
         view! {
-            <dt>{label}</dt>
-            <dd>{move || value.get().map(|value| value_view(label, value, go_to))}</dd>
+            <dt class="text-muted">{label}</dt>
+            <dd class="min-w-0 tabular-nums wrap-anywhere">
+                {move || value.get().map(|value| value_view(label, value, go_to))}
+            </dd>
         }
     };
+    // The signed-in user's own objects are marked by colour.
     let owner = move || {
         owner.get().map(|(owner, own)| {
-            view! {
-                <span class:own=own class="owner">
-                    {owner}
-                </span>
-            }
+            let class = if own { "text-ok" } else { "" };
+            view! { <span class=class>{owner}</span> }
         })
     };
     let neighbours = move || {
@@ -884,7 +916,7 @@ fn detail_view(
                 .map(|(id, title)| {
                     view! {
                         <li>
-                            <button type="button" class="chip" on:click=move |_| on_select.run(id.clone())>
+                            <button type="button" class=CHIP on:click=move |_| on_select.run(id.clone())>
                                 {title}
                             </button>
                         </li>
@@ -892,32 +924,40 @@ fn detail_view(
                 })
                 .collect_view();
             view! {
-                <div class="tile-mates">
-                    <span class="muted">"Also here"</span>
-                    <ul>{chips}</ul>
+                <div class="flex flex-wrap items-center gap-2 mt-3 text-sm">
+                    <span class="text-muted">"Also here"</span>
+                    <ul class="flex flex-wrap gap-1">{chips}</ul>
                 </div>
             }
         })
     };
     view! {
-        <header class="inspector-head">
-            <h3>{move || heading.get()}</h3>
-            <p class="inspector-sub">
-                <span class="kind">{move || kind.get()}</span>
+        <header>
+            <h3 class="text-lg font-semibold leading-tight wrap-anywhere">{move || heading.get()}</h3>
+            <p class="flex flex-wrap gap-x-3 gap-y-1 mt-1 mb-3 text-sm text-muted">
+                <span>{move || kind.get()}</span>
                 {owner}
-                <span class="pos">{move || position.get()}</span>
+                <span class="font-mono text-xs tabular-nums text-faint" title="Position">
+                    {move || position.get()}
+                </span>
             </p>
         </header>
-        <dl class="fields">
+        <dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2 items-baseline text-sm">
             <For each=field_keys key=|key| *key children=field />
         </dl>
         {neighbours}
-        <details class="raw">
-            <summary>"Raw JSON"</summary>
-            <pre>{move || json.get()}</pre>
+        <details class="mt-3 text-sm">
+            <summary class="text-muted cursor-pointer hover:text-fg">"Raw JSON"</summary>
+            <pre class="max-h-72 mt-2 p-2 overflow-auto font-mono text-xs bg-sunken rounded-md">{move || json.get()}</pre>
         </details>
     }
 }
+
+/// A tile mate's chip: selects it.
+const CHIP: &str = "inline-flex items-center justify-center gap-2 min-h-control-sm px-3 text-sm \
+    font-normal leading-tight whitespace-nowrap text-fg bg-panel-2 border border-edge rounded-full \
+    cursor-pointer transition-colors duration-(--duration-fast) ease-standard \
+    enabled:hover:bg-panel-3 enabled:hover:border-edge-strong";
 
 /// A field's value; a portal's destination is a link through it when `go_to` takes the user
 /// there.
@@ -934,7 +974,7 @@ fn value_view(
                 view! {
                     <button
                         type="button"
-                        class="link portal-to"
+                        class=concatcp!(style::LINK_BUTTON, " font-medium")
                         aria-label=name.clone()
                         title=name
                         on:click=move |_| go_to.run(to.clone())
@@ -949,9 +989,14 @@ fn value_view(
         Value::Meter { value, max, tone } => {
             let text = format!("{} / {}", number(value), number(max));
             view! {
-                <span class=tone.class()>
-                    <progress max=max.to_string() value=value.min(max).to_string() aria-label=label></progress>
-                    <span class="meter-text">{text}</span>
+                <span class=style::METER>
+                    <progress
+                        class=tone.class()
+                        max=max.to_string()
+                        value=value.min(max).to_string()
+                        aria-label=label
+                    ></progress>
+                    <span class=style::METER_TEXT>{text}</span>
                 </span>
             }
             .into_any()
@@ -970,18 +1015,20 @@ fn value_view(
                 .map(|(resource, amount)| {
                     let class = resource_class(&resource);
                     view! {
-                        <li class=class>
-                            <span class="swatch" aria-hidden="true"></span>
-                            <span class="res-name">{resource}</span>
-                            <span class="res-amount">{number(amount)}</span>
+                        <li class="flex items-center gap-2">
+                            <span class=class aria-hidden="true"></span>
+                            <span>{resource}</span>
+                            <span class="ml-auto">{number(amount)}</span>
                         </li>
                     }
                 })
                 .collect_view();
             view! {
-                <span class="store">
-                    <span class="store-total">{total}</span>
-                    <ul class="store-list">{items}</ul>
+                <span class="flex flex-col gap-1">
+                    <span class="text-muted">{total}</span>
+                    <ul class="grid grid-cols-[repeat(auto-fill,minmax(7rem,1fr))] gap-x-3 gap-y-1">
+                        {items}
+                    </ul>
                 </span>
             }
             .into_any()
@@ -995,18 +1042,25 @@ fn value_view(
                         Some(boost) => format!("{} ({boost})", part.kind),
                         None => part.kind.clone(),
                     };
-                    let class = format!("part part-{}", part.kind.replace('_', "-"));
+                    let class = part_class(&part.kind);
                     let title = name.clone();
                     view! {
-                        <li class=class class:dead=!part.alive class:boosted=part.boost.is_some() title=title>
-                            <span class="visually-hidden">{name}</span>
+                        <li
+                            class=class
+                            data-dead=!part.alive
+                            data-boosted=part.boost.is_some()
+                            title=title
+                        >
+                            <span class="sr-only">{name}</span>
                         </li>
                     }
                 })
                 .collect_view();
             view! {
-                <span class="body">
-                    <ul class="body-parts" aria-label=format!("{count} body parts")>{items}</ul>
+                <span>
+                    <ul class="flex flex-wrap gap-[3px]" aria-label=format!("{count} body parts")>
+                        {items}
+                    </ul>
                 </span>
             }
             .into_any()
@@ -1022,7 +1076,10 @@ mod tests {
     use overseer::core::socket::types::RoomUser;
     use serde_json::{Value as Json, json};
 
-    use super::{Context, Field, Part, Tone, Value, inspect, kind_label, resource_class, title};
+    use super::{
+        Context, Field, PART, Part, Tone, Value, inspect, kind_label, part_class, resource_class,
+        title,
+    };
 
     fn object(value: Json) -> GameRoomObject {
         serde_json::from_value(value).unwrap()
@@ -1417,14 +1474,36 @@ mod tests {
 
     #[test]
     fn resource_colours() {
-        assert_eq!(resource_class("energy"), "res res-energy");
-        assert_eq!(resource_class("power"), "res res-power");
-        assert_eq!(resource_class("UH2O"), "res res-u");
-        assert_eq!(resource_class("XKHO2"), "res res-k");
-        assert_eq!(resource_class("ZK"), "res res-z");
-        assert_eq!(resource_class("OH"), "res res-ho");
-        assert_eq!(resource_class("X"), "res res-x");
-        assert_eq!(resource_class("G"), "res res-g");
-        assert_eq!(resource_class("metal"), "res res-other");
+        let swatch = |colour: &str| format!("flex-none size-[0.7rem] rounded-xs {colour}");
+        assert_eq!(resource_class("energy"), swatch("bg-res-energy"));
+        assert_eq!(resource_class("power"), swatch("bg-res-power"));
+        assert_eq!(resource_class("ops"), swatch("bg-res-ops"));
+        assert_eq!(resource_class("UH2O"), swatch("bg-res-u"));
+        assert_eq!(resource_class("LO"), swatch("bg-res-l"));
+        assert_eq!(resource_class("XKHO2"), swatch("bg-res-k"));
+        assert_eq!(resource_class("ZK"), swatch("bg-res-z"));
+        assert_eq!(resource_class("OH"), swatch("bg-res-ho"));
+        assert_eq!(resource_class("X"), swatch("bg-res-x"));
+        assert_eq!(resource_class("G"), swatch("bg-res-g"));
+        assert_eq!(resource_class("metal"), swatch("bg-muted"));
+    }
+
+    #[test]
+    fn part_colours() {
+        assert_eq!(
+            PART,
+            "size-[0.85rem] rounded-xs data-dead:opacity-25 \
+             data-boosted:shadow-[0_0_0_2px_var(--color-sunken),0_0_0_3px_var(--color-fg)]"
+        );
+        let part = |colour: &str| format!("{PART} {colour}");
+        assert_eq!(part_class("move"), part("bg-part-move"));
+        assert_eq!(part_class("work"), part("bg-part-work"));
+        assert_eq!(part_class("carry"), part("bg-part-carry"));
+        assert_eq!(part_class("attack"), part("bg-part-attack"));
+        assert_eq!(part_class("ranged_attack"), part("bg-part-ranged-attack"));
+        assert_eq!(part_class("heal"), part("bg-part-heal"));
+        assert_eq!(part_class("claim"), part("bg-part-claim"));
+        assert_eq!(part_class("tough"), part("bg-part-tough"));
+        assert_eq!(part_class("wing"), part("bg-muted"));
     }
 }

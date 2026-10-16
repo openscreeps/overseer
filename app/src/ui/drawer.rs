@@ -22,6 +22,7 @@ use crate::ui::console::{ConsolePanel, ConsoleState};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::objects::{ObjectsPanel, Selection};
 use crate::ui::room_panel::{RoomData, RoomInfo, RoomPreview};
+use crate::ui::style::{self, concatcp};
 use crate::ui::world::MapState;
 
 /// Narrowest drawer, in CSS pixels.
@@ -39,6 +40,32 @@ const TABS: [(DrawerTab, &str, &str, IconKind); 3] = [
     (DrawerTab::Objects, "Objects", "objects", IconKind::List),
     (DrawerTab::Console, "Console", "console", IconKind::Terminal),
 ];
+
+/// The collapse button in the drawer's head: quiet, small, lined up with the tabs.
+const COLLAPSE_BUTTON: &str = concatcp!(
+    style::ICON_BUTTON_GHOST_SM,
+    " relative mb-1 ",
+    style::TIP_END
+);
+/// A tab, underlined in the accent while selected; the tabs share the width on phones.
+const TAB: &str = "inline-flex items-center justify-center gap-2 min-h-control px-3 -mb-px \
+    font-medium leading-tight whitespace-nowrap text-muted bg-transparent border-b-2 \
+    border-transparent cursor-pointer transition-colors duration-(--duration-fast) ease-standard \
+    hover:text-fg hover:bg-hover aria-selected:text-fg aria-selected:border-accent max-sm:flex-1 \
+    max-sm:px-2";
+/// A tab's count pill (`style::COUNT`, narrower).
+const TAB_COUNT: &str = "inline-flex items-center justify-center min-w-[1.3rem] px-2 text-xs \
+    font-semibold tabular-nums leading-[1.4] text-muted bg-panel-3 rounded-full";
+/// The resize edge: a line in the accent and a grip (`group-*`) while hovered, dragged or
+/// focused; hidden on phones, where the drawer sits under the map.
+const RESIZER: &str = concatcp!(
+    "group absolute inset-y-0 -left-[4px] z-5 w-[8px] cursor-col-resize touch-none \
+    focus-visible:outline-none before:absolute before:inset-y-0 before:left-[3px] \
+    before:w-[2px] before:bg-transparent before:transition-colors \
+    before:duration-(--duration-fast) before:ease-standard hover:before:bg-accent \
+    active:before:bg-accent focus-visible:before:bg-accent max-sm:hidden ",
+    style::TIP_LEFT
+);
 
 /// The widest drawer the window allows.
 fn max_width() -> u16 {
@@ -190,13 +217,13 @@ pub fn Drawer(server: Server) -> impl IntoView {
                     when=move || map.room.with(Option::is_some)
                     fallback=|| {
                         view! {
-                            <p class="empty-state">
+                            <p class=style::EMPTY_STATE>
                                 "Zoom into a room or click one on the map to see it here."
                             </p>
                         }
                     }
                 >
-                    <div class="room-tab">
+                    <div class="flex flex-col gap-3 p-3">
                         <RoomInfo room=map.room data user=user.get_value() pop_out=pop_out_room go_to>
                             {preview}
                         </RoomInfo>
@@ -210,7 +237,7 @@ pub fn Drawer(server: Server) -> impl IntoView {
                 when=move || map.room.with(Option::is_some)
                 fallback=|| {
                     view! {
-                        <p class="empty-state">"Zoom into a room to list its objects."</p>
+                        <p class=style::EMPTY_STATE>"Zoom into a room to list its objects."</p>
                     }
                 }
             >
@@ -222,7 +249,9 @@ pub fn Drawer(server: Server) -> impl IntoView {
             Some(console) => {
                 view! { <ConsolePanel state=console pop_out=pop_out_console /> }.into_any()
             }
-            None => view! { <p class="empty-state">"Sign in to use the console."</p> }.into_any(),
+            None => {
+                view! { <p class=style::EMPTY_STATE>"Sign in to use the console."</p> }.into_any()
+            }
         },
     };
     let objects = Signal::derive(move || {
@@ -241,28 +270,32 @@ pub fn Drawer(server: Server) -> impl IntoView {
         <Show when=open>
             <aside
                 id="drawer"
-                class="drawer"
+                class="relative flex flex-none flex-col w-[var(--drawer-width,24rem)] min-w-[280px] max-w-[calc(100%-320px)] min-h-0 bg-panel border-l border-edge animate-drawer-in max-sm:w-auto max-sm:max-w-none max-sm:h-1/2 max-sm:min-w-0 max-sm:border-t max-sm:border-l-0 max-sm:animate-none"
                 aria-label="Drawer"
                 style=move || format!("--drawer-width: {}px", width.get())
             >
                 <Resizer width />
-                <div class="drawer-head">
-                    <div class="drawer-tabs" role="tablist" aria-label="Drawer">
+                <div class="flex flex-none items-end gap-2 px-2 pt-1 border-b border-edge">
+                    <div class="flex flex-1 min-w-0" role="tablist" aria-label="Drawer">
                         <TabList tab select objects unread />
                     </div>
                     <button
                         type="button"
-                        class="icon-button sm"
+                        class=COLLAPSE_BUTTON
                         aria-label="Collapse drawer"
                         aria-controls="drawer"
                         data-tip="Collapse drawer"
-                        data-tip-pos="bottom-end"
                         on:click=move |_| state.update_saved(|saved| saved.settings.drawer = false)
                     >
                         <Icon kind=IconKind::Drawer />
                     </button>
                 </div>
-                <div id="drawer-panel" class="drawer-panel" role="tabpanel" aria-labelledby=labelled_by>
+                <div
+                    id="drawer-panel"
+                    class="flex flex-col flex-1 min-h-0 overflow-auto"
+                    role="tabpanel"
+                    aria-labelledby=labelled_by
+                >
                     {panel}
                 </div>
             </aside>
@@ -310,7 +343,7 @@ fn TabList(
                     } else {
                         count.to_string()
                     };
-                    view! { <span class="count">{text}</span> }
+                    view! { <span class=TAB_COUNT>{text}</span> }
                 })
             };
             view! {
@@ -318,7 +351,7 @@ fn TabList(
                     type="button"
                     role="tab"
                     id=format!("drawer-tab-{id}")
-                    class="drawer-tab"
+                    class=TAB
                     aria-selected=move || (tab.get() == which).to_string()
                     aria-controls="drawer-panel"
                     tabindex=move || if tab.get() == which { "0" } else { "-1" }
@@ -422,7 +455,7 @@ fn Resizer(width: RwSignal<u16>) -> impl IntoView {
     };
     view! {
         <div
-            class="drawer-resize"
+            class=RESIZER
             role="separator"
             tabindex="0"
             aria-orientation="vertical"
@@ -432,7 +465,6 @@ fn Resizer(width: RwSignal<u16>) -> impl IntoView {
             aria-valuemax=max_width()
             aria-valuenow=move || width.get()
             data-tip="Drag to resize · double-click to reset"
-            data-tip-pos="left"
             on:pointerdown=down
             on:pointermove=moved
             on:pointerup=up
@@ -443,7 +475,10 @@ fn Resizer(width: RwSignal<u16>) -> impl IntoView {
                 save();
             }
         >
-            <span class="grip" aria-hidden="true">
+            <span
+                class="absolute top-1/2 -left-[4px] flex items-center justify-center w-[16px] h-8 text-muted bg-panel-2 border border-edge rounded-sm -translate-y-1/2 opacity-0 pointer-events-none transition-opacity duration-(--duration-fast) ease-standard group-hover:opacity-100 group-active:opacity-100 group-focus-visible:opacity-100"
+                aria-hidden="true"
+            >
                 <Icon kind=IconKind::Grip />
             </span>
         </div>

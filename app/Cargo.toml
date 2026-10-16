@@ -10,6 +10,8 @@ publish.workspace = true
 # for the workspace checks and unit tests only.
 [dependencies]
 base64.workspace = true
+# `concatcp!`: the class sets of `ui::style`, composed at compile time.
+const_format.workspace = true
 # `abortable`: tasks that end with their component.
 futures-util.workspace = true
 leptos.workspace = true

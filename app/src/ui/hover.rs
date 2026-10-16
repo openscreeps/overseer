@@ -229,7 +229,12 @@ pub fn HoverTip() -> impl IntoView {
     move || {
         shown.get().then(|| {
             view! {
-                <div class="map-tip" role="tooltip" data-testid="map-tooltip" style=style>
+                <div
+                    class="absolute z-20 max-w-72 px-3 py-2 text-xs leading-tight text-fg pointer-events-none bg-panel-3 border border-edge-strong rounded-sm shadow-sm"
+                    role="tooltip"
+                    data-testid="map-tooltip"
+                    style=style
+                >
                     {move || {
                         content
                             .get()
@@ -240,11 +245,11 @@ pub fn HoverTip() -> impl IntoView {
                                     .map(|row| view! { <li>{row}</li> })
                                     .collect_view();
                                 view! {
-                                    <p class="map-tip-title">
-                                        <span class="map-tip-room">{tip.room}</span>
-                                        {tip.tile.map(|tile| view! { <span class="map-tip-tile">{tile}</span> })}
+                                    <p class="flex items-baseline gap-2 text-sm font-medium tabular-nums">
+                                        <span>{tip.room}</span>
+                                        {tip.tile.map(|tile| view! { <span class="font-normal text-muted">{tile}</span> })}
                                     </p>
-                                    <ul class="map-tip-rows">{rows}</ul>
+                                    <ul class="text-muted not-empty:mt-1">{rows}</ul>
                                 }
                             })
                     }}

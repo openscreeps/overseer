@@ -7,11 +7,33 @@ use std::time::Duration;
 use leptos::prelude::*;
 
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::style::{self, concatcp};
 
 /// How long a success or information toast stays.
 const SHORT: Duration = Duration::from_secs(5);
 /// How long an error toast stays.
 const LONG: Duration = Duration::from_secs(10);
+
+/// A success toast: a box with a green left edge, green text.
+const TOAST_SUCCESS: &str = "flex items-center gap-2 max-w-[min(26rem,calc(100vw-2rem))] py-2 pr-2 \
+    pl-3 text-ok bg-panel-3 border border-l-3 border-edge-strong border-l-ok rounded-md shadow-lg \
+    pointer-events-auto animate-toast-in";
+/// An information toast: a box with a blue left edge.
+const TOAST_INFO: &str = "flex items-center gap-2 max-w-[min(26rem,calc(100vw-2rem))] py-2 pr-2 \
+    pl-3 bg-panel-3 border border-l-3 border-edge-strong border-l-info rounded-md shadow-lg \
+    pointer-events-auto animate-toast-in";
+/// An error toast: a box with a red left edge, red text.
+const TOAST_ERROR: &str = "flex items-center gap-2 max-w-[min(26rem,calc(100vw-2rem))] py-2 pr-2 \
+    pl-3 text-error bg-panel-3 border border-l-3 border-edge-strong border-l-error rounded-md \
+    shadow-lg pointer-events-auto animate-toast-in";
+/// A toast's action.
+const TOAST_ACTION: &str = concatcp!(style::LINK_BUTTON, " whitespace-nowrap");
+/// The icon of a success toast.
+const ICON_SUCCESS: &str = "inline flex-none size-[1.15em] text-ok";
+/// The icon of an information toast.
+const ICON_INFO: &str = "inline flex-none size-[1.15em] text-info";
+/// The icon of an error toast.
+const ICON_ERROR: &str = "inline flex-none size-[1.15em] text-error";
 
 /// What a toast reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,13 +132,14 @@ impl Toasts {
 pub fn ToastRegion() -> impl IntoView {
     let toasts = Toasts::expect();
     view! {
-        <div class="toasts">
+        <div class="fixed right-4 bottom-[calc(var(--spacing-statusbar)+1rem)] z-60 flex flex-col \
+            items-end gap-2 pointer-events-none">
             <For each=move || toasts.list.get() key=|toast| toast.id let:toast>
                 {
-                    let (class, icon) = match toast.kind {
-                        ToastKind::Success => ("toast success", IconKind::Check),
-                        ToastKind::Info => ("toast info", IconKind::Info),
-                        ToastKind::Error => ("toast error", IconKind::Alert),
+                    let (class, icon, icon_class) = match toast.kind {
+                        ToastKind::Success => (TOAST_SUCCESS, IconKind::Check, ICON_SUCCESS),
+                        ToastKind::Info => (TOAST_INFO, IconKind::Info, ICON_INFO),
+                        ToastKind::Error => (TOAST_ERROR, IconKind::Alert, ICON_ERROR),
                     };
                     let role = if toast.kind == ToastKind::Error { "alert" } else { "status" };
                     let id = toast.id;
@@ -124,7 +147,7 @@ pub fn ToastRegion() -> impl IntoView {
                         view! {
                             <button
                                 type="button"
-                                class="link toast-action"
+                                class=TOAST_ACTION
                                 on:click=move |_| {
                                     toasts.dismiss(id);
                                     action.run(());
@@ -136,12 +159,12 @@ pub fn ToastRegion() -> impl IntoView {
                     });
                     view! {
                         <div class=class role=role>
-                            <Icon kind=icon />
-                            <span class="toast-text">{toast.text}</span>
+                            <Icon kind=icon class=icon_class />
+                            <span class="flex-1 min-w-0">{toast.text}</span>
                             {action}
                             <button
                                 type="button"
-                                class="icon-button sm ghost"
+                                class=style::ICON_BUTTON_GHOST_SM
                                 aria-label="Dismiss"
                                 on:click=move |_| toasts.dismiss(id)
                             >

@@ -1,5 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html
+  lang="en"
+  class="h-full scheme-dark bg-bg font-sans text-[15px] leading-normal text-fg [scrollbar-color:var(--color-scrollbar)_transparent] motion-reduce:[--duration-fast:0ms] motion-reduce:[--duration-slow:0ms] motion-reduce:[--duration:0ms]"
+>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -7,9 +10,8 @@
     <title>Overseer</title>
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link data-trunk rel="copy-file" href="icon.svg" />
-    <link data-trunk rel="css" href="style.css" />
-    <link data-trunk rel="css" href="drawer.css" />
+    <link data-trunk rel="tailwind-css" href="tailwind.css" />
     <link data-trunk rel="rust" data-bin="overseer-app" data-wasm-opt="z" />
   </head>
-  <body></body>
+  <body class="flex flex-col h-full min-h-screen m-0 overflow-hidden"></body>
 </html>

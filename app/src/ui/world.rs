@@ -37,6 +37,7 @@ use crate::ui::drawer::Drawer;
 use crate::ui::hover::{HoverTip, Hovered, MapRooms};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
+use crate::ui::style::{self, concatcp};
 use crate::ui::surface::{Hooks, HoverHook, Surface, SurfaceCanvas};
 
 /// Keyboard pan step, in CSS pixels.
@@ -45,6 +46,8 @@ const PAN_STEP: f32 = 80.0;
 const ZOOM_STEP: f32 = 1.5;
 /// How long the camera must rest before it is saved.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
+/// A map control's button: quiet over the map, its tooltip on the left.
+const MAP_BUTTON: &str = concatcp!(style::ICON_BUTTON_GHOST, " relative ", style::TIP_LEFT);
 
 /// Where the world of the screen is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -513,8 +516,8 @@ pub fn WorldScreen(
 
     let label = map_label(map);
     view! {
-        <div class="world">
-            <div class="stage">
+        <div class="flex flex-1 min-h-0 max-sm:flex-col">
+            <div class="relative flex-1 min-w-0">
                 <SurfaceCanvas
                     surface
                     testid="world-map"
@@ -535,35 +538,36 @@ pub fn WorldScreen(
 fn MapControls() -> impl IntoView {
     let map = MapState::expect();
     view! {
-        <div class="map-controls" role="group" aria-label="Zoom">
+        <div
+            class="absolute right-3 bottom-3 z-5 flex flex-col p-0.5 bg-panel/92 border border-edge rounded-lg shadow-sm"
+            role="group"
+            aria-label="Zoom"
+        >
             <button
                 type="button"
-                class="icon-button"
+                class=MAP_BUTTON
                 aria-label="Zoom in"
                 aria-keyshortcuts="+"
                 data-tip="Zoom in (+)"
-                data-tip-pos="left"
                 on:click=move |_| map.zoom(ZOOM_STEP)
             >
                 <Icon kind=IconKind::Plus />
             </button>
             <button
                 type="button"
-                class="icon-button"
+                class=MAP_BUTTON
                 aria-label="Zoom out"
                 aria-keyshortcuts="-"
                 data-tip="Zoom out (−)"
-                data-tip-pos="left"
                 on:click=move |_| map.zoom(1.0 / ZOOM_STEP)
             >
                 <Icon kind=IconKind::Minus />
             </button>
             <button
                 type="button"
-                class="icon-button"
+                class=MAP_BUTTON
                 aria-label="Show the whole world"
                 data-tip="Show the whole world"
-                data-tip-pos="left"
                 on:click=move |_| map.show_world()
             >
                 <Icon kind=IconKind::Fit />
@@ -579,26 +583,34 @@ fn WorldOverlay(surface: Surface, attempt: RwSignal<u32>) -> impl IntoView {
     move || {
         if let Some(error) = surface.error.get() {
             return view! {
-                <div class="overlay" role="alert">
-                    <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
-                    <p>{format!("The map cannot be drawn: {error}")}</p>
+                <div class=style::OVERLAY role="alert">
+                    <span class=style::STATE_ICON_ERROR>
+                        <Icon kind=IconKind::Alert class=style::STATE_ICON_SVG />
+                    </span>
+                    <p class="max-w-128">{format!("The map cannot be drawn: {error}")}</p>
                 </div>
             }
             .into_any();
         }
         match map.phase.get() {
             Phase::Loading | Phase::Idle => view! {
-                <div class="overlay" role="status">
-                    <span class="spinner" aria-hidden="true"></span>
-                    <p>"Loading the world…"</p>
+                <div class=style::OVERLAY role="status">
+                    <span class=style::SPINNER aria-hidden="true"></span>
+                    <p class="max-w-128">"Loading the world…"</p>
                 </div>
             }
             .into_any(),
             Phase::Failed(error) => view! {
-                <div class="overlay" role="alert">
-                    <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
-                    <p>{format!("The world could not be opened: {error}")}</p>
-                    <button type="button" class="primary" on:click=move |_| attempt.update(|n| *n += 1)>
+                <div class=style::OVERLAY role="alert">
+                    <span class=style::STATE_ICON_ERROR>
+                        <Icon kind=IconKind::Alert class=style::STATE_ICON_SVG />
+                    </span>
+                    <p class="max-w-128">{format!("The world could not be opened: {error}")}</p>
+                    <button
+                        type="button"
+                        class=style::BUTTON_PRIMARY
+                        on:click=move |_| attempt.update(|n| *n += 1)
+                    >
                         <Icon kind=IconKind::Refresh />
                         "Try again"
                     </button>
@@ -606,9 +618,11 @@ fn WorldOverlay(surface: Surface, attempt: RwSignal<u32>) -> impl IntoView {
             }
             .into_any(),
             Phase::Ready if map.bounds.get().is_some_and(|bounds| bounds.is_empty()) => view! {
-                <div class="overlay" role="status">
-                    <span class="state-icon"><Icon kind=IconKind::Globe /></span>
-                    <p>"This world has no rooms yet."</p>
+                <div class=style::OVERLAY role="status">
+                    <span class=style::STATE_ICON>
+                        <Icon kind=IconKind::Globe class=style::STATE_ICON_SVG />
+                    </span>
+                    <p class="max-w-128">"This world has no rooms yet."</p>
                 </div>
             }
             .into_any(),

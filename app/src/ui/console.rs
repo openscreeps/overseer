@@ -27,20 +27,49 @@ use self::history::{CommandHistory, SavedCommands};
 use self::markup::Piece;
 use crate::platform;
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::objects::{FILTER_ICON, FILTER_INPUT};
 use crate::ui::spawn_scoped;
+use crate::ui::style;
+use crate::ui::style::concatcp;
 
 /// Pixels from the bottom that still count as "at the bottom" (auto-scroll follows).
 const BOTTOM_SLACK: i32 = 8;
 /// Most rows the input grows to.
 const INPUT_ROWS: usize = 8;
 
-/// The kinds of lines, in filter order.
+/// The kinds of lines, in filter order: the kind, its filter's label, its `data-kind`.
 const KINDS: [(ConsoleKind, &str, &str); 4] = [
     (ConsoleKind::Log, "Log", "log"),
     (ConsoleKind::Result, "Results", "result"),
     (ConsoleKind::Error, "Errors", "error"),
     (ConsoleKind::Command, "Commands", "command"),
 ];
+
+/// A quiet small icon button of the console's bar, its tooltip below.
+const BAR_BUTTON: &str = concatcp!(style::ICON_BUTTON_GHOST_SM, " relative ", style::TIP);
+
+/// The classes of a line of kind `kind` and of its text.
+const fn line_classes(kind: ConsoleKind) -> (&'static str, &'static str) {
+    match kind {
+        ConsoleKind::Log => (
+            "flex gap-2 px-3 py-px border-l-2 border-transparent hover:bg-hover",
+            "flex-1 min-w-0 whitespace-pre-wrap wrap-anywhere",
+        ),
+        ConsoleKind::Result => (
+            "flex gap-2 px-3 py-px border-l-2 border-transparent hover:bg-hover",
+            "flex-1 min-w-0 whitespace-pre-wrap wrap-anywhere text-muted",
+        ),
+        ConsoleKind::Error => (
+            "flex gap-2 px-3 py-px border-l-2 border-error text-error bg-error-soft",
+            "flex-1 min-w-0 whitespace-pre-wrap wrap-anywhere",
+        ),
+        ConsoleKind::Command => (
+            "flex gap-2 px-3 py-px border-l-2 border-transparent text-fg hover:bg-hover",
+            "flex-1 min-w-0 whitespace-pre-wrap wrap-anywhere before:content-['›_'] \
+             before:text-accent",
+        ),
+    }
+}
 
 /// The filter index of `kind`.
 const fn kind_index(kind: ConsoleKind) -> usize {
@@ -243,6 +272,32 @@ fn clock(millis: u128) -> String {
     )
 }
 
+/// A kind filter of the console bar: a small segment.
+const KIND_BUTTON: &str = concatcp!(
+    style::BTN,
+    " ",
+    style::BTN_DEFAULT,
+    " min-h-control-sm px-2 text-xs ",
+    style::SEGMENT_SHAPE
+);
+/// The console bar: kinds, filter and buttons.
+const BAR: &str = "flex flex-wrap items-center gap-x-1 gap-y-2 flex-none py-2 pr-2 pl-3 border-b \
+    border-edge";
+/// The filter of the console bar; a narrow console gives it its own row under the kinds and the
+/// buttons.
+const FILTER_FIELD: &str = "relative flex items-center flex-[1_1_4rem] min-w-16 mx-1 font-normal \
+    @max-[440px]:order-1 @max-[440px]:basis-full @max-[440px]:m-0";
+/// The output.
+const OUTPUT: &str = "flex-1 min-w-0 overflow-auto py-1 font-mono text-xs leading-normal \
+    bg-sunken focus-visible:-outline-offset-2";
+/// The message of an empty output.
+const EMPTY: &str = concatcp!(style::EMPTY_STATE, " h-full justify-center font-sans");
+/// The "Paused" pill over the output: back to the latest lines.
+const RESUME_BUTTON: &str = "absolute bottom-3 left-1/2 z-5 inline-flex items-center \
+    justify-center gap-2 min-h-control-sm px-3 text-sm font-medium leading-tight whitespace-nowrap \
+    text-fg bg-panel-3 border border-edge-strong rounded-full shadow-lg cursor-pointer \
+    -translate-x-1/2 animate-fade-in-fast";
+
 /// The console: output, tools and input.
 #[component]
 pub fn ConsolePanel(
@@ -325,6 +380,7 @@ pub fn ConsolePanel(
             view! {
                 <button
                     type="button"
+                    class=KIND_BUTTON
                     aria-pressed=move || kinds.with(|kinds| kinds[index]).to_string()
                     on:click=move |_| kinds.update(|kinds| kinds[index] = !kinds[index])
                 >
@@ -337,10 +393,9 @@ pub fn ConsolePanel(
         view! {
             <button
                 type="button"
-                class="icon-button sm"
+                class=concatcp!(style::ICON_BUTTON_GHOST_SM, " relative ", style::TIP_END)
                 aria-label="Pop out console"
                 data-tip="Pop out console"
-                data-tip-pos="bottom-end"
                 on:click=move |_| pop_out.run(())
             >
                 <Icon kind=IconKind::PopOut />
@@ -355,7 +410,9 @@ pub fn ConsolePanel(
         } else {
             return None;
         };
-        Some(view! { <p class="empty-state console-empty">{message}</p> })
+        Some(view! {
+            <p class=EMPTY>{message}</p>
+        })
     };
     let paused = move || {
         (!following.get()).then(|| {
@@ -365,7 +422,11 @@ pub fn ConsolePanel(
                 n => format!("Paused · {n} new lines"),
             };
             view! {
-                <button type="button" class="console-resume" on:click=move |_| resume()>
+                <button
+                    type="button"
+                    class=RESUME_BUTTON
+                    on:click=move |_| resume()
+                >
                     <Icon kind=IconKind::ChevronDown />
                     {label}
                 </button>
@@ -373,15 +434,17 @@ pub fn ConsolePanel(
         })
     };
     view! {
-        <section class="console" aria-label="Console">
-            <div class="console-bar" role="toolbar" aria-label="Console tools">
-                <div class="segmented kinds" role="group" aria-label="Show">
+        <section class="@container flex flex-col flex-1 min-h-0" aria-label="Console">
+            <div class=BAR role="toolbar" aria-label="Console tools">
+                <div class=concatcp!(style::SEGMENTED, " @max-[440px]:mr-auto") role="group" aria-label="Show">
                     {kind_buttons}
                 </div>
-                <label class="filter">
-                    <Icon kind=IconKind::Filter />
+                // A narrow console: the filter takes its own row under the kinds and the buttons.
+                <label class=FILTER_FIELD>
+                    <Icon kind=IconKind::Filter class=FILTER_ICON />
                     <input
                         type="search"
+                        class=FILTER_INPUT
                         placeholder="Filter"
                         aria-label="Filter output"
                         prop:value=move || query.get()
@@ -390,7 +453,7 @@ pub fn ConsolePanel(
                 </label>
                 <button
                     type="button"
-                    class="icon-button sm"
+                    class=BAR_BUTTON
                     aria-label=move || if following.get() { "Pause auto-scroll" } else { "Resume auto-scroll" }
                     data-tip=move || if following.get() { "Pause auto-scroll" } else { "Resume auto-scroll" }
                     on:click=move |_| {
@@ -409,7 +472,7 @@ pub fn ConsolePanel(
                 </button>
                 <button
                     type="button"
-                    class="icon-button sm"
+                    class=BAR_BUTTON
                     aria-label="Clear console"
                     data-tip="Clear console"
                     on:click=move |_| {
@@ -421,16 +484,17 @@ pub fn ConsolePanel(
                 </button>
                 {pop_out}
             </div>
-            {move || state.error.get().map(|error| view! { <p class="error console-error" role="alert">{error}</p> })}
-            <div class="console-stage">
-                <div
-                    class="console-output"
-                    role="log"
-                    aria-label="Console output"
-                    tabindex="0"
-                    node_ref=output
-                    on:scroll=on_scroll
-                >
+            {move || {
+                state.error.get().map(|error| {
+                    view! {
+                        <p class="px-3 py-2 text-sm text-error border-b border-edge" role="alert">
+                            {error}
+                        </p>
+                    }
+                })
+            }}
+            <div class="relative flex flex-1 min-h-0">
+                <div class=OUTPUT role="log" aria-label="Console output" tabindex="0" node_ref=output on:scroll=on_scroll>
                     {empty}
                     <For each=move || visible.get() key=|line| line.id let(line)>
                         <LineView line />
@@ -446,7 +510,8 @@ pub fn ConsolePanel(
 /// One output line.
 #[component]
 fn LineView(line: Arc<Line>) -> impl IntoView {
-    let class = KINDS[kind_index(line.kind)].2;
+    let kind = KINDS[kind_index(line.kind)].2;
+    let (class, text_class) = line_classes(line.kind);
     let pieces = line
         .pieces
         .iter()
@@ -456,24 +521,32 @@ fn LineView(line: Arc<Line>) -> impl IntoView {
                 bold,
                 italic,
                 colour,
-            } => view! {
-                <span class:b=*bold class:i=*italic style:color=colour.clone()>
-                    {text.clone()}
-                </span>
+            } => {
+                let class = match (*bold, *italic) {
+                    (true, true) => "font-semibold italic",
+                    (true, false) => "font-semibold",
+                    (false, true) => "italic",
+                    (false, false) => "",
+                };
+                view! {
+                    <span class=class style:color=colour.clone()>
+                        {text.clone()}
+                    </span>
+                }
+                .into_any()
             }
-            .into_any(),
             Piece::Break => view! { <br /> }.into_any(),
         })
         .collect_view();
     let shard = line
         .shard
         .clone()
-        .map(|shard| view! { <span class="line-shard">{shard}</span> });
+        .map(|shard| view! { <span class="flex-none text-info">{shard}</span> });
     view! {
-        <div class=format!("line {class}")>
-            <time class="line-time">{line.time.clone()}</time>
+        <div class=class data-kind=kind>
+            <time class="flex-none text-faint tabular-nums select-none">{line.time.clone()}</time>
             {shard}
-            <span class="line-text">{pieces}</span>
+            <span class=text_class>{pieces}</span>
         </div>
     }
 }
@@ -577,7 +650,10 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
                 .collect_view();
             view! {
                 <select
-                    class="console-shard"
+                    class="min-h-control-sm px-3 text-sm text-fg bg-sunken border border-edge \
+                        rounded-md transition-[border-color] duration-(--duration-fast) \
+                        ease-standard hover:border-edge-strong focus-visible:outline-offset-0 \
+                        focus-visible:border-focus"
                     aria-label="Shard"
                     on:change=move |event| state.shard.set(Some(event_target_value(&event)))
                 >
@@ -588,15 +664,19 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
     };
     view! {
         <form
-            class="console-input"
+            class="flex flex-row items-end gap-2 flex-none px-3 py-2 bg-panel border-t border-edge"
             on:submit=move |event| {
                 event.prevent_default();
                 send();
             }
         >
             {shards}
-            <span class="prompt" aria-hidden="true">"›"</span>
+            <span class="self-center font-mono text-accent" aria-hidden="true">"›"</span>
             <textarea
+                class="flex-1 min-w-0 min-h-control-sm max-h-40 px-2 py-1 font-mono text-sm \
+                    leading-normal text-fg bg-sunken border border-edge rounded-md resize-none \
+                    hover:border-edge-strong focus-visible:outline-offset-0 \
+                    focus-visible:border-focus placeholder:text-faint"
                 node_ref=input
                 rows=rows
                 spellcheck="false"
@@ -610,7 +690,12 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
                 }
                 on:keydown=keydown
             ></textarea>
-            <button type="submit" class="icon-button sm" aria-label="Run" data-tip="Run (Enter)" data-tip-pos="top">
+            <button
+                type="submit"
+                class=concatcp!(style::ICON_BUTTON_SM, " relative self-end ", style::TIP_TOP)
+                aria-label="Run"
+                data-tip="Run (Enter)"
+            >
                 <Icon kind=IconKind::Send />
             </button>
         </form>
