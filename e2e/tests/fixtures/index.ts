@@ -14,7 +14,8 @@
 // - `user`: the account `signedInPage` is signed in as ({@link User}): a fresh `player` on
 //   `openscreeps`, the API token's account on `official`.
 // - `home`: a room that shows the user's presence ({@link Home}): the player's room on
-//   `openscreeps`, the account's start room (its own room when it has one) on `official`.
+//   `openscreeps`; on `official`, the account's start room (its own room when it has one) on
+//   the shard a first visit opens (the first shard the server lists).
 // - `signedInPage`: `page` already signed in as `user` (a password session on `openscreeps`, the
 //   API token on `official`), on the world of the server (`/#/<slug>/`). On `official` it
 //   answers "Not now" whenever the "Rate limit running low" prompt opens (the account's real
@@ -117,8 +118,10 @@ function homeOf(server: Server, room: string, shard: string | null): Home {
 }
 
 /**
- * The API token's account and start room on screeps.com, asked once per worker (two GET
- * requests): screeps.com's rate limits are per account.
+ * The API token's account and start room on screeps.com, asked once per worker (three GET
+ * requests): screeps.com's rate limits are per account. The start room is the one on the shard a
+ * first visit opens (the first one `api/version` lists, the library's default shard): without a
+ * shard, screeps.com answers with any of the account's shards, differently from call to call.
  */
 let official: Promise<Presence> | undefined;
 
@@ -127,13 +130,19 @@ function officialPresence(server: Server, token: string): Promise<Presence> {
     const { body: me } = await api<{ _id: string; username: string }>(server.url, 'api/auth/me', {
       token,
     });
-    const { body: start } = await api<{ room: string[] }>(server.url, 'api/user/world-start-room', {
-      token,
-    });
-    // `shard3/W6S2` on a sharded server.
-    const [shard, room] = start.room[0]?.includes('/')
-      ? (start.room[0].split('/') as [string, string])
-      : [null, start.room[0]];
+    const { body: version } = await api<{ serverData?: { shards?: string[] } }>(
+      server.url,
+      'api/version',
+    );
+    const shard = version.serverData?.shards?.[0] ?? null;
+    const query = shard ? `?shard=${encodeURIComponent(shard)}` : '';
+    const { body: start } = await api<{ room: string[] }>(
+      server.url,
+      `api/user/world-start-room${query}`,
+      { token },
+    );
+    // `W6S2`, or `shard3/W6S2` when the reply names the shard.
+    const room = start.room[0]?.split('/').pop();
     if (!room) throw new Error('screeps.com names no start room for the account');
     return { user: { id: me._id, username: me.username }, home: homeOf(server, room, shard), token };
   })();
