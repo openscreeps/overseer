@@ -197,13 +197,11 @@ test.describe('console', () => {
       await expect(log.getByText(/^e2e-tall/)).toBeVisible({ timeout: 30_000 });
       expect(await log.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
       await expect.poll(atBottom).toBe(true);
-      // A line arriving in the same frame scrolls back down once (as it would under a user's
-      // wheel); the next scroll wins. Instant, so that nothing keeps scrolling afterwards.
-      await expect(async () => {
-        await log.evaluate((element) => element.scrollTo({ top: 0, behavior: 'instant' }));
-        await expect(resume).toBeVisible({ timeout: 1_000 });
-      }).toPass({ timeout: 15_000 });
-      await expect(paused).toBeVisible();
+      await log.evaluate((element) => element.scrollTo({ top: 0, behavior: 'instant' }));
+      await expect(resume).toBeVisible();
+      // It stays where the user scrolled while lines arrive, and counts them.
+      await expect(paused).toHaveText(/^Paused · \d+ new lines?$/, { timeout: 30_000 });
+      expect(await log.evaluate((element) => element.scrollTop)).toBe(0);
       await resume.click();
       await expect(paused).toBeHidden();
       await expect.poll(atBottom).toBe(true);

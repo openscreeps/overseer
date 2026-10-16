@@ -189,11 +189,14 @@ test.describe('objects', () => {
     await expect(raw).toContainText(`"x": ${x},`);
     await expect(raw).toContainText(`"y": ${y}`);
     // Still open after the room's next ticks.
-    const tick = page.getByRole('contentinfo', { name: 'Status' }).getByTitle('Game tick');
-    const now = Number((await tick.textContent())?.match(/\d+/)?.[0]);
-    await expect
-      .poll(async () => Number((await tick.textContent())?.match(/\d+/)?.[0]), { timeout: 30_000 })
-      .toBeGreaterThan(now + 2);
+    // `tick N`, after the shard on a sharded server (`shard3 · tick N`).
+    const tick = async () =>
+      Number(
+        (await page.getByRole('contentinfo', { name: 'Status' }).getByTitle('Game tick').textContent())
+          ?.match(/tick (\d+)/)?.[1],
+      );
+    const now = await tick();
+    await expect.poll(tick, { timeout: 30_000 }).toBeGreaterThan(now + 2);
     await expect(raw).toBeVisible();
     await panel.getByText('Raw JSON', { exact: true }).click();
     await expect(raw).toBeHidden();
