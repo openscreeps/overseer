@@ -302,10 +302,13 @@ export const test = base.extend<
   signedInPage: async ({ page, server, presence, target }, use) => {
     if (target === 'official') {
       // The account's real budget runs low across runs: the prompt to lift the limits (on the
-      // screeps.com website) would cover the page. "Not now" only dismisses it for the session.
+      // screeps.com website) would cover the page. "Not now" only dismisses it for the session;
+      // the app prompts once per endpoint, so another prompt may follow at once (no waiting
+      // for the dialog to stay hidden).
       await page.addLocatorHandler(
         page.getByRole('dialog', { name: 'Rate limit running low' }),
         (dialog) => dialog.getByRole('button', { name: 'Not now' }).click(),
+        { noWaitAfter: true },
       );
     }
     const login = presence.player?.username ?? null;
