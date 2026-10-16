@@ -123,7 +123,13 @@ async function startRoom(server: Server, account: Account): Promise<string> {
   return room[0];
 }
 
-/** The room in focus is live in the drawer. */
+/**
+ * The room in focus is live in the drawer. 30 s for now: on a first visit the world map's
+ * portal scan of the whole world (121 `roomMap2` subscriptions at once) goes out before the
+ * room's live subscription and delays its first update (measured up to 11.5 s through the
+ * proxy under load, 3.6 s without the scans). The library fix (detail rooms before scans, scans
+ * held while a viewed room is pending) brings this back to 15 s.
+ */
 async function expectLive(page: Page, room: string) {
   await expect(
     roomInfo(page, room).getByRole('status').filter({ hasText: 'Live' }),
