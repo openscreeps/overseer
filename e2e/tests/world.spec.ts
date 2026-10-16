@@ -142,19 +142,28 @@ function corsHeaders(request: Request): Record<string, string> {
 /** A world-size reply of the test (`null`: the server answers). */
 type WorldSizeReply = { status: number; body: unknown } | null;
 
+/** How the test answers world-size requests. */
+interface WorldSize {
+  /** The reply (`null`: the server answers). */
+  reply: WorldSizeReply;
+  /** Until it settles, requests wait (the world stays loading). */
+  hold: Promise<void> | null;
+}
+
 /**
  * `page` with `GET /api/game/world-size` answered by the test from the start: the option
  * `worldSizeReply` sets the first reply (the signed-in page opens the world through it on a
- * first visit), `worldSize.reply` the following ones.
+ * first visit), `worldSize` the following ones.
  */
 const rewritten = test.extend<{
   worldSizeReply: WorldSizeReply;
-  worldSize: { reply: WorldSizeReply };
+  worldSize: WorldSize;
 }>({
   worldSizeReply: [null, { option: true }],
-  worldSize: async ({ worldSizeReply }, use) => use({ reply: worldSizeReply }),
+  worldSize: async ({ worldSizeReply }, use) => use({ reply: worldSizeReply, hold: null }),
   page: async ({ page, worldSize }, use) => {
-    await page.route(/\/api\/game\/world-size/, (route) => {
+    await page.route(/\/api\/game\/world-size/, async (route) => {
+      await worldSize.hold;
       const reply = worldSize.reply;
       if (!reply) return route.continue();
       return route.fulfill({
@@ -431,9 +440,20 @@ test.describe('world', () => {
       await expect(failure).toBeVisible({ timeout: 30_000 });
       await expect(level(page)).toHaveText('');
 
+      // Trying again shows the world loading until the server answers.
+      const answer = Promise.withResolvers<void>();
       worldSize.reply = null;
+      worldSize.hold = answer.promise;
       await failure.getByRole('button', { name: 'Try again' }).click();
       await expect(failure).toHaveCount(0);
+      await expect(
+        page.getByRole('status').filter({ hasText: 'Loading the world…' }),
+      ).toBeVisible();
+      answer.resolve();
+      await expect(page.getByRole('status').filter({ hasText: 'Loading the world…' })).toHaveCount(
+        0,
+        { timeout: 30_000 },
+      );
       await expect(level(page)).toHaveText(/\S/, { timeout: 30_000 });
       await expect(breadcrumb(page)).toContainText(home.room);
     });
