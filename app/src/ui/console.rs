@@ -292,17 +292,25 @@ pub fn ConsolePanel(
         }
         last
     });
+    // Only scrolling up pauses: lines added under the view and our own scrolls to the bottom
+    // never lower `scrollTop`, but a scroll event can arrive after the next line made the log
+    // taller, which a bottom check alone would read as the user leaving the bottom.
+    let last_top = StoredValue::new(0);
     let on_scroll = move |_| {
         let Some(output) = output.get_untracked() else {
             return;
         };
-        let bottom =
-            output.scroll_top() + output.client_height() >= output.scroll_height() - BOTTOM_SLACK;
-        if bottom != following.get_untracked() {
-            following.set(bottom);
-        }
+        let top = output.scroll_top();
+        let up = top < last_top.get_value();
+        last_top.set_value(top);
+        let bottom = top + output.client_height() >= output.scroll_height() - BOTTOM_SLACK;
         if bottom {
+            if !following.get_untracked() {
+                following.set(true);
+            }
             unseen.set(0);
+        } else if up && following.get_untracked() {
+            following.set(false);
         }
     };
     let resume = move || {
