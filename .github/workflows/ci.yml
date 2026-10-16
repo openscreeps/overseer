@@ -26,55 +26,38 @@ jobs:
       - run: cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-app --target wasm32-unknown-unknown -- -D warnings
       - run: cargo doc --workspace --no-deps
 
-  # Live feature tests and Playwright UI tests against a disposable OpenScreeps world
-  # (`cargo xtask e2e`), with the server checked out at the commit pinned in e2e/server.lock.
+  # Live feature tests and Playwright UI tests against a disposable OpenScreeps world in Docker
+  # (`cargo xtask e2e`), its image built from the server commit pinned in e2e/server.lock.
+  # The opt-in screeps.com run (`--target official`) needs the user's token and never runs here.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    defaults:
-      run:
-        working-directory: overseer
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: overseer
-      - id: server
-        run: echo "sha=$(tr -d '[:space:]' < e2e/server.lock)" >> "$GITHUB_OUTPUT"
-      # Next to this repository, where the harness looks for it (`../server`).
-      - uses: actions/checkout@v4
-        with:
-          repository: openscreeps/server
-          ref: ${{ steps.server.outputs.sha }}
-          path: server
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: |
-            server/package-lock.json
-            overseer/e2e/package-lock.json
+          cache-dependency-path: e2e/package-lock.json
       # Installs the toolchain and the wasm32 target pinned by rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: overseer
       # Trunk's prebuilt binary (building it from source takes minutes).
       - run: |
           curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$HOME/.cargo/bin" trunk
           trunk --version
       - run: npm ci
-        working-directory: server
-      - run: npm ci
-        working-directory: overseer/e2e
+        working-directory: e2e
       - run: npx playwright install --with-deps chromium
-        working-directory: overseer/e2e
+        working-directory: e2e
+      # Docker (preinstalled on the runner) builds the server image and runs the worlds.
       - run: cargo xtask e2e
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-report
           path: |
-            overseer/e2e/playwright-report/
-            overseer/e2e/test-results/
-            overseer/target/e2e/*.log
+            e2e/playwright-report/
+            e2e/test-results/
+            target/e2e/*.log
           if-no-files-found: ignore
