@@ -128,7 +128,9 @@ test.describe('drawer', () => {
     await expect
       .poll(() =>
         page.evaluate(() => {
-          const position = document.querySelector('.inspector-sub .pos')?.textContent;
+          const position = document
+            .querySelector('[aria-label="Inspector"] [title="Position"]')
+            ?.textContent;
           const map = document.querySelector('[data-testid="world-map"]')?.getAttribute('aria-label');
           return position != null && position === map?.match(/tile (\d+,\d+) selected/)?.[1];
         }),
@@ -176,7 +178,7 @@ test.describe('drawer', () => {
         'aria-current',
         'true',
       );
-      await expect(inspector.locator('.inspector-sub .pos')).toHaveText(`${x},${y}`);
+      await expect(inspector.getByTitle('Position')).toHaveText(`${x},${y}`);
     };
 
     // The main map: each click selects its object (A, B, C, D, then A again).

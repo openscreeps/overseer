@@ -25,7 +25,7 @@ async function recordStatusBar(page: Page): Promise<void> {
     window.e2eStatusTexts = [];
     window.e2eLevelLefts = [];
     new MutationObserver(() => {
-      const bar = document.querySelector('footer.status-bar');
+      const bar = document.querySelector('footer[aria-label="Status"]');
       if (!bar) return;
       const text = bar.textContent ?? '';
       if (window.e2eStatusTexts?.at(-1) !== text) window.e2eStatusTexts?.push(text);
