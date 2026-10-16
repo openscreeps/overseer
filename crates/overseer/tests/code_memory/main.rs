@@ -5,6 +5,7 @@ mod code;
 mod dir;
 mod memory;
 #[path = "../session/server.rs"]
+#[expect(dead_code, reason = "only the world harness holds responses")]
 mod server;
 
 use std::fs;

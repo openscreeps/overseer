@@ -217,7 +217,7 @@ impl WorldProgress {
 /// | Kind | Server with rate limits | Without (private servers), or exempt |
 /// |------|-------------------------|--------------------------------------|
 /// | Terrain (`POST /api/game/rooms`) | [`TERRAIN_IN_FLIGHT`] at a time, within the request budget | [`TERRAIN_IN_FLIGHT`] at a time |
-/// | Overviews (`POST /api/game/map-stats`) | one at a time, within the request budget and the endpoint's hourly budget (see below) | [`STATS_IN_FLIGHT`] at a time, no hourly budget |
+/// | Overviews (`POST /api/game/map-stats`) | [`STATS_IN_FLIGHT`] at a time (one until the endpoint's limit is known and while it spreads requests), within the request budget and the endpoint's hourly budget (see below) | [`STATS_IN_FLIGHT`] at a time, no hourly budget |
 /// | Portal scans (`roomMap2`) | no HTTP; within [`MINIMAP_CAP`] subscriptions | the same |
 /// | Portal destinations (`GET /api/game/room-objects`) | [`PORTAL_IN_FLIGHT`] at a time ([`PORTAL_BACKGROUND_IN_FLIGHT`] in the background), within the request budget | the same, without the budget |
 ///
@@ -244,18 +244,24 @@ impl WorldProgress {
 ///   asked again at once (a live room cannot tell its status), unless it was asked less than
 ///   [`STATS_VIEWED_FRESH`] (1 minute) before. Viewed rooms and stale near rooms go first,
 ///   the near rooms by whole sectors (10 × 10 rooms, like the official world map) nearest the
-///   first minimap room; then stale far rooms, by whole sectors, those touching the visible
-///   rooms first, nearest the centre. At most [`STATS_BATCH_SECTORS`] sectors (2 500 rooms)
-///   per request: a whole screeps.com shard takes 14 requests per hour. On servers with rate
-///   limits, one request at a time following the endpoint's rate limit
+///   first minimap room, with the stale far rooms in view ([`Interest::stats`]) after them
+///   while the far share allows, so a view wider than the near rooms fills in the same
+///   request; then stale far rooms, by whole sectors, those touching the visible rooms first,
+///   nearest the centre. At most [`STATS_BATCH_SECTORS`] sectors (5 000 rooms)
+///   per request: a whole screeps.com shard takes 7 requests per hour. Up to
+///   [`STATS_IN_FLIGHT`] (3) requests go out at once, each taking the most important rooms
+///   not already asked for, so the viewed, near and visible rooms are in the first round. On
+///   servers with rate limits the endpoint's rate limit
 ///   ([`net::Client::rate_limit`](crate::net::Client::rate_limit), screeps.com allows 60 per
-///   hour per token): at once while at least half of the window's requests are left (and the
-///   request budget allows); once fewer than half of the window's requests are
-///   left, the rest are spread evenly until the reset; far rooms may use only
-///   [`STATS_FAR_SHARE`] percent of the window (42 of 60), so viewed and near rooms always
-///   refresh; none goes out while none is left, and after HTTP 429 the next waits for the
-///   reset (60 s when the server-wide limit refused it). Other failures are retried after
-///   30 s. While the limit holds back wanted overviews, [`WorldProgress::stats_paused_until`]
+///   hour per token) governs, with the requests in flight counted as spent: the first request
+///   goes out alone, its response telling how many are left; then up to three at once while
+///   at least half of the window's requests are left (and the request budget allows); once
+///   fewer than half are left, one at a time, spread evenly until the reset; far rooms may
+///   use only [`STATS_FAR_SHARE`] percent of the window (42 of 60), so viewed and near rooms
+///   always refresh; none goes out while none is left, and after HTTP 429 (of any request in
+///   flight) the next waits for the reset (60 s when the server-wide limit refused it), the
+///   others in flight completing meanwhile. Other failures are retried after 30 s. While the
+///   limit holds back wanted overviews, [`WorldProgress::stats_paused_until`]
 ///   says until when ([`WorldEvent::StatsPaused`] reports each change). The user can lift
 ///   the limit early (screeps.com's reset page); [`Self::recheck_rate_limit`] then resumes
 ///   without waiting for the reset. It sends nothing of its own and does nothing while not

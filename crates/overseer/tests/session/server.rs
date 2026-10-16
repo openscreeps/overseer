@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use overseer::core::ServerUrl;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// A server-side WebSocket connection.
 pub type Ws = WebSocketStream<TokioAdapter<TcpStream>>;
@@ -57,6 +57,11 @@ struct State {
     upgrade_count: AtomicUsize,
     requests: Mutex<Vec<Request>>,
     sockets: mpsc::UnboundedSender<Ws>,
+    /// The path whose responses wait for [`Server::release`], if any.
+    held: Mutex<Option<String>>,
+    /// How many times [`Server::release`] was called: a held response goes out once it
+    /// grows past its value when the request arrived.
+    releases: watch::Sender<u64>,
 }
 
 /// A running server; it stops with the test's runtime.
@@ -82,6 +87,8 @@ impl Server {
             upgrade_count: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
             sockets: sender,
+            held: Mutex::new(None),
+            releases: watch::Sender::new(0),
         });
         let accepting = Arc::clone(&state);
         tokio::spawn(async move {
@@ -105,7 +112,25 @@ impl Server {
         self.sockets.recv().await.expect("the server is running")
     }
 
-    /// The HTTP requests served so far.
+    /// Holds the responses to requests of `path` (`None`: none) until [`Self::release`];
+    /// requests are recorded when they arrive, so [`Self::requests`] lists those in flight.
+    pub fn hold(&self, path: Option<&str>) {
+        *self
+            .state
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = path.map(str::to_owned);
+        if path.is_none() {
+            self.release();
+        }
+    }
+
+    /// Sends the responses held so far.
+    pub fn release(&self) {
+        self.state.releases.send_modify(|releases| *releases += 1);
+    }
+
+    /// The HTTP requests served (or held) so far.
     pub fn requests(&self) -> Vec<Request> {
         self.state
             .requests
@@ -171,11 +196,27 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
         headers,
         body,
     } = (state.routes)(&request);
+    let holds = state
+        .held
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_deref()
+        == Some(request.path.as_str());
+    let mut releases = state.releases.subscribe();
+    let arrived = *releases.borrow_and_update();
     state
         .requests
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push(request);
+    if holds
+        && releases
+            .wait_for(|releases| *releases > arrived)
+            .await
+            .is_err()
+    {
+        return;
+    }
     let headers = headers
         .iter()
         .fold(String::new(), |mut lines, (name, value)| {

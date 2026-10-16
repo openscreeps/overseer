@@ -27,14 +27,25 @@ pub const STATS_FAR_TTL: Duration = Duration::from_mins(60);
 /// rest stays for near rooms, so they always refresh.
 pub const STATS_FAR_SHARE: u32 = 70;
 
-/// Most sectors (10 × 10 rooms, at most 2 500 rooms) per map-stats request. The official
+/// Most sectors (10 × 10 rooms, at most 5 000 rooms) per map-stats request. The official
 /// world map asks for every room of the visible sectors at once; a whole shard (33 124 rooms
 /// on screeps.com `shard0`) is too much for one request, so it is split into requests of the
 /// nearest whole sectors and fills progressively.
-pub const STATS_BATCH_SECTORS: usize = 25;
+///
+/// Measured on screeps.com `shard0` (October 2026): 100 rooms answer in 0.18 s, 2 500 in
+/// 1.0 s (330 kB), 5 000 in 1.4 to 1.5 s (0.5 to 0.8 MB) with two in flight at once (the
+/// server answers them in parallel). The hourly budget (60 requests per token), not time,
+/// binds: 5 000 rooms per request load a whole shard in 7 requests instead of 14, in as many
+/// rounds of [`STATS_IN_FLIGHT`] requests. A cold load of `shard0` then took 8 requests and
+/// 6.9 s from the first request to the last overview (it took 14 to 16 requests and 33 to
+/// 41 s one request of 2 500 rooms at a time).
+pub const STATS_BATCH_SECTORS: usize = 50;
 
-/// Map-stats requests in flight at once on servers that show no rate limit; one on the others.
-pub const STATS_IN_FLIGHT: usize = 2;
+/// Map-stats requests in flight at once. On servers with rate limits (not exempt), one until
+/// the endpoint's first response tells how many requests its window has left, and one while
+/// the budget spreads requests over the rest of the window (see
+/// [`WorldMap`](super::WorldMap)).
+pub const STATS_IN_FLIGHT: usize = 3;
 
 /// A room that becomes viewed is requested again unless its overview was requested less than
 /// this before.
@@ -274,11 +285,33 @@ impl Stats {
         self.exempt.map(|(_, end)| end).filter(|end| *end > now)
     }
 
+    /// How many requests may be in flight at `now`: [`STATS_IN_FLIGHT`], but on a server with
+    /// rate limits (not exempt) one while the endpoint's limit is not known (its first
+    /// response tells how many requests are left before more go out) or while the budget
+    /// spreads requests over the rest of the window ([`Self::pace`]).
+    fn in_flight(&self, client: &Client, now: Instant) -> usize {
+        if self.server == Server::Unlimited || self.exempt_end(now).is_some() {
+            return STATS_IN_FLIGHT;
+        }
+        match self.window(client) {
+            Some((limit, left)) if !spreads(limit, left) => STATS_IN_FLIGHT,
+            _ => 1,
+        }
+    }
+
+    /// The endpoint's latest limit and the requests left in its window, those in flight
+    /// counted as spent (a response's count may already include requests whose responses
+    /// are still on their way: it errs on the side of the budget).
+    fn window(&self, client: &Client) -> Option<(RateLimit, u32)> {
+        let limit = client.rate_limit::<endpoints::GameMapStats>()?;
+        let in_flight = u32::try_from(self.fetches.len()).unwrap_or(u32::MAX);
+        Some((limit, limit.remaining.saturating_sub(in_flight)))
+    }
+
     /// Requests the overviews of the viewed rooms due a refresh and the stale near rooms,
     /// else of the stale far rooms (visible sectors first), when the endpoint's budget and the
     /// client's request budget allow (the endpoint's budget not while exempt, until the
-    /// exemption ends; on a `server` without rate limits, up to [`STATS_IN_FLIGHT`] requests
-    /// at once); returns when to plan again (a budget allows the next request, an overview
+    /// exemption ends), up to [`Self::in_flight`] requests at once; returns when to plan again (a budget allows the next request, an overview
     /// goes stale or the exemption ends). Queues a [`WorldEvent::StatsPaused`] when the rate
     /// limit starts or stops holding back wanted overviews (or its reset moves).
     pub(super) fn plan(
@@ -294,12 +327,8 @@ impl Stats {
             self.set_paused(None, events);
             return None;
         };
-        let in_flight = match server {
-            Server::Unlimited => STATS_IN_FLIGHT,
-            Server::Limited => 1,
-        };
         let mut due = None;
-        while self.fetches.len() < in_flight {
+        while self.fetches.len() < self.in_flight(client, now) {
             match self.start(map, client, shard, (now, rect, focus), (budget, events)) {
                 Ok(()) => {}
                 Err(at) => {
@@ -381,7 +410,21 @@ impl Stats {
             budget.take(tier).map_err(Some)?;
             let sectors = STATS_BATCH_SECTORS - usize::from(!viewed.is_empty());
             let center = self.near_center.unwrap_or_else(|| focus.centre());
-            viewed.extend(nearest_sectors(near, center, sectors, None));
+            let near = nearest_sectors(near, center, sectors, None);
+            let used = near
+                .iter()
+                .map(|&room| sector(room))
+                .collect::<HashSet<_>>()
+                .len();
+            viewed.extend(near);
+            // The rest of the request takes the stale far rooms in view, as far as their share
+            // of the budget allows: a view wider than the near rooms fills in the same round.
+            let far_allowed =
+                exempt_end.is_some() || !budgeted || self.far_ready_at(client, now) <= now;
+            if far_allowed && used < sectors {
+                far.retain(|&room| rect.contains(room));
+                viewed.extend(nearest_sectors(far, focus.centre(), sectors - used, None));
+            }
             viewed
         } else {
             if far.is_empty() {
@@ -445,18 +488,15 @@ impl Stats {
                     }
                 }
                 Err(Error::Closed) => return Err(Closed),
+                // The other requests in flight carry on; the latest wait holds the next ones.
                 Err(Error::Net(NetError::Api(ApiError::RateLimited(limit)))) => {
                     let wait = match limit {
                         Some(limit) => self.reset_at(limit, now).max(now + MIN_LIMIT_WAIT),
                         None => now + GLOBAL_RETRY,
                     };
-                    self.not_before = Some(wait);
-                    self.paced = None;
+                    self.wait_until(wait);
                 }
-                Err(_) => {
-                    self.not_before = Some(now + RETRY);
-                    self.paced = None;
-                }
+                Err(_) => self.wait_until(now + RETRY),
             }
         }
         Ok(changed)
@@ -506,18 +546,25 @@ impl Stats {
         }
     }
 
+    /// No request before `at` (nor before any later wait already set).
+    fn wait_until(&mut self, at: Instant) {
+        self.not_before = Some(self.not_before.map_or(at, |before| before.max(at)));
+        self.paced = None;
+    }
+
     /// When the next request may go out after one succeeded, as far as the endpoint's budget
-    /// goes: at once while at least half of the window's requests are left, then spread
-    /// evenly over the rest of the window, and after the reset once none is left.
+    /// goes (requests in flight counted as spent): at once while at least half of the
+    /// window's requests are left, then spread evenly over the rest of the window, and after
+    /// the reset once none is left.
     fn pace(&mut self, client: &Client, now: Instant) -> Instant {
-        let Some(limit) = client.rate_limit::<endpoints::GameMapStats>() else {
+        let Some((limit, left)) = self.window(client) else {
             return now;
         };
         let reset = self.reset_at(limit, now);
-        if limit.remaining == 0 {
+        if left == 0 {
             reset
-        } else if u64::from(limit.remaining) * 2 < u64::from(limit.limit) {
-            now + reset.saturating_duration_since(now) / limit.remaining
+        } else if spreads(limit, left) {
+            now + reset.saturating_duration_since(now) / left
         } else {
             now
         }
@@ -527,9 +574,8 @@ impl Stats {
     /// Unix epoch: no request is left while `urgent` rooms (viewed or near) are wanted, or the
     /// window is down to its near share while `far` rooms are.
     fn held_back(&mut self, client: &Client, now: Instant, urgent: bool, far: bool) -> Option<u64> {
-        let limit = client.rate_limit::<endpoints::GameMapStats>()?;
-        let blocks =
-            (urgent && limit.remaining == 0) || (far && limit.remaining <= near_share(limit.limit));
+        let (limit, left) = self.window(client)?;
+        let blocks = (urgent && left == 0) || (far && left <= near_share(limit.limit));
         (blocks && self.reset_at(limit, now) > now)
             .then(|| limit.reset.saturating_add(1).saturating_mul(1000))
     }
@@ -545,8 +591,8 @@ impl Stats {
 
     /// When a request may go out: after the gap, a refusal's reset or a failure's wait and,
     /// unless `unbudgeted` (exempt, or a server without rate limits), after the pacing and,
-    /// when the latest limit the client saw (from any request) has no request left, after its
-    /// reset.
+    /// when the latest limit the client saw (from any request) has no request left (those in
+    /// flight counted as spent), after its reset.
     fn ready_at(&mut self, client: &Client, now: Instant, unbudgeted: bool) -> Instant {
         let mut ready = self.not_before.unwrap_or(now);
         if unbudgeted {
@@ -555,19 +601,18 @@ impl Stats {
         if let Some(paced) = self.paced {
             ready = ready.max(paced);
         }
-        if let Some(limit) = client.rate_limit::<endpoints::GameMapStats>()
-            && limit.remaining == 0
-        {
+        if let Some((limit, 0)) = self.window(client) {
             ready = ready.max(self.reset_at(limit, now));
         }
         ready
     }
 
     /// When a request for far rooms may go out as far as the budget goes: once the window has
-    /// no more than its near share ([`STATS_FAR_SHARE`]) left, after its reset.
+    /// no more than its near share ([`STATS_FAR_SHARE`]) left (those in flight counted as
+    /// spent), after its reset.
     fn far_ready_at(&mut self, client: &Client, now: Instant) -> Instant {
-        match client.rate_limit::<endpoints::GameMapStats>() {
-            Some(limit) if limit.remaining <= near_share(limit.limit) => self.reset_at(limit, now),
+        match self.window(client) {
+            Some((limit, left)) if left <= near_share(limit.limit) => self.reset_at(limit, now),
             _ => now,
         }
     }
@@ -588,6 +633,12 @@ impl Stats {
         self.seen = Some((limit, at));
         at
     }
+}
+
+/// Whether the budget spreads requests over the rest of the window: fewer than half of the
+/// window's requests are `left`.
+fn spreads(limit: RateLimit, left: u32) -> bool {
+    u64::from(left) * 2 < u64::from(limit.limit)
 }
 
 /// Requests of a window of `limit` kept for near rooms: all but [`STATS_FAR_SHARE`] percent.
@@ -670,8 +721,8 @@ mod tests {
 
     #[test]
     fn batches_take_the_nearest_whole_sectors() {
-        // 80 × 80 rooms: 64 sectors around W0N0|E0S0.
-        let rect = RoomRect::new(room("W39N39"), room("E39S39"));
+        // 160 × 160 rooms: 256 sectors around W0N0|E0S0.
+        let rect = RoomRect::new(room("W79N79"), room("E79S79"));
         let batch = nearest_sectors(
             rect.iter().collect(),
             rect.center(),
@@ -685,7 +736,7 @@ mod tests {
             .iter()
             .all(|room| (-10..10).contains(&room.x) && (-10..10).contains(&room.y));
         assert!(first);
-        // Whole sectors: 5 × 5 around the centre (ties broken north-west first).
+        // Whole sectors around the centre (ties broken north-west first).
         let sectors = batch
             .iter()
             .map(|room| (room.x.div_euclid(10), room.y.div_euclid(10)))
@@ -694,7 +745,7 @@ mod tests {
         assert!(
             sectors
                 .iter()
-                .all(|&(x, y)| (-3..=2).contains(&x) && (-3..=2).contains(&y))
+                .all(|&(x, y)| (-5..=4).contains(&x) && (-5..=4).contains(&y))
         );
         // Partial sectors keep only their stale rooms.
         let few = vec![room("E15S15"), room("W0N0"), room("E1S1")];

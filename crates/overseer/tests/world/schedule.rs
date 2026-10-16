@@ -558,8 +558,8 @@ async fn a_viewed_room_is_refreshed_at_once_whatever_its_lifetime() {
 
 #[tokio::test]
 async fn overviews_go_without_pauses_on_servers_without_rate_limits() {
-    // 80 × 80 rooms: three requests of 25 sectors.
-    let fake = Fake::new(80, false);
+    // 120 × 120 rooms: three requests of up to 50 sectors.
+    let fake = Fake::new(120, false);
     let (server, overseer, websocket) = connect(fake.routes()).await;
     answer_pings(websocket);
     let mut world = overseer.map().world(None).await.unwrap();
@@ -581,7 +581,7 @@ async fn overviews_go_without_pauses_on_servers_without_rate_limits() {
 
 #[tokio::test]
 async fn overviews_go_one_at_a_time_without_gaps_on_servers_with_rate_limits() {
-    let fake = Fake::new(80, true);
+    let fake = Fake::new(120, true);
     let (server, overseer, websocket) = connect(fake.routes()).await;
     answer_pings(websocket);
     let mut world = overseer.map().world(None).await.unwrap();
@@ -591,8 +591,8 @@ async fn overviews_go_one_at_a_time_without_gaps_on_servers_with_rate_limits() {
         stats: Some(bounds),
         ..Interest::default()
     });
-    // The clock never moves: the endpoint's budget (none reported) and the request budget
-    // leave the three requests no pause, one after the other.
+    // The clock never moves: the endpoint's budget (none reported, so one request at a
+    // time) and the request budget leave the three requests no pause, one after the other.
     drive(&mut world, |world, _| {
         world.progress().stats_known == bounds.len()
     })
@@ -662,7 +662,7 @@ fn answer_pings(mut websocket: Ws) {
 
 #[tokio::test]
 async fn an_exempt_token_paces_nothing_on_servers_with_rate_limits() {
-    let fake = Fake::new(80, true);
+    let fake = Fake::new(120, true);
     let (server, overseer, websocket) = connect(fake.routes()).await;
     answer_pings(websocket);
     let mut world = overseer.map().world(None).await.unwrap();

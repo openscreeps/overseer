@@ -8,6 +8,7 @@ mod live;
 mod market;
 mod messages;
 mod refresh;
+#[expect(dead_code, reason = "only the world harness holds responses")]
 mod server;
 mod status;
 mod users;
