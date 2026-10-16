@@ -6,13 +6,14 @@ use overseer_core::api::types::PlatformVersion;
 /// [`Client::world`].
 ///
 /// Official servers run several shards and qualify room and Memory channels, as well as most
-/// requests, with one; private servers run a single world (no shards listed) and use shardless
-/// channel names.
+/// requests, with one; private servers run a single world and use shardless channel names,
+/// whatever shard name they list ([`PlatformVersion::shards`]).
 ///
 /// [`Client::world`]: crate::Client::world
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
     version: PlatformVersion,
+    shards: Vec<String>,
     shard: Option<String>,
     user: Option<String>,
 }
@@ -22,9 +23,11 @@ impl World {
     /// the user id from `GET /api/auth/me`. The default shard is the first one listed.
     #[must_use]
     pub fn new(version: PlatformVersion, user: Option<String>) -> Self {
-        let shard = version.shards().first().cloned();
+        let shards = version.shards();
+        let shard = shards.first().cloned();
         Self {
             version,
+            shards,
             shard,
             user,
         }
@@ -40,7 +43,7 @@ impl World {
     /// The shards, in the order the server lists them; empty on single-world servers.
     #[must_use]
     pub fn shards(&self) -> &[String] {
-        self.version.shards()
+        &self.shards
     }
 
     /// Whether channels and requests name a shard.
@@ -125,6 +128,20 @@ mod tests {
         assert_eq!(world.resolve_shard(Some("shard0")), None);
         assert_eq!(world.user(), Some("5a1b"));
         assert_eq!(world.history_chunk_size(), 20);
+    }
+
+    #[test]
+    fn backend_local_is_single_world_whatever_shard_it_names() {
+        let version: PlatformVersion = serde_json::from_str(
+            r#"{"ok":1,"protocol":14,"useNativeAuth":false,"users":1,"serverData":{
+                "customObjectTypes":{},"historyChunkSize":20,"shards":["shard0"],
+                "renderer":{"resources":{},"metadata":{}}}}"#,
+        )
+        .unwrap();
+        let world = World::new(version, None);
+        assert!(!world.is_sharded());
+        assert_eq!(world.shards(), [] as [String; 0]);
+        assert_eq!(world.resolve_shard(Some("shard0")), None);
     }
 
     #[test]

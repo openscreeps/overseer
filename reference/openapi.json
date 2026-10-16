@@ -23743,8 +23743,12 @@
               "shards": {
                 "type": "array",
                 "items": {
-                  "type": "string"
-                }
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "description": "Shard names. A backend-local server with screepsmod-admin-utils lists its `shardName` setting here, `[null]` until one is set; its socket channels and history carry no shard either way."
               }
             },
             "required": [

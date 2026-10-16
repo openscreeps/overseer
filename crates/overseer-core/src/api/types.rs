@@ -4948,9 +4948,9 @@ pub struct PlatformVersionServerData {
     pub history_chunk_size: i64,
     /// The `renderer` property.
     pub renderer: PlatformVersionServerDataRenderer,
-    /// The `shards` property.
+    /// Shard names. A backend-local server with screepsmod-admin-utils lists its `shardName` setting here, `[null]` until one is set; its socket channels and history carry no shard either way.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shards: Option<Vec<String>>,
+    pub shards: Option<Vec<Option<String>>>,
     /// The `socketUpdateThrottle` property.
     #[serde(
         rename = "socketUpdateThrottle",
