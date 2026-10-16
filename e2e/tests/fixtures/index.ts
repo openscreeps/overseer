@@ -16,7 +16,9 @@
 // - `home`: a room that shows the user's presence ({@link Home}): the player's room on
 //   `openscreeps`, the account's start room (its own room when it has one) on `official`.
 // - `signedInPage`: `page` already signed in as `user` (a password session on `openscreeps`, the
-//   API token on `official`), on the world of the server (`/#/<slug>/`).
+//   API token on `official`), on the world of the server (`/#/<slug>/`). On `official` it
+//   answers "Not now" whenever the "Rate limit running low" prompt opens (the account's real
+//   budget runs low across runs).
 // - `apiToken`: the `official` account's API token (`undefined` on `openscreeps`). Never print
 //   it or assert on it: the official run records no traces, screenshots or videos.
 // - `cleanup`: work for after the test's browser context has closed (the app never sees it).
@@ -297,7 +299,15 @@ export const test = base.extend<
   },
   user: async ({ presence }, use) => use(presence.user),
   home: async ({ presence }, use) => use(presence.home),
-  signedInPage: async ({ page, server, presence }, use) => {
+  signedInPage: async ({ page, server, presence, target }, use) => {
+    if (target === 'official') {
+      // The account's real budget runs low across runs: the prompt to lift the limits (on the
+      // screeps.com website) would cover the page. "Not now" only dismisses it for the session.
+      await page.addLocatorHandler(
+        page.getByRole('dialog', { name: 'Rate limit running low' }),
+        (dialog) => dialog.getByRole('button', { name: 'Not now' }).click(),
+      );
+    }
     const login = presence.player?.username ?? null;
     await seed(page, server, presence.user, presence.token, login);
     await use(page);
