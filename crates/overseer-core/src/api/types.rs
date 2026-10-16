@@ -4970,8 +4970,9 @@ pub struct PlatformVersionServerDataFeaturesItem {
     pub menu_data: Option<Vec<PlatformVersionServerDataFeaturesItemMenuDataItem>>,
     /// The `name` property.
     pub name: String,
-    /// The `version` property.
-    pub version: f64,
+    /// Feature version: a number for the server's own features, a semver string for mods (screepsmod-auth reports `2.10.1`). Mods may omit it (screepsmod-auth's `auth-tokens` feature).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<PlatformVersionServerDataFeaturesItemVersion>,
 }
 
 /// The `menuData` property.
@@ -5031,6 +5032,16 @@ pub struct PlatformVersionServerDataFeaturesItemMenuDataItemItem {
     /// HTML template placed before the entry.
     #[serde(rename = "templateBefore", skip_serializing_if = "Option::is_none")]
     pub template_before: Option<String>,
+}
+
+/// Feature version: a number for the server's own features, a semver string for mods (screepsmod-auth reports `2.10.1`). Mods may omit it (screepsmod-auth's `auth-tokens` feature).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PlatformVersionServerDataFeaturesItemVersion {
+    /// A string.
+    String(String),
+    /// A number.
+    Number(f64),
 }
 
 /// The `renderer` property.

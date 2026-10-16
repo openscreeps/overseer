@@ -23639,7 +23639,15 @@
                       "type": "string"
                     },
                     "version": {
-                      "type": "number"
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "description": "Feature version: a number for the server's own features, a semver string for mods (screepsmod-auth reports `2.10.1`). Mods may omit it (screepsmod-auth's `auth-tokens` feature)."
                     },
                     "menuData": {
                       "type": "array",
@@ -23727,8 +23735,7 @@
                     }
                   },
                   "required": [
-                    "name",
-                    "version"
+                    "name"
                   ],
                   "additionalProperties": true
                 }
