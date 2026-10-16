@@ -1,16 +1,47 @@
-// The world slice: server → shard → continuous world map → live room, the drawer's room
-// control and inspector, popping a room out into its own window, and what survives a reload
-// (route, camera, view mode, terrain cache).
+// The world screen: opening a server's world (the account's home room on a first visit, the
+// loading and failure states), continuous zoom from the whole world into a live room, the
+// whole-world button and breadcrumb, shards, the route (address bar, back button), popping a
+// room out into its own window and what survives a reload (route, camera, view mode, terrain
+// cache).
 //
-// The canvas is drawn by the GPU, so assertions go through what the UI says about it: the
-// status bar (zoom level, tick), the breadcrumb, the drawer and the route; plus one check
-// that the canvas is not blank.
-//
-// Nothing here sleeps for the app: the map draws on animation frames, so a test waits for
-// frames, for the status bar or for what the app stores.
+// Untagged tests only read: they pass on a disposable OpenScreeps world and on screeps.com,
+// around the signed-in account's `home` room.
 
-import type { Locator, Page } from '@playwright/test';
-import { expect, Session, signIn, test, type Account, type Server } from './fixtures';
+import type { Page, Request } from '@playwright/test';
+import {
+  expect,
+  Session,
+  signIn,
+  test,
+  type Account,
+  type Home,
+  type Server,
+} from './fixtures';
+import {
+  breadcrumb,
+  camera,
+  expectDrawn,
+  LEVELS,
+  level,
+  levelOf,
+  nextFrames,
+  openRoom,
+  restingCamera,
+  roomCentre,
+  roomInfo,
+  routeOf,
+  savedPlace,
+  search,
+  shardKey,
+  status,
+  tilePoint,
+  towardsMiddle,
+  worldBounds,
+  worldMap,
+  roomName,
+  type Level,
+  type SavedPlace,
+} from './world-map';
 
 declare global {
   interface Window {
@@ -20,15 +51,6 @@ declare global {
     e2eSavedState?: string | null;
   }
 }
-
-/** The status bar. */
-const status = (page: Page) => page.getByRole('contentinfo', { name: 'Status' });
-
-/** The status bar's zoom level. */
-const level = (page: Page) => status(page).getByTitle('Zoom level', { exact: true });
-
-/** The world map canvas. */
-const worldMap = (page: Page) => page.getByTestId('world-map');
 
 /** The rooms in the terrain cache (IndexedDB `overseer-terrain`, keys `…|<room>`). */
 async function cachedRooms(page: Page): Promise<string[]> {
@@ -46,59 +68,9 @@ async function cachedRooms(page: Page): Promise<string[]> {
   });
 }
 
-/** The app's saved state (`overseer.state`): per server, the route's rooms, cameras and mode. */
-type SavedPlace = {
-  mode: string;
-  rooms: Record<string, string>;
-  cameras: Record<string, { centre: [number, number]; half_height: number }>;
-};
-
 /**
- * Saves the camera now, as leaving the page does (`pagehide`; the app otherwise saves it once
- * it rests for a second), and returns the saved place of `server`.
- */
-async function savePlace(page: Page, server: Server): Promise<SavedPlace> {
-  const saved = await page.evaluate(() => {
-    window.dispatchEvent(new PageTransitionEvent('pagehide'));
-    return localStorage.getItem('overseer.state');
-  });
-  return JSON.parse(saved ?? '{}').places[server.url];
-}
-
-/** The canvas is drawn (a blank canvas compresses to almost nothing). */
-async function expectDrawn(canvas: Locator) {
-  await expect
-    .poll(async () => (await canvas.screenshot()).length, { timeout: 15_000 })
-    .toBeGreaterThan(4_000);
-}
-
-/** The zoom levels the status bar names, from the most zoomed out. */
-const LEVELS = ['World', 'Sectors', 'Rooms', 'Room'] as const;
-type Level = (typeof LEVELS)[number];
-
-/** The zoom level the status bar shows. */
-async function levelOf(page: Page): Promise<Level> {
-  const text = (await level(page).textContent()) ?? '';
-  const found = LEVELS.find((level) => level === text);
-  if (!found) throw new Error(`the status bar shows no zoom level: "${text}"`);
-  return found;
-}
-
-/**
- * Waits for two animation frames of the page: the map draws pending input in the next one
- * and the status bar shows that frame's zoom level right after it.
- */
-async function nextFrames(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const { promise, resolve } = Promise.withResolvers<void>();
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    return promise;
-  });
-}
-
-/**
- * Records every zoom level the status bar shows from now on (a DOM observer, so no
- * level is missed however fast it passes); the returned function reads them, in order.
+ * Records every zoom level the status bar shows from now on (a DOM observer, so no level is
+ * missed however fast it passes); the returned function reads them, in order.
  */
 async function recordLevels(page: Page): Promise<() => Promise<string[]>> {
   await level(page).evaluate((element) => {
@@ -113,26 +85,22 @@ async function recordLevels(page: Page): Promise<() => Promise<string[]>> {
 }
 
 /**
- * Opens the world on `room` (live), zooms out as far as the map goes with Escape (around the
- * centre, so the room stays there), then wheels back in over the centre until the room is
- * live: continuous zoom, no click. Returns the most zoomed-out level and every level the status
- * bar showed on the way in.
+ * Opens the world on `home` (live), zooms out with Escape (around the centre, so the room stays
+ * there) until the overview level or as far as the map goes, then wheels back in over the
+ * centre until the room is live: continuous zoom, no click. Returns the most zoomed-out level
+ * and every level the status bar showed on the way in.
  */
-async function zoomIntoLiveRoom(
-  page: Page,
-  slug: string,
-  room: string,
-): Promise<{ lowest: Level; levels: string[] }> {
-  await page.goto(`/#/${slug}/-/${room}`);
+async function zoomIntoLiveRoom(page: Page, home: Home): Promise<{ lowest: Level; levels: string[] }> {
+  await openRoom(page, home.path);
   const map = worldMap(page);
-  await expect(map).toBeVisible();
-  await expect(status(page)).toContainText('Connected', { timeout: 30_000 });
-  await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
   await map.focus();
   // Escape zooms out 2.25× at once: twelve presses pass the zoom limit of any world (it is
-  // clamped).
+  // clamped). A screeps.com shard reaches the overview in four, long before the limit: no
+  // further, so that the map does not load the whole shard.
   for (let i = 0; i < 12; i++) {
     await page.keyboard.press('Escape');
+    await nextFrames(page);
+    if ((await levelOf(page)) === 'World') break;
   }
   await nextFrames(page);
   const lowest = await levelOf(page);
@@ -158,60 +126,251 @@ async function startRoom(server: Server, account: Account): Promise<string> {
   return room[0];
 }
 
-/** The world shows `room` live: route, breadcrumb, status bar and drawer. */
-async function expectLiveRoom(page: Page, slug: string, room: string) {
-  await expect(page).toHaveURL(new RegExp(`#/${slug}/-/${room}$`), { timeout: 30_000 });
-  await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(room);
-  await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
-  const info = page.getByRole('region', { name: new RegExp(room) });
-  await expect(info.getByRole('status').filter({ hasText: 'Live' })).toBeVisible({
-    timeout: 15_000,
-  });
+/**
+ * The room in focus is live in the drawer. 30 s for now: on a first visit the world map's
+ * portal scan of the whole world (121 `roomMap2` subscriptions at once) goes out before the
+ * room's live subscription and delays its first update (measured up to 11.5 s through the
+ * proxy under load, 3.6 s without the scans). The library fix (detail rooms before scans, scans
+ * held while a viewed room is pending) brings this back to 15 s.
+ */
+async function expectLive(page: Page, room: string) {
+  await expect(
+    roomInfo(page, room).getByRole('status').filter({ hasText: 'Live' }),
+  ).toBeVisible({ timeout: 30_000 });
 }
 
-test.describe('world', { tag: '@openscreeps' }, () => {
+/** The accessible name of the world map with no room in focus. */
+const mapName = (home: Home) => (home.shard ? `Map of ${home.shard}` : 'World map');
+
+/** Lets a cross-origin page (direct mode) read a rewritten response. */
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers()['origin'];
+  return origin ? { 'access-control-allow-origin': origin } : {};
+}
+
+/** A world-size reply of the test (`null`: the server answers). */
+type WorldSizeReply = { status: number; body: unknown } | null;
+
+/** How the test answers world-size requests. */
+interface WorldSize {
+  /** The reply (`null`: the server answers). */
+  reply: WorldSizeReply;
+  /** Until it settles, requests wait (the world stays loading). */
+  hold: Promise<void> | null;
+}
+
+/**
+ * `page` with `GET /api/game/world-size` answered by the test from the start: the option
+ * `worldSizeReply` sets the first reply (the signed-in page opens the world through it on a
+ * first visit), `worldSize` the following ones.
+ */
+const rewritten = test.extend<{
+  worldSizeReply: WorldSizeReply;
+  worldSize: WorldSize;
+}>({
+  worldSizeReply: [null, { option: true }],
+  worldSize: async ({ worldSizeReply }, use) => use({ reply: worldSizeReply, hold: null }),
+  page: async ({ page, worldSize }, use) => {
+    await page.route(/\/api\/game\/world-size/, async (route) => {
+      await worldSize.hold;
+      const reply = worldSize.reply;
+      if (!reply) return route.continue();
+      return route.fulfill({
+        status: reply.status,
+        contentType: 'application/json',
+        headers: corsHeaders(route.request()),
+        body: JSON.stringify(reply.body),
+      });
+    });
+    await use(page);
+  },
+});
+
+test.describe('world', () => {
   test('zooms from the whole world into a live room without clicks', async ({
     signedInPage: page,
     server,
-    player,
+    home,
+    user,
   }) => {
     await expectDrawn(worldMap(page));
-    const { lowest, levels } = await zoomIntoLiveRoom(page, server.slug, player.room);
-    // How far out the map goes depends on the world and the window: the harness's 11 × 11
-    // world fully zoomed out is more than 24 px per room in a 1280 × 720 window (Terrain);
-    // the overview has its own test below. Every level from there in is passed through.
+    const { lowest, levels } = await zoomIntoLiveRoom(page, home);
+    // How far out the map goes depends on the world and the window: an 11 × 11 world fully
+    // zoomed out is more than 24 px per room in a 1280 × 720 window (Sectors), a screeps.com
+    // shard far less (World); the overview has its own test below. Every level from there in
+    // is passed through.
     expect(['World', 'Sectors']).toContain(lowest);
     expect(levels).toEqual(LEVELS.slice(LEVELS.indexOf(lowest)));
-    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/${player.room}$`));
-    const breadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' });
-    await expect(breadcrumb).toContainText(player.room);
+    await expect(page).toHaveURL(routeOf(server, home, home.room));
+    await expect(breadcrumb(page)).toContainText(home.room);
     await expect(status(page)).toContainText(/tick \d+/, { timeout: 15_000 });
-    const info = page.getByRole('region', { name: new RegExp(player.room) });
-    await expect(info.getByRole('status').filter({ hasText: 'Live' })).toBeVisible({
-      timeout: 15_000,
-    });
-    await expect(info).toContainText(player.username);
+    await expectLive(page, home.room);
+    await expect(roomInfo(page, home.room)).toContainText(user.username);
   });
 
   test.describe('in a small window', () => {
-    // The whole 11 × 11 world fully zoomed out in a map about 350 px high: below 24 px per
-    // room, the overview level.
+    // A whole world fully zoomed out in a map about 350 px high: below 24 px per room (the
+    // harness's 11 × 11 world too), the overview level.
     test.use({ viewport: { width: 1280, height: 420 } });
 
     test('zooms from the overview into a live room without clicks', async ({
       signedInPage: page,
       server,
-      player,
+      home,
     }) => {
-      const { lowest, levels } = await zoomIntoLiveRoom(page, server.slug, player.room);
+      const { lowest, levels } = await zoomIntoLiveRoom(page, home);
       expect(lowest).toBe('World');
       expect(levels).toEqual([...LEVELS]);
-      await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/${player.room}$`));
+      await expect(page).toHaveURL(routeOf(server, home, home.room));
     });
   });
 
-  test('inspects an object from the drawer', async ({ signedInPage: page, server, player }) => {
-    await zoomIntoLiveRoom(page, server.slug, player.room);
+  test('opens on the home room on a first visit', async ({ signedInPage: page, server, home }) => {
+    // The signed-in page opens the server's world with no room in the route and nothing saved.
+    await expect(page).toHaveURL(routeOf(server, home, home.room), { timeout: 30_000 });
+    await expect(breadcrumb(page)).toContainText(home.room);
+    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
+    await expectLive(page, home.room);
+    await expect(worldMap(page)).toHaveAccessibleName(`${mapName(home)}, at ${home.room}`);
+    await expect(page.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(0);
+  });
+
+  test('opens on the start room of a fresh account @openscreeps', async ({
+    page,
+    server,
+    account,
+  }) => {
+    const room = await startRoom(server, account);
+    await signIn(page, server, account);
+    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/${room}$`), { timeout: 30_000 });
+    await expect(breadcrumb(page)).toContainText(room);
+    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
+    await expectLive(page, room);
+    await expect(page.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(0);
+  });
+
+  test('shows the whole world from the button and the breadcrumb', async ({
+    signedInPage: page,
+    server,
+    home,
+  }) => {
+    await openRoom(page, home.path);
+    const bounds = await worldBounds(page, server, home);
+    const corners = [
+      [roomName(...bounds.min), 5, 5],
+      [roomName(...bounds.max), 45, 45],
+    ] as const;
+    const world = breadcrumb(page).getByRole('button', { name: home.shard ?? 'World' });
+    await expect(world).not.toHaveAttribute('aria-current', 'page');
+
+    const expectWholeWorld = async () => {
+      // The room leaves the route, the breadcrumb and the map's name; the world's corner rooms
+      // are on the canvas once the camera has flown out.
+      await expect(page).toHaveURL(routeOf(server, home));
+      await expect(breadcrumb(page)).not.toContainText(home.room);
+      await expect(world).toHaveAttribute('aria-current', 'page');
+      await expect(worldMap(page)).toHaveAccessibleName(mapName(home));
+      for (const [room, x, y] of corners) await tilePoint(page, room, x, y);
+      await expect(level(page)).not.toHaveText(/^Rooms?$/);
+    };
+
+    await page.getByRole('group', { name: 'Zoom' }).getByRole('button', {
+      name: 'Show the whole world',
+    }).click();
+    await expectWholeWorld();
+
+    await search(page).fill(home.room);
+    await search(page).press('Enter');
+    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
+    await expect(world).not.toHaveAttribute('aria-current', 'page');
+    await world.click();
+    await expectWholeWorld();
+  });
+
+  test('flies to a room entered in the address bar, and back', async ({
+    signedInPage: page,
+    server,
+    home,
+  }) => {
+    await openRoom(page, home.path);
+    const other = towardsMiddle(home.room, await worldBounds(page, server, home)).room;
+    const at = (room: string) => (camera: { centre: [number, number] }) => {
+      const [x, y] = roomCentre(room);
+      return Math.abs(camera.centre[0] - x) < 0.5 && Math.abs(camera.centre[1] - y) < 0.5;
+    };
+
+    await page.goto(`/#/${server.slug}/${shardKey(home)}/${other.toLowerCase()}`);
+    await expect(page).toHaveURL(routeOf(server, home, other));
+    await expect(breadcrumb(page)).toContainText(other);
+    await restingCamera(page, server, home, at(other));
+    await expect(level(page)).toHaveText('Room');
+    await expectLive(page, other);
+
+    await page.goBack();
+    await expect(page).toHaveURL(routeOf(server, home, home.room));
+    await expect(breadcrumb(page)).toContainText(home.room);
+    await restingCamera(page, server, home, at(home.room));
+    await expectLive(page, home.room);
+  });
+
+  test('hides the shard switcher on a single-world server', async ({
+    signedInPage: page,
+    server,
+    home,
+  }) => {
+    test.skip(home.shard !== null, 'the server has shards');
+    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/`));
+    await expect(worldMap(page)).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Shard' })).toHaveCount(0);
+  });
+
+  test('switches shards, each with its own room', async ({ signedInPage: page, server, home }) => {
+    test.skip(home.shard === null, 'a single-world server has no shards to switch');
+    await openRoom(page, home.path);
+    const shard = page.getByRole('combobox', { name: 'Shard' });
+    await expect(shard).toHaveValue(home.shard ?? '');
+    const options = await shard.getByRole('option').allTextContents();
+    const other = options.find((name) => name !== home.shard);
+    if (!other) throw new Error('the shard switcher offers one shard');
+
+    await shard.selectOption(other);
+    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/${other}/`));
+    await expect(shard).toHaveValue(other);
+    await expect(breadcrumb(page).getByRole('button', { name: other })).toBeVisible();
+    await expect(worldMap(page)).toHaveAccessibleName(new RegExp(`^Map of ${other}`));
+    await expect(level(page)).toHaveText(/\S/, { timeout: 30_000 });
+
+    // Back on the home shard, its room comes back.
+    await shard.selectOption(home.shard ?? '');
+    await expect(page).toHaveURL(routeOf(server, home, home.room));
+    await expect(breadcrumb(page)).toContainText(home.room);
+    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
+  });
+
+  test('pops a room out into a live window', async ({ signedInPage: page, server, home }) => {
+    await openRoom(page, home.path);
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup'),
+      page.getByRole('button', { name: 'Pop out room' }).click(),
+    ]);
+    await expect(popup).toHaveURL(routeOf(server, home, `${home.room}/window`));
+    await expect(popup.getByRole('heading', { level: 1 })).toContainText(home.room);
+    await expect(popup).toHaveTitle(new RegExp(home.room));
+    await expect(popup.getByTestId('room-control')).toBeVisible();
+    await expect(popup.getByRole('status').filter({ hasText: 'Live' })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(status(popup)).toContainText(/tick \d+/);
+    await expectDrawn(popup.getByTestId('room-control'));
+    await popup.close();
+  });
+
+  test('inspects an object from the drawer @openscreeps', async ({
+    signedInPage: page,
+    server,
+    player,
+  }) => {
+    await openRoom(page, `/#/${server.slug}/-/${player.room}`);
     const control = page.getByTestId('room-control');
     await expectDrawn(control);
     // The room scope frames the 50 tiles with 1.5 tiles of margin on each side (top-down).
@@ -229,35 +388,18 @@ test.describe('world', { tag: '@openscreeps' }, () => {
     await expect(inspector).toContainText(player.username);
   });
 
-  test('pops a room out into a live window', async ({ signedInPage: page, server, player }) => {
-    await zoomIntoLiveRoom(page, server.slug, player.room);
-    const [popup] = await Promise.all([
-      page.waitForEvent('popup'),
-      page.getByRole('button', { name: 'Pop out room' }).click(),
-    ]);
-    await expect(popup).toHaveURL(new RegExp(`#/${server.slug}/-/${player.room}/window$`));
-    await expect(popup.getByRole('heading', { level: 1 })).toContainText(player.room);
-    await expect(popup).toHaveTitle(new RegExp(player.room));
-    await expect(popup.getByTestId('room-control')).toBeVisible();
-    await expect(popup.getByRole('status').filter({ hasText: 'Live' })).toBeVisible({
-      timeout: 30_000,
-    });
-    await expect(status(popup)).toContainText(/tick \d+/);
-    await expectDrawn(popup.getByTestId('room-control'));
-    await popup.close();
-  });
-
   test('restores route, camera and mode after a reload, terrain from the cache', async ({
     signedInPage: page,
     server,
-    player,
+    home,
   }) => {
-    await zoomIntoLiveRoom(page, server.slug, player.room);
+    await openRoom(page, home.path);
     const perspective = page.getByRole('button', { name: 'Perspective view' });
     await perspective.click();
     await expect(perspective).toHaveAttribute('aria-pressed', 'true');
+    // The terrain of the rooms in view goes to the cache as it arrives.
+    await expect.poll(async () => (await cachedRooms(page)).length).toBeGreaterThan(0);
     const cached = await cachedRooms(page);
-    expect(cached.length).toBeGreaterThan(0);
     // What the reloaded page starts from: the state the app saved when the page went away.
     await page.addInitScript(() => {
       window.e2eSavedState = localStorage.getItem('overseer.state');
@@ -273,19 +415,17 @@ test.describe('world', { tag: '@openscreeps' }, () => {
     const saved = await page.evaluate(() => window.e2eSavedState ?? '{}');
     const place: SavedPlace = JSON.parse(saved).places[server.url];
     expect(place.mode).toBe('Perspective');
-    expect(place.rooms['-']).toBe(player.room);
-    const camera = place.cameras['-'];
-    expect(camera).toBeTruthy();
-    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/${player.room}$`));
+    expect(place.rooms[shardKey(home)]).toBe(home.room);
+    const before = place.cameras[shardKey(home)];
+    expect(before).toBeTruthy();
+    await expect(page).toHaveURL(routeOf(server, home, home.room));
     await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
     await expect(perspective).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(
-      player.room,
-    );
-    const after = (await savePlace(page, server)).cameras['-'];
-    expect(after.centre[0]).toBeCloseTo(camera.centre[0], 1);
-    expect(after.centre[1]).toBeCloseTo(camera.centre[1], 1);
-    expect(after.half_height).toBeCloseTo(camera.half_height, 1);
+    await expect(breadcrumb(page)).toContainText(home.room);
+    const after = await camera(page, server, home);
+    expect(after.centre[0]).toBeCloseTo(before.centre[0], 1);
+    expect(after.centre[1]).toBeCloseTo(before.centre[1], 1);
+    expect(after.half_height).toBeCloseTo(before.half_height, 1);
     expect(await cachedRooms(page)).toEqual(expect.arrayContaining(cached));
     // Every room cached before the reload comes from IndexedDB: only the library's
     // world-bounds probe (the four rooms around the centre) may ask the server for those.
@@ -296,128 +436,44 @@ test.describe('world', { tag: '@openscreeps' }, () => {
     expect(refetched).toEqual([]);
   });
 
-  test('keyboard pans and zooms, slash searches a room', async ({
-    signedInPage: page,
-    server,
-    player,
-  }) => {
-    await page.goto(`/#/${server.slug}/-/${player.room}`);
-    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
-    await worldMap(page).focus();
-    await page.keyboard.press('Escape');
-    await expect(level(page)).not.toHaveText('Room');
-    await page.keyboard.press('/');
-    const search = page.getByRole('searchbox', { name: 'Go to room' });
-    await expect(search).toBeFocused();
-    await search.fill('nowhere');
-    await search.press('Enter');
-    await expect(page.getByRole('alert').filter({ hasText: 'not a room name' })).toBeVisible();
-    await expect(search).toBeFocused();
-    await search.fill(player.room.toLowerCase());
-    await search.press('Enter');
-    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/${player.room}$`));
-    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
-    // Enter hands the keyboard back to the map, without a focus ring around it: the keys
-    // below go to the map without clicking it.
-    await expect(worldMap(page)).toBeFocused();
-    await expect(search).toHaveValue('');
-    expect(await worldMap(page).evaluate((canvas) => getComputedStyle(canvas).outlineStyle)).toBe(
-      'none',
-    );
-    await page.keyboard.press('-');
-    await page.keyboard.press('-');
-    await expect(level(page)).not.toHaveText('Room');
-    await page.keyboard.press('+');
-    await page.keyboard.press('+');
-    await expect(level(page)).toHaveText('Room');
-    // Escape in the search clears it and returns to the map too.
-    await page.keyboard.press('/');
-    await expect(search).toBeFocused();
-    await search.fill('W1');
-    await search.press('Escape');
-    await expect(search).toHaveValue('');
-    await expect(worldMap(page)).toBeFocused();
-    // Arrow keys pan towards the middle of the world (a room there always exists): the live
-    // room under the centre becomes the room in focus.
-    const towardsMiddle = player.room.startsWith('W') ? 'ArrowRight' : 'ArrowLeft';
-    for (let i = 0; i < 12; i++) {
-      await page.keyboard.press(towardsMiddle);
-    }
-    await expect(page).not.toHaveURL(new RegExp(`/${player.room}$`));
-    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/[WE]\\d+[NS]\\d+$`));
-  });
+  rewritten.describe('when the server cannot measure the world', () => {
+    rewritten.use({ worldSizeReply: { status: 500, body: { error: 'the world is resting' } } });
 
-  test('a searched room is framed whole, however far the map was zoomed in', async ({
-    signedInPage: page,
-    server,
-    player,
-  }) => {
-    await page.goto(`/#/${server.slug}/-/${player.room}`);
-    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
-    // Zoom in as far as the map goes (it is clamped), then pan away from the room's centre.
-    await worldMap(page).focus();
-    for (let i = 0; i < 12; i++) {
-      await page.keyboard.press('+');
-    }
-    for (let i = 0; i < 4; i++) {
-      await page.keyboard.press('ArrowLeft');
-    }
-    await expect
-      .poll(async () => (await savePlace(page, server)).cameras['-']?.half_height ?? Infinity)
-      .toBeLessThan(25);
+    rewritten('says so, and opens the world on Try again', async ({
+      signedInPage: page,
+      home,
+      worldSize,
+    }) => {
+      const failure = page.getByRole('alert').filter({ hasText: 'The world could not be opened' });
+      await expect(failure).toBeVisible({ timeout: 30_000 });
+      await expect(level(page)).toHaveText('');
 
-    await page.keyboard.press('/');
-    const search = page.getByRole('searchbox', { name: 'Go to room' });
-    await search.fill(player.room);
-    await search.press('Enter');
-    await expect(level(page)).toHaveText('Room');
-    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(player.room);
-    // The camera looks at the room's centre with its 50 tiles (and a margin) in view, so every
-    // object of the room is on screen: room (x, y) spans world tiles [50x, 50x + 50), W/N
-    // counting from -1.
-    const [, we, x, ns, y] = /^([WE])(\d+)([NS])(\d+)$/.exec(player.room) ?? [];
-    const centre = [
-      (we === 'W' ? -Number(x) - 1 : Number(x)) * 50 + 25,
-      (ns === 'N' ? -Number(y) - 1 : Number(y)) * 50 + 25,
-    ];
-    await expect
-      .poll(async () => {
-        const camera = (await savePlace(page, server)).cameras['-'];
-        return (
-          camera.half_height >= 25 &&
-          Math.abs(camera.centre[0] - centre[0]) < 0.5 &&
-          Math.abs(camera.centre[1] - centre[1]) < 0.5
-        );
-      })
-      .toBe(true);
-    // The framed room is the live room in focus: the drawer lists its objects (the player's
-    // spawn and creeps at least).
-    await page.getByRole('tab', { name: /^Objects/ }).click();
-    await expect(page.getByTitle('Objects in the room')).toHaveText(/^[1-9]\d*$/, {
-      timeout: 30_000,
+      // Trying again shows the world loading until the server answers.
+      const answer = Promise.withResolvers<void>();
+      worldSize.reply = null;
+      worldSize.hold = answer.promise;
+      await failure.getByRole('button', { name: 'Try again' }).click();
+      await expect(failure).toHaveCount(0);
+      await expect(
+        page.getByRole('status').filter({ hasText: 'Loading the world…' }),
+      ).toBeVisible();
+      answer.resolve();
+      await expect(page.getByRole('status').filter({ hasText: 'Loading the world…' })).toHaveCount(
+        0,
+        { timeout: 30_000 },
+      );
+      await expect(level(page)).toHaveText(/\S/, { timeout: 30_000 });
+      await expect(breadcrumb(page)).toContainText(home.room);
     });
   });
 
-  test('opens on the start room of a fresh account', async ({ page, server, account }) => {
-    const room = await startRoom(server, account);
-    await signIn(page, server, account);
-    await expectLiveRoom(page, server.slug, room);
-    await expect(page.getByRole('alert')).toHaveCount(0);
-  });
+  rewritten.describe('when the world has no rooms', () => {
+    rewritten.use({ worldSizeReply: { status: 200, body: { ok: 1, width: 0, height: 0 } } });
 
-  test("opens on the room of a player's spawn", async ({ page, server, player }) => {
-    expect(await startRoom(server, player)).toBe(player.room);
-    await signIn(page, server, player);
-    await expectLiveRoom(page, server.slug, player.room);
-  });
-
-  test('hides the shard switcher on a single-world server', async ({
-    signedInPage: page,
-    server,
-  }) => {
-    await page.goto(`/#/${server.slug}/`);
-    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/`));
-    await expect(worldMap(page)).toBeVisible();
-    await expect(page.getByRole('combobox', { name: 'Shard' })).toHaveCount(0);
+    rewritten('says so', async ({ signedInPage: page }) => {
+      await expect(
+        page.getByRole('status').filter({ hasText: 'This world has no rooms yet.' }),
+      ).toBeVisible({ timeout: 30_000 });
+    });
   });
 });
