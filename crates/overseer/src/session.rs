@@ -139,7 +139,8 @@ impl Overseer {
             builder = builder.default_shard(shard);
         }
         let client = builder.build()?;
-        let world = client.world().await?;
+        // The profile discovery fetched is the first `Account::me`: not requested twice.
+        let (world, me) = client.discover().await?;
         let socket = client.connect().await?;
         let (commands, receiver) = mpsc::unbounded_channel();
         let registry = Arc::new(Registry::new(commands));
@@ -165,7 +166,7 @@ impl Overseer {
                 status,
                 tasks: Mutex::new(tasks),
                 commands: Mutex::new(VecDeque::new()),
-                me: tokio::sync::Mutex::new(None),
+                me: tokio::sync::Mutex::new(me.map(Arc::new)),
             }),
         })
     }

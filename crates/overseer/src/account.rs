@@ -42,7 +42,8 @@ impl Account {
     /// The signed-in user's private profile (`GET /api/auth/me`): username, badge, credits,
     /// CPU, GCL and power, resources, notification preferences, …
     ///
-    /// Fetched once per session and then served from a cache shared by every handle;
+    /// Read once per session (by [`Overseer::connect`] while discovering the server, so the
+    /// first call makes no request) and then served from a cache shared by every handle;
     /// [`Self::refresh`] fetches it again. The account's own changes made through this crate
     /// ([`Self::set_badge`], [`Self::set_notify_prefs`], [`Self::respawn`],
     /// [`PowerCreeps::start_experimentation`]) clear the cache, so the next call fetches it.
