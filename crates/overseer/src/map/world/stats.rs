@@ -1,6 +1,7 @@
 //! Room overviews of the world map: batched `owner0` map statistics with a long lifetime,
 //! viewed rooms first, paced by the server's rate limit, and overviews derived from live rooms.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -98,6 +99,20 @@ struct Fetch {
     request: BoxFuture<'static, Result<GameMapStatsResponse, Error>>,
 }
 
+/// The rooms due a request as of the latest look at every room of the world (see
+/// [`Stats::look`]), kept until something they depend on changes (what is known, viewed,
+/// near or in flight) or one of the fresh rooms goes stale: planning runs after every change
+/// of the world map (hundreds per second while portals are scanned), and looking at every
+/// room each time would hold the browser's main thread.
+struct Stale {
+    /// Stale near rooms, neither viewed nor in flight.
+    near: Vec<RoomCoord>,
+    /// Stale far rooms, neither viewed nor in flight.
+    far: Vec<RoomCoord>,
+    /// When the first fresh room goes stale (then the world is looked at again).
+    expires: Option<Instant>,
+}
+
 /// The overviews known, wanted and being fetched, and the request budget.
 pub(super) struct Stats {
     known: HashMap<RoomCoord, Known>,
@@ -118,6 +133,8 @@ pub(super) struct Stats {
     fetches: Vec<Fetch>,
     /// The rooms of the requests in flight.
     pending: HashSet<RoomCoord>,
+    /// The rooms due a request; `None`: to look at the world again.
+    stale: Option<Stale>,
     /// How the server limits requests, as of the latest plan.
     server: Server,
     /// No request before this (the gap after a request, a refusal's reset or a failure),
@@ -151,6 +168,7 @@ impl Stats {
             known_in_world: 0,
             fetches: Vec::new(),
             pending: HashSet::new(),
+            stale: None,
             server: Server::Limited,
             not_before: None,
             paced: None,
@@ -163,14 +181,18 @@ impl Stats {
     /// Makes the sectors of `minimaps` (nearest first) and the sectors around them the near
     /// rooms.
     pub(super) fn set_near(&mut self, minimaps: &[RoomCoord]) {
-        self.near.clear();
+        let mut near = HashSet::with_capacity(minimaps.len());
         for room in minimaps {
             let (x, y) = sector(*room);
             for dy in -1..=1 {
                 for dx in -1..=1 {
-                    self.near.insert((x + dx, y + dy));
+                    near.insert((x + dx, y + dy));
                 }
             }
+        }
+        if near != self.near {
+            self.near = near;
+            self.stale = None;
         }
         self.near_center = minimaps.first().copied();
     }
@@ -178,10 +200,18 @@ impl Stats {
     /// Makes `rooms` the viewed rooms: those that just became viewed are requested again
     /// first, unless requested less than [`STATS_VIEWED_FRESH`] before.
     pub(super) fn set_viewed(&mut self, rooms: &[RoomCoord]) {
+        let before = self.viewed.len();
         self.viewed.retain(|room, _| rooms.contains(room));
+        let mut changed = self.viewed.len() != before;
         let now = epoch_millis();
         for &room in rooms {
-            self.viewed.entry(room).or_insert(now);
+            if let Entry::Vacant(entry) = self.viewed.entry(room) {
+                entry.insert(now);
+                changed = true;
+            }
+        }
+        if changed {
+            self.stale = None;
         }
     }
 
@@ -201,6 +231,7 @@ impl Stats {
         if self.known.insert(room, known).is_none() && self.world.contains(room) {
             self.known_in_world += 1;
         }
+        self.stale = None;
     }
 
     /// The live room `snapshot` of `room` arrived: its overview (see [`RoomStat::live`]) is
@@ -226,6 +257,7 @@ impl Stats {
         known.live_at = Some(millis);
         known.near_until = now + STATS_TTL;
         known.far_until = now + STATS_FAR_TTL;
+        self.stale = None;
         if changed {
             known.fetched_at = millis;
             let fetched = vec![(room, Arc::new(stat))];
@@ -365,36 +397,16 @@ impl Stats {
             .map(|(&room, _)| room)
             .collect::<Vec<_>>();
         viewed.sort_unstable_by_key(|&room| focus.key(room));
-        let (mut near, mut far) = (Vec::new(), Vec::new());
-        let mut expires: Option<Instant> = None;
-        for room in self.world.iter() {
-            if self.pending.contains(&room) || viewed.contains(&room) {
-                continue;
-            }
-            let is_near = self.near.contains(&sector(room));
-            let until = self.known.get(&room).map(|known| {
-                if is_near {
-                    known.near_until
-                } else {
-                    known.far_until
-                }
-            });
-            match until {
-                Some(until) if until > now => {
-                    expires = Some(expires.map_or(until, |earliest| earliest.min(until)));
-                }
-                _ if is_near => near.push(room),
-                _ => far.push(room),
-            }
-        }
-        let urgent = !viewed.is_empty() || !near.is_empty();
+        let Stale { near, far, expires } = self.look(now, &viewed);
+        let (has_near, has_far, expires) = (!near.is_empty(), !far.is_empty(), *expires);
+        let urgent = !viewed.is_empty() || has_near;
         let budgeted = self.server == Server::Limited;
         let exempt_end = self.exempt_end(now).filter(|_| budgeted);
         let wake = |at: Instant| Err(Some(exempt_end.map_or(at, |end| end.min(at))));
         let paused = if exempt_end.is_some() || !budgeted {
             None
         } else {
-            self.held_back(client, now, urgent, !far.is_empty())
+            self.held_back(client, now, urgent, has_far)
         };
         self.set_paused(paused, events);
         let ready = self.ready_at(client, now, exempt_end.is_some() || !budgeted);
@@ -410,7 +422,8 @@ impl Stats {
             budget.take(tier).map_err(Some)?;
             let sectors = STATS_BATCH_SECTORS - usize::from(!viewed.is_empty());
             let center = self.near_center.unwrap_or_else(|| focus.centre());
-            let near = nearest_sectors(near, center, sectors, None);
+            let near = self.stale.as_ref().map(|stale| stale.near.clone());
+            let near = nearest_sectors(near.unwrap_or_default(), center, sectors, None);
             let used = near
                 .iter()
                 .map(|&room| sector(room))
@@ -422,12 +435,19 @@ impl Stats {
             let far_allowed =
                 exempt_end.is_some() || !budgeted || self.far_ready_at(client, now) <= now;
             if far_allowed && used < sectors {
-                far.retain(|&room| rect.contains(room));
+                let far = self.stale.as_ref().map_or_else(Vec::new, |stale| {
+                    stale
+                        .far
+                        .iter()
+                        .copied()
+                        .filter(|&room| rect.contains(room))
+                        .collect()
+                });
                 viewed.extend(nearest_sectors(far, focus.centre(), sectors - used, None));
             }
             viewed
         } else {
-            if far.is_empty() {
+            if !has_far {
                 return Err(expires);
             }
             let ready = if exempt_end.is_some() || !budgeted {
@@ -439,7 +459,13 @@ impl Stats {
                 return wake(expires.map_or(ready, |earliest| earliest.min(ready)));
             }
             let visible = focus.visible().or(Some(rect));
-            let batch = nearest_sectors(far, focus.centre(), STATS_BATCH_SECTORS, visible);
+            let far = self.stale.as_ref().map(|stale| stale.far.clone());
+            let batch = nearest_sectors(
+                far.unwrap_or_default(),
+                focus.centre(),
+                STATS_BATCH_SECTORS,
+                visible,
+            );
             let tier = batch
                 .first()
                 .map_or(Tier::Background, |&room| focus.tier(room));
@@ -451,12 +477,51 @@ impl Stats {
         let request =
             Box::pin(async move { map.stats(names, MapStat::Owner, shard.as_deref()).await });
         self.pending.extend(batch.iter().copied());
+        self.stale = None;
         self.fetches.push(Fetch {
             rooms: batch,
             sent_at: millis,
             request,
         });
         Ok(())
+    }
+
+    /// The rooms due a request at `now` but `viewed` ones (requested first) and those in
+    /// flight: the latest look at every room of the world while nothing it depends on
+    /// changed and no fresh room went stale since; otherwise a new look.
+    fn look(&mut self, now: Instant, viewed: &[RoomCoord]) -> &Stale {
+        if self
+            .stale
+            .as_ref()
+            .is_some_and(|stale| stale.expires.is_some_and(|at| at <= now))
+        {
+            self.stale = None;
+        }
+        self.stale.get_or_insert_with(|| {
+            let (mut near, mut far) = (Vec::new(), Vec::new());
+            let mut expires: Option<Instant> = None;
+            for room in self.world.iter() {
+                if self.pending.contains(&room) || viewed.contains(&room) {
+                    continue;
+                }
+                let is_near = self.near.contains(&sector(room));
+                let until = self.known.get(&room).map(|known| {
+                    if is_near {
+                        known.near_until
+                    } else {
+                        known.far_until
+                    }
+                });
+                match until {
+                    Some(until) if until > now => {
+                        expires = Some(expires.map_or(until, |earliest| earliest.min(until)));
+                    }
+                    _ if is_near => near.push(room),
+                    _ => far.push(room),
+                }
+            }
+            Stale { near, far, expires }
+        })
     }
 
     /// Completes the requests that finished: queues a [`WorldEvent::Stats`] with every
@@ -478,6 +543,7 @@ impl Stats {
             for room in &rooms {
                 self.pending.remove(room);
             }
+            self.stale = None;
             changed = true;
             let now = Instant::now();
             match result {

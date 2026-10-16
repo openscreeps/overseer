@@ -932,7 +932,10 @@ mod web {
                 .flags
                 .sample_count_supported(4)
         };
-        let samples = if multisampled(view_format) && multisampled(DEPTH) {
+        // A software rasterizer (SwiftShader, llvmpipe: no usable GPU) spends most of a
+        // frame resolving four samples per pixel on the CPU, holding the page's main thread.
+        let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+        let samples = if !software && multisampled(view_format) && multisampled(DEPTH) {
             4
         } else {
             1

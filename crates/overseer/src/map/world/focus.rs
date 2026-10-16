@@ -79,6 +79,11 @@ impl<'a> Budget<'a> {
             Some(at) => Err(at),
         }
     }
+
+    /// When a request of `tier` may go out (`None`: now), without taking it.
+    pub(super) fn ready_at(&self, tier: Tier) -> Option<Instant> {
+        self.client.budget_ready_at(tier.priority(), self.granted)
+    }
 }
 /// The rooms of each tier, from the latest interest.
 #[derive(Clone, Debug)]

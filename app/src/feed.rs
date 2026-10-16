@@ -10,7 +10,8 @@
 //!
 //! What the world knows of each room (overviews, portals) has one copy: the world's
 //! [`WorldKnowledge`], which the UI reads through [`Feed::knowledge`] and follows by its
-//! revision; events only bring changes to the viewers' renderers and the cache. Viewing a room
+//! revision, at most once per [`KNOWLEDGE_INTERVAL`]; events only bring changes to the
+//! viewers' renderers and the cache. Viewing a room
 //! (the map's centre, the drawer's and the pop-outs' rooms) asks for it live ([`merge`]), and
 //! the world refreshes a live room's overview and portals from what it shows.
 //!
@@ -22,18 +23,39 @@
 //!
 //! The task ends when the feed and every subscription are dropped or the session closes;
 //! dropping the `WorldMap` then ends its subscriptions.
+//!
+//! # Main thread
+//!
+//! Everything runs on the browser's main thread, and a loading world sends hundreds of events
+//! per second (a scanned room each, see [`WorldMap`]). So the task handles what is ready in
+//! slices: every event and command ready at once, for at most [`SLICE`], then the world's
+//! interest once (however many viewers changed theirs) and its progress once; a slice that
+//! took all of [`SLICE`] gives the browser a turn (input, frames) before the next.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::pin::pin;
 use std::rc::Rc;
+use std::time::Duration;
 
+use futures_util::FutureExt as _;
 use futures_util::future::{Either, select};
 use leptos::prelude::{ArcRwSignal, Set, Track};
+use overseer::Closed;
 use overseer::map::{
     Interest, RoomCoord, RoomRect, WorldEvent, WorldKnowledge, WorldMap, WorldProgress,
 };
+use overseer::net::rt::{self, Instant};
 use tokio::sync::mpsc;
+
+/// Longest the feed's task handles events and commands in a row before the browser gets a
+/// turn (see [the module](self)): input and frames wait at most about this long for it.
+pub const SLICE: Duration = Duration::from_millis(6);
+
+/// Shortest time between two revisions of the world's knowledge that the UI follows
+/// ([`Feed::knowledge`]): its readers (the tooltip, the drawer, the badges in view) rerun at
+/// most this often while the world loads, however many rooms each revision brought.
+pub const KNOWLEDGE_INTERVAL: Duration = Duration::from_millis(200);
 
 /// What a subscriber shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,10 +103,12 @@ impl Feed {
         let revision = ArcRwSignal::new(knowledge.revision());
         let mut changes = knowledge.watch();
         let follow = revision.clone();
-        // Ends with the world (its task).
+        // Ends with the world (its task). The first change shows at once; those that follow
+        // within the interval show together at its end.
         wasm_bindgen_futures::spawn_local(async move {
             while changes.changed().await.is_ok() {
                 follow.set(*changes.borrow_and_update());
+                rt::sleep(KNOWLEDGE_INTERVAL).await;
             }
         });
         wasm_bindgen_futures::spawn_local(run(world, receiver, on_event, on_progress));
@@ -168,7 +192,21 @@ struct Sink {
     interest: Option<Interest>,
 }
 
-/// The task: owns `world`, serves commands and forwards events.
+/// What the task does next: a change of the world or a command of the UI.
+type Step = Either<Result<WorldEvent, Closed>, Option<Command>>;
+
+/// The world's next change or the UI's next command, whichever comes first.
+async fn next_step(world: &mut WorldMap, commands: &mut mpsc::UnboundedReceiver<Command>) -> Step {
+    let event = pin!(world.next());
+    let command = pin!(commands.recv());
+    match select(event, command).await {
+        Either::Left((event, _)) => Either::Left(event),
+        Either::Right((command, _)) => Either::Right(command),
+    }
+}
+
+/// The task: owns `world`, serves commands and forwards events, in slices (see
+/// [the module](self)).
 async fn run(
     mut world: WorldMap,
     mut commands: mpsc::UnboundedReceiver<Command>,
@@ -179,76 +217,101 @@ async fn run(
     let mut progress = world.progress();
     on_progress(progress);
     loop {
-        let step = {
-            let event = pin!(world.next());
-            let command = pin!(commands.recv());
-            match select(event, command).await {
-                Either::Left((event, _)) => Either::Left(event),
-                Either::Right((command, _)) => Either::Right(command),
-            }
-        };
-        match step {
-            Either::Left(Ok(event)) => {
-                on_event(&event);
-                let delivers: Vec<Deliver> =
-                    sinks.values().map(|sink| sink.deliver.clone()).collect();
-                for deliver in delivers {
-                    deliver(&event);
+        let mut step = Some(next_step(&mut world, &mut commands).await);
+        let started = Instant::now();
+        let mut interest = false;
+        let mut spent = false;
+        while let Some(current) = step.take() {
+            match current {
+                Either::Left(Ok(event)) => {
+                    on_event(&event);
+                    let delivers: Vec<Deliver> =
+                        sinks.values().map(|sink| sink.deliver.clone()).collect();
+                    for deliver in delivers {
+                        deliver(&event);
+                    }
+                }
+                // The session closed, or the UI dropped the feed and every subscription.
+                Either::Left(Err(_)) | Either::Right(None) => return,
+                Either::Right(Some(command)) => {
+                    command.apply(&mut world, &mut sinks);
+                    interest = true;
                 }
             }
-            // The session closed, or the UI dropped the feed and every subscription.
-            Either::Left(Err(_)) | Either::Right(None) => break,
-            Either::Right(Some(command)) => {
-                // Every command queued behind it too, then one interest: the world never
-                // plans for a half-applied burst (a new subscriber, then its interest).
-                handle(&mut world, &mut sinks, command);
-                while let Ok(command) = commands.try_recv() {
-                    handle(&mut world, &mut sinks, command);
-                }
-                let interests: Vec<(Reach, &Interest)> = sinks
-                    .values()
-                    .filter_map(|sink| Some((sink.reach, sink.interest.as_ref()?)))
-                    .collect();
-                world.set_interest(&merge(&interests));
+            if started.elapsed() >= SLICE {
+                spent = true;
+                break;
             }
+            step = next_step(&mut world, &mut commands).now_or_never();
+        }
+        if interest {
+            // Every command queued behind the slice's too, then one interest: the world never
+            // plans for a half-applied burst (a new subscriber, then its interest).
+            while let Ok(command) = commands.try_recv() {
+                command.apply(&mut world, &mut sinks);
+            }
+            let interests: Vec<(Reach, &Interest)> = sinks
+                .values()
+                .filter_map(|sink| Some((sink.reach, sink.interest.as_ref()?)))
+                .collect();
+            world.set_interest(&merge(&interests));
         }
         let now = world.progress();
         if now != progress {
             progress = now;
             on_progress(progress);
         }
+        if spent {
+            yield_to_browser().await;
+        }
     }
 }
 
-/// Applies a subscriber's `command`.
-fn handle(world: &mut WorldMap, sinks: &mut BTreeMap<u64, Sink>, command: Command) {
-    match command {
-        Command::Subscribe(id, reach, deliver) => {
-            replay(world, reach, &deliver);
-            sinks.insert(
-                id,
-                Sink {
-                    reach,
-                    deliver,
-                    interest: None,
-                },
-            );
-        }
-        Command::Interest(id, interest) => {
-            if let Some(sink) = sinks.get_mut(&id) {
-                sink.interest = Some(interest);
+impl Command {
+    /// Does what the UI asked; the world's interest follows once the slice ends.
+    fn apply(self, world: &mut WorldMap, sinks: &mut BTreeMap<u64, Sink>) {
+        match self {
+            Self::Subscribe(id, reach, deliver) => {
+                replay(world, reach, &deliver);
+                sinks.insert(
+                    id,
+                    Sink {
+                        reach,
+                        deliver,
+                        interest: None,
+                    },
+                );
+            }
+            Self::Interest(id, interest) => {
+                if let Some(sink) = sinks.get_mut(&id) {
+                    sink.interest = Some(interest);
+                }
+            }
+            Self::Unsubscribe(id) => {
+                sinks.remove(&id);
+            }
+            Self::RecheckRateLimit => {
+                world.recheck_rate_limit();
+            }
+            Self::RateLimitExemptUntil(until) => {
+                world.set_rate_limit_exempt_until(until);
             }
         }
-        Command::Unsubscribe(id) => {
-            sinks.remove(&id);
-        }
-        Command::RecheckRateLimit => {
-            world.recheck_rate_limit();
-        }
-        Command::RateLimitExemptUntil(until) => {
-            world.set_rate_limit_exempt_until(until);
-        }
     }
+}
+
+/// Lets the browser handle what waits (input, frames) before going on: resumes from a
+/// `setTimeout` task.
+async fn yield_to_browser() {
+    let (done, wait) = tokio::sync::oneshot::channel();
+    leptos::prelude::set_timeout(
+        move || {
+            let _ = done.send(());
+        },
+        Duration::ZERO,
+    );
+    // The timer always fires; a dropped sender (a torn-down runtime) resumes too.
+    let _ = wait.await;
 }
 
 /// Delivers what `world` has for `reach`.
