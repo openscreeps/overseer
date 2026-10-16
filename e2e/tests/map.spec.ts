@@ -194,8 +194,12 @@ test.describe('map', () => {
     await worldMap(page).focus();
     for (let i = 0; i < 3; i++) await page.keyboard.press('Escape');
     await expect(level(page)).toHaveText(/^(Sectors|World)$/);
-    await hoverTile(page, home.room, 25, 25);
-    await expect(hovered(page)).toHaveText(home.room);
+    // A prompt over the map (screeps.com's "Rate limit running low") takes the pointer away:
+    // point again until the status bar names the room.
+    await expect(async () => {
+      await hoverTile(page, home.room, 25, 25);
+      await expect(hovered(page)).toHaveText(home.room, { timeout: 2_000 });
+    }).toPass();
     await expect(page.getByRole('tooltip')).toContainText(home.room);
     await expect(page.getByRole('tooltip')).not.toContainText(/\d+,\d+/);
   });
@@ -253,17 +257,33 @@ test.describe('map', () => {
   }) => {
     await openRoom(page, home.path);
     const loading = status(page).getByTitle('Loading the world');
-    await expect(loading).toHaveCount(0, { timeout: 60_000 });
+    const number = (value = '') => Number(value.replaceAll('\u202f', ''));
+    const counts = (text: string) =>
+      [...text.matchAll(/(Terrain|Owners|Portals) ([\d\u202f]+) \/ ([\d\u202f]+)/g)].map(
+        ([, part, done, wanted]) => ({ part, done: number(done), wanted: number(wanted) }),
+      );
+    // Everything in view is known and the item goes away; or only the owners wait for the
+    // map-stats rate limit (screeps.com's 60 requests an hour per account), the status bar
+    // saying so.
+    await expect
+      .poll(
+        async () => {
+          if ((await loading.count()) === 0) return true;
+          const text = (await loading.textContent()) ?? '';
+          return (
+            text.includes('waiting for the rate limit, resumes in') &&
+            counts(text).every(({ part, done, wanted }) => part === 'Owners' || done === wanted)
+          );
+        },
+        { timeout: 60_000 },
+      )
+      .toBe(true);
     const shown = await page.evaluate(() => window.e2eProgress ?? []);
     expect(shown.length).toBeGreaterThan(0);
     // `Terrain 12 / 40 · Owners 3 / 40 · Portals 0 / 40`: never more known than wanted.
     for (const text of shown) {
-      const counts = [...text.matchAll(/(Terrain|Owners|Portals) ([\d\u202f]+) \/ ([\d\u202f]+)/g)];
-      expect(counts.length, text).toBeGreaterThan(0);
-      for (const [, , done, wanted] of counts) {
-        const number = (value = '') => Number(value.replaceAll('\u202f', ''));
-        expect(number(done), text).toBeLessThanOrEqual(number(wanted));
-      }
+      expect(counts(text).length, text).toBeGreaterThan(0);
+      for (const { done, wanted } of counts(text)) expect(done, text).toBeLessThanOrEqual(wanted);
     }
   });
 
