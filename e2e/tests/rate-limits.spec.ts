@@ -30,7 +30,11 @@ test.describe('rate limits', () => {
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
     await accountMenu(page, user.username, 'Rate limits');
     const panel = page.getByRole('dialog', { name: 'Rate limits' });
-    if (target === 'official') {
+    const lifted = panel.getByRole('status').filter({ hasText: "Your API token's rate limits are lifted until" });
+    const reported = panel.getByRole('row').filter({ has: page.getByRole('rowheader') });
+    // screeps.com sends no limits for a lifted token (lifted on the website): one or the other.
+    if (target === 'official') await expect(lifted.or(reported.first())).toBeVisible();
+    if (target === 'official' && (await lifted.count()) === 0) {
       // Opening the world asks screeps.com for terrain, rooms and map stats at once.
       const row = panel.getByRole('row').filter({ has: page.getByRole('rowheader') }).first();
       await expect(row.getByRole('rowheader')).toHaveText(/^(GET|POST) \/api\/\S+$/);
@@ -46,6 +50,7 @@ test.describe('rate limits', () => {
         'Resets',
       ]);
     } else {
+      // OpenScreeps has no per-token limits; screeps.com sends none for a lifted token.
       await expect(panel).toContainText('No endpoint has reported a rate limit in this session yet.');
       await expect(panel.getByRole('table')).toHaveCount(0);
     }
