@@ -30,7 +30,7 @@ function corsHeaders(request: Request, exposed = ''): Record<string, string> {
     : {};
 }
 
-test.describe('rate limits', () => {
+test.describe('rate limits', { tag: '@openscreeps' }, () => {
   test('a paused overview load says so and resumes after Check again', async ({
     page,
     server,

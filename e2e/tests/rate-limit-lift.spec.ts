@@ -167,7 +167,7 @@ async function resetPage(page: Page, open: () => Promise<void>): Promise<void> {
   );
 }
 
-test.describe('lifted rate limits', () => {
+test.describe('lifted rate limits', { tag: '@openscreeps' }, () => {
   // A rewritten response still fetching from the server when the test ends must not fail
   // the run once the page has closed.
   test.afterEach(async ({ page }) => {
