@@ -83,6 +83,8 @@ interface Fake {
   remaining?: number;
   /** The reset page fails (the user closes it without solving the captcha). */
   resetFails?: boolean;
+  /** Refusals wait until the first token list went out: the refusal comes after the start. */
+  refuseAfterFirstCheck?: boolean;
 }
 
 /**
@@ -90,6 +92,10 @@ interface Fake {
  * `remaining` of 60 left, or a refusal when `remaining` is 0) and screeps.com's reset page.
  */
 async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: number): Promise<void> {
+  let firstCheck = () => {};
+  const checked = new Promise<void>((resolve) => {
+    firstCheck = resolve;
+  });
   await page.route('**/api/user/auth-token', async (route: Route) => {
     const request = route.request();
     if (request.method() !== 'GET') return route.continue();
@@ -107,12 +113,13 @@ async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: num
       token: token.slice(0, 8),
     };
     if (fake.lift !== null) entry.noRatelimitUntil = fake.lift;
-    return route.fulfill({
+    await route.fulfill({
       status: 200,
       contentType: 'application/json',
       headers: { ...corsHeaders(request), 'x-token': token },
       body: JSON.stringify({ ok: 1, tokens: [{ _id: 'k0', full: false, token: 'ffffffff' }, entry] }),
     });
+    firstCheck();
   });
   await page.route('**/api/game/map-stats', async (route: Route) => {
     const request = route.request();
@@ -120,6 +127,7 @@ async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: num
     fake.mapStats += 1;
     const left = fake.remaining ?? remaining;
     if (left === 0) {
+      if (fake.refuseAfterFirstCheck) await checked;
       return route.fulfill({
         status: 429,
         headers: { ...corsHeaders(request), ...limitHeaders(0, reset) },
@@ -310,7 +318,7 @@ test.describe('lifted rate limits', { tag: '@openscreeps' }, () => {
   }) => {
     await page.clock.install();
     const reset = Math.floor(Date.now() / 1000) + 30 * 60;
-    const fake: Fake = { lift: null, tokenLists: 0, mapStats: 0 };
+    const fake: Fake = { lift: null, tokenLists: 0, mapStats: 0, refuseAfterFirstCheck: true };
     // Refused: the owners wait for the reset half an hour away.
     await fakeScreeps(page, fake, 0, reset);
     await signInAs(page, server, account, 'official', true);
@@ -320,11 +328,10 @@ test.describe('lifted rate limits', { tag: '@openscreeps' }, () => {
       'waiting for the rate limit',
       { timeout: 30_000 },
     );
-    // Checked at the start, and once more 30 s after the refusal (when it came after the
-    // start).
+    // Checked at the start, and once more 30 s after the refusal.
     await expect.poll(() => fake.tokenLists).toBe(1);
     await page.clock.fastForward(31_000);
-    await page.waitForTimeout(1_500);
+    await expect.poll(() => fake.tokenLists).toBe(2);
     const checks = fake.tokenLists;
 
     // Lifted on the website; no focus, no visibility change, no new refusal: the minute's
