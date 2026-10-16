@@ -1,14 +1,18 @@
 //! What every live test needs: the server from the environment, fresh accounts and players.
 //!
 //! `cargo xtask e2e` starts a disposable world of `openscreeps/server` and sets
-//! `OVERSEER_LIVE_URL` (the server base URL), `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD`
-//! (a player without a spawn). Tests register their own accounts so that none depends on
-//! another's state.
+//! `OVERSEER_E2E_TARGET=openscreeps`, `OVERSEER_LIVE_URL` (the server base URL),
+//! `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a player without a spawn). Tests register
+//! their own accounts so that none depends on another's state.
+//!
+//! `cargo xtask e2e --target official` runs only the `read_only` tests against screeps.com, with
+//! `OVERSEER_E2E_TARGET=official`, `OVERSEER_LIVE_URL` and `OVERSEER_LIVE_TOKEN` (an API token of
+//! an account that owns rooms); [`reader`] is that account on either target.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use overseer::core::ServerUrl;
+use overseer::core::{ServerUrl, Token};
 use overseer::net::Client;
 use overseer::net::core::api::Tile;
 use overseer::net::core::api::endpoints;
@@ -56,6 +60,46 @@ pub fn admin() -> Account {
         username,
         password: var("OVERSEER_LIVE_PASSWORD"),
     }
+}
+
+/// Whether the tests run against screeps.com (`OVERSEER_E2E_TARGET=official`): a sharded world
+/// where [`reader`] owns rooms.
+pub fn official() -> bool {
+    std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "official")
+}
+
+/// The profile of the `read_only` tests' account: the API token `OVERSEER_LIVE_TOKEN` when it
+/// is set (it never signs in), else the harness's player ([`admin`]).
+///
+/// # Panics
+///
+/// Without a token, when the harness's player is not set (see [`admin`]).
+pub fn reader() -> ServerProfile {
+    match std::env::var("OVERSEER_LIVE_TOKEN") {
+        Ok(token) if !token.is_empty() => ServerProfile {
+            url: url(),
+            auth: Auth::Token(Token::new(token)),
+            server_password: None,
+            default_shard: None,
+        },
+        _ => admin().profile(),
+    }
+}
+
+/// The start room of the session's account (`GET /api/user/world-start-room`) as
+/// `(shard, room)`: sharded servers name its shard, single-world servers none.
+///
+/// # Panics
+///
+/// When the request fails or the server names no room.
+pub async fn start_room(overseer: &Overseer) -> (Option<String>, String) {
+    let start = overseer
+        .account()
+        .start_room(None)
+        .await
+        .expect("the start room")
+        .expect("the server names a start room");
+    (start.shard, start.room)
 }
 
 /// A registered account (password sign-in).

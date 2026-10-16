@@ -1,18 +1,74 @@
 // The server's HTTP API, used to set up what a UI test needs: fresh accounts, players with a
 // spawn and a running bot, and session tokens. Every helper takes the server base URL (with a
 // trailing slash, as `OVERSEER_LIVE_URL`).
+//
+// On the `official` target (screeps.com) the API is read-only: {@link api} refuses every request
+// that {@link isMutating} names, before it leaves.
 
-/** The disposable server started by `cargo xtask e2e`. */
-export interface Server {
-  /** Base URL with a trailing slash, e.g. `http://127.0.0.1:41234/`. */
-  url: string;
-  /** The app's route slug of the server, e.g. `127.0.0.1-41234`. */
-  slug: string;
+/** What the tests run against (`OVERSEER_E2E_TARGET`). */
+export type Target = 'openscreeps' | 'official';
+
+/** The server under test, from `OVERSEER_E2E_TARGET` (`openscreeps` unless `official`). */
+export function currentTarget(): Target {
+  const target = process.env.OVERSEER_E2E_TARGET ?? 'openscreeps';
+  if (target !== 'openscreeps' && target !== 'official') {
+    throw new Error(`OVERSEER_E2E_TARGET is \`${target}\`, not \`openscreeps\` or \`official\``);
+  }
+  return target;
+}
+
+/** The server's display name in seeded profiles of the disposable server. */
+export const SERVER_NAME = 'Local e2e';
+
+/** The disposable server's administration (`openscreeps` only). */
+export interface Admin {
   /** The harness's own player (no spawn). */
-  adminUser: string;
-  adminPassword: string;
+  user: string;
+  password: string;
   /** Bearer token of the server's admin API (`POST /admin`). */
-  adminToken: string;
+  token: string;
+}
+
+/** The server under test: the disposable world started by `cargo xtask e2e`, or screeps.com. */
+export interface Server {
+  /** Base URL with a trailing slash, e.g. `http://127.0.0.1:41234/` or `https://screeps.com/`. */
+  url: string;
+  /** The app's route slug of the server, e.g. `127.0.0.1-41234` or `screeps.com`. */
+  slug: string;
+  /** Display name of the server's seeded profile: {@link SERVER_NAME} or `screeps.com`. */
+  name: string;
+  /** The profile kind the app gives the server. */
+  kind: 'private' | 'official';
+  /** The admin API; only on the `openscreeps` target. */
+  admin?: Admin;
+}
+
+/** `server`'s admin API; fails on a server without one (tag the test `@openscreeps`). */
+export function adminOf(server: Server): Admin {
+  if (!server.admin) throw new Error(`${server.url} has no admin API: tag the test @openscreeps`);
+  return server.admin;
+}
+
+/**
+ * POST endpoints that only read (relative to the server base URL); everything else but `GET`,
+ * `HEAD` and `OPTIONS` may change the account or the world.
+ */
+export const READ_ONLY_POSTS = [
+  'api/game/map-stats',
+  'api/game/rooms',
+  'api/game/check-unique-flag-name',
+  'api/game/check-unique-object-name',
+  'api/game/gen-unique-flag-name',
+  'api/game/gen-unique-object-name',
+];
+
+/** Whether a request with `method` to `url` may change something on the server. */
+export function isMutating(method: string, url: string): boolean {
+  const verb = method.toUpperCase();
+  if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS') return false;
+  if (verb !== 'POST') return true;
+  const { pathname } = new URL(url);
+  return !READ_ONLY_POSTS.some((path) => pathname.endsWith(`/${path}`));
 }
 
 /** A registered account (password sign-in). */
@@ -56,13 +112,25 @@ function required(name: string): string {
 /** The server from the harness's environment. */
 export function liveServer(): Server {
   const url = required('OVERSEER_LIVE_URL');
+  if (currentTarget() === 'official') {
+    return { url, slug: slug(url), name: 'screeps.com', kind: 'official' };
+  }
   return {
     url,
     slug: slug(url),
-    adminUser: required('OVERSEER_LIVE_USER'),
-    adminPassword: required('OVERSEER_LIVE_PASSWORD'),
-    adminToken: required('OVERSEER_LIVE_ADMIN_TOKEN'),
+    name: SERVER_NAME,
+    kind: 'private',
+    admin: {
+      user: required('OVERSEER_LIVE_USER'),
+      password: required('OVERSEER_LIVE_PASSWORD'),
+      token: required('OVERSEER_LIVE_ADMIN_TOKEN'),
+    },
   };
+}
+
+/** The API token of the `official` target's account (`OVERSEER_LIVE_TOKEN`); never print it. */
+export function liveToken(): string | undefined {
+  return currentTarget() === 'official' ? required('OVERSEER_LIVE_TOKEN') : undefined;
 }
 
 /** The app's route slug of a server URL: host and port joined by `-` (`127.0.0.1-41234`). */
@@ -79,7 +147,10 @@ export function unique(prefix: string): string {
 /** A failed API call: the server's `error` string, or the HTTP status. */
 export class ApiError extends Error {}
 
-/** Calls `path` (`api/...`) and returns the JSON reply; throws {@link ApiError} on failure. */
+/**
+ * Calls `path` (`api/...`) and returns the JSON reply; throws {@link ApiError} on failure. On the
+ * `official` target, a request {@link isMutating} names throws before it is sent.
+ */
 export async function api<T = Record<string, unknown>>(
   url: string,
   path: string,
@@ -95,11 +166,12 @@ export async function api<T = Record<string, unknown>>(
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(options.body);
   }
-  const reply = await fetch(new URL(path, url), {
-    method: body === undefined ? 'GET' : 'POST',
-    headers,
-    body,
-  });
+  const method = body === undefined ? 'GET' : 'POST';
+  const target = new URL(path, url);
+  if (currentTarget() === 'official' && isMutating(method, target.href)) {
+    throw new Error(`${method} ${path} may change the account: refused on screeps.com`);
+  }
+  const reply = await fetch(target, { method, headers, body });
   const text = await reply.text();
   let json: Record<string, unknown> = {};
   try {
@@ -189,7 +261,10 @@ export async function createPlayer(url: string): Promise<Player> {
 export async function removeUser(server: Server, id: string): Promise<void> {
   const reply = await fetch(new URL('admin', server.url), {
     method: 'POST',
-    headers: { Authorization: `Bearer ${server.adminToken}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${adminOf(server).token}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({ action: 'user-remove', userId: id }),
   });
   if (!reply.ok) throw new ApiError(`admin user-remove: HTTP ${reply.status} ${await reply.text()}`);

@@ -2,9 +2,13 @@
 //! a way to wait for socket events.
 //!
 //! `cargo xtask e2e` starts a disposable world of `openscreeps/server` and sets
-//! `OVERSEER_LIVE_URL` (the server base URL), `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD`
-//! (a player without a spawn). Tests register their own accounts so that none depends on
-//! another's state.
+//! `OVERSEER_E2E_TARGET=openscreeps`, `OVERSEER_LIVE_URL` (the server base URL),
+//! `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a player without a spawn). Tests register
+//! their own accounts so that none depends on another's state.
+//!
+//! `cargo xtask e2e --target official` runs only the `read_only` tests against screeps.com, with
+//! `OVERSEER_E2E_TARGET=official`, `OVERSEER_LIVE_URL` and `OVERSEER_LIVE_TOKEN` (an API token of
+//! an account that owns rooms); [`reader`] is that account on either target.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -55,6 +59,48 @@ pub fn admin() -> Account {
         email: format!("{username}@e2e.invalid"),
         username,
         password: var("OVERSEER_LIVE_PASSWORD"),
+    }
+}
+
+/// Whether the tests run against screeps.com (`OVERSEER_E2E_TARGET=official`): a sharded world
+/// where [`reader`] owns rooms.
+pub fn official() -> bool {
+    std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "official")
+}
+
+/// The account of the `read_only` tests: a client holding the API token `OVERSEER_LIVE_TOKEN`
+/// when it is set (it never signs in), else the harness's player ([`admin`]).
+///
+/// # Panics
+///
+/// Without a token, when the harness's player is not set (see [`admin`]).
+pub fn reader() -> Client {
+    match std::env::var("OVERSEER_LIVE_TOKEN") {
+        Ok(token) if !token.is_empty() => with_token(Token::new(token)),
+        _ => admin().client(),
+    }
+}
+
+/// The start room of `client`'s account (`GET /api/user/world-start-room`) as `(shard, room)`:
+/// sharded servers name it `shard/room`, single-world servers only the room.
+///
+/// # Panics
+///
+/// When the request fails or the server names no room.
+pub async fn start_room(client: &Client) -> (Option<String>, String) {
+    let rooms = client
+        .send(&endpoints::UserWorldStartRoom { shard: None })
+        .await
+        .expect("the start room")
+        .body
+        .room;
+    let room = rooms
+        .into_iter()
+        .next()
+        .expect("the server names a start room");
+    match room.split_once('/') {
+        Some((shard, room)) => (Some(shard.to_owned()), room.to_owned()),
+        None => (None, room),
     }
 }
 

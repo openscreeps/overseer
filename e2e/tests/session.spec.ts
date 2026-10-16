@@ -11,8 +11,8 @@ declare global {
 }
 
 test.describe('session', () => {
-  test('resumes after a reload', async ({ signedInPage: page, player, server }) => {
-    const account = page.getByRole('button', { name: `Account: ${player.username}` });
+  test('resumes after a reload', async ({ signedInPage: page, user, server }) => {
+    const account = page.getByRole('button', { name: `Account: ${user.username}` });
     const status = page.getByRole('contentinfo', { name: 'Status' });
     await expect(account).toBeVisible();
     await expect(status).toContainText('Connected');
@@ -21,7 +21,9 @@ test.describe('session', () => {
     await expect(status).toContainText('Connected');
     await expect(page).toHaveURL(new RegExp(`#/${server.slug}/`));
   });
+});
 
+test.describe('session', { tag: '@openscreeps' }, () => {
   test('keeps the account menu open while the session resumes', async ({
     page,
     account,

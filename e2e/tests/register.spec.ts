@@ -16,7 +16,7 @@ async function openRegister(page: Page, server: Server): Promise<Locator> {
 }
 
 // Each field's accessible description holds its error, its live check status and its help.
-test.describe('registration', () => {
+test.describe('registration', { tag: '@openscreeps' }, () => {
   test('checks availability while typing', async ({ page, server, account }) => {
     const form = await openRegister(page, server);
     const username = form.getByLabel('Username', { exact: true });
