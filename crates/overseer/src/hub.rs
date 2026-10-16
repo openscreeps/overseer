@@ -76,6 +76,7 @@ impl Hub {
                     self.socket.subscribe(channel);
                 }
                 Some(Command::Unsubscribe(channel)) => self.socket.unsubscribe(&channel),
+                Some(Command::Republish(channel)) => self.republish_room(&channel),
                 Some(Command::Shutdown) | None => return false,
             }
             match self.commands.try_recv() {
@@ -135,7 +136,19 @@ impl Hub {
         }
     }
 
-    /// Builds the snapshot of an updated room once and publishes it to the room's watches.
+    /// The terrain of a room subscribed before it arrived is there: publishes the room's
+    /// state received meanwhile, then a refusal received meanwhile.
+    fn republish_room(&self, channel: &Channel) {
+        self.publish_room(channel);
+        self.registry.with_entry(channel, |entry| {
+            if let Some(sink) = entry.sink::<RoomSink>() {
+                sink.refuse_held(channel);
+            }
+        });
+    }
+
+    /// Builds the snapshot of an updated room once and publishes it to the room's watches;
+    /// nothing while the room's terrain is not there yet (see [`RoomSink::set_terrain`]).
     fn publish_room(&self, channel: &Channel) {
         let Channel::Room { shard, room } = channel else {
             return;
@@ -146,7 +159,7 @@ impl Hub {
         let Some(terrain) = self
             .registry
             .with_entry(channel, |entry| {
-                entry.sink::<RoomSink>().map(|sink| sink.terrain())
+                entry.sink::<RoomSink>().and_then(|sink| sink.terrain())
             })
             .flatten()
         else {

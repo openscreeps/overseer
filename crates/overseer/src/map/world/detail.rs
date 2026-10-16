@@ -3,28 +3,39 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures_util::StreamExt as _;
+use overseer_net::rt::Instant;
 
 use super::terrain::Terrains;
 use super::{DetailState, WorldEvent};
 use crate::map::RoomCoord;
 use crate::{Closed, Error, RoomSnapshot, Rooms, Watch};
 
+/// How long a room wanted in detail may wait for its first update (or a refusal) while it
+/// holds back portal scans (see [`WorldMap`](super::WorldMap)): the server answers the room
+/// before the scans' subscriptions, which would otherwise queue ahead of it.
+pub const DETAIL_FIRST: Duration = Duration::from_secs(5);
+
 /// The subscription of one room.
 enum Live {
     /// Not subscribed (refused).
     Off,
-    /// Waiting for the room's terrain from the world map's terrain requests.
-    Terrain,
-    /// Subscribed.
-    Watching(Watch<RoomSnapshot>),
+    /// Subscribed; `terrain` tells whether the subscription has the room's terrain (its
+    /// updates become snapshots once it has).
+    Watching {
+        watch: Watch<RoomSnapshot>,
+        terrain: bool,
+    },
 }
 
 /// One room wanted in detail.
 struct Detail {
     state: DetailState,
     live: Live,
+    /// Until then, while [`DetailState::Pending`], the room holds back portal scans.
+    first_by: Instant,
 }
 
 /// The rooms wanted in detail and their subscriptions.
@@ -48,12 +59,27 @@ impl Details {
         self.rooms.get(&room).map(|detail| &detail.state)
     }
 
+    /// While a wanted room waits for its first update (or a refusal), at most
+    /// [`DETAIL_FIRST`] after it was subscribed: when the first of those waits ends.
+    pub(super) fn holding(&self, now: Instant) -> Option<Instant> {
+        self.rooms
+            .values()
+            .filter(|detail| {
+                matches!(detail.state, DetailState::Pending)
+                    && matches!(detail.live, Live::Watching { .. })
+                    && detail.first_by > now
+            })
+            .map(|detail| detail.first_by)
+            .min()
+    }
+
     /// Makes `order` (unique, most important first) the wanted rooms: releases the rooms no
-    /// longer wanted ([`WorldEvent::DetailGone`]) and subscribes the new ones
-    /// ([`DetailState::Pending`]) once `terrain` knows their terrain (the caller wants it
-    /// there), so subscribing makes no request of its own. When the list differs from the
-    /// previous one, refused rooms are subscribed again. `rooms` is `None` without a signed-in
-    /// user: every room is refused.
+    /// longer wanted ([`WorldEvent::DetailGone`]) and subscribes the new ones at once
+    /// ([`DetailState::Pending`]), with no request of their own: their terrain comes from the
+    /// world map's terrain requests (the caller wants it there) and is given to the
+    /// subscription when `terrain` knows it; a room the server has no terrain for is refused.
+    /// When the list differs from the previous one, refused rooms are subscribed again.
+    /// `rooms` is `None` without a signed-in user: every room is refused.
     pub(super) fn set(
         &mut self,
         order: Vec<RoomCoord>,
@@ -67,15 +93,16 @@ impl Details {
         }
         self.access = rooms.cloned();
         self.shard = shard.map(str::to_owned);
-        let mut released = false;
+        let mut changed = false;
         for room in &self.order {
             if !order.contains(room) {
                 if let Some(detail) = self.rooms.remove(room) {
-                    released |= matches!(detail.live, Live::Watching(_));
+                    changed |= matches!(detail.live, Live::Watching { .. });
                 }
                 events.push_back(WorldEvent::DetailGone(*room));
             }
         }
+        let now = Instant::now();
         for &room in &order {
             let retry = match self.rooms.get(&room) {
                 None => true,
@@ -84,75 +111,88 @@ impl Details {
             if !retry {
                 continue;
             }
-            let detail = if self.access.is_some() {
+            let (state, live) = self.subscribe(room, terrain);
+            changed |= matches!(live, Live::Watching { .. });
+            events.push_back(WorldEvent::Detail(room, state.clone()));
+            self.rooms.insert(
+                room,
                 Detail {
-                    state: DetailState::Pending,
-                    live: Live::Terrain,
-                }
-            } else {
-                Detail {
-                    state: DetailState::Refused(Error::Anonymous.to_string()),
-                    live: Live::Off,
-                }
-            };
-            events.push_back(WorldEvent::Detail(room, detail.state.clone()));
-            self.rooms.insert(room, detail);
+                    state,
+                    live,
+                    first_by: now + DETAIL_FIRST,
+                },
+            );
         }
         self.order = order;
-        self.start(terrain, events, released);
+        if changed {
+            self.renew_barrier();
+        }
     }
 
-    /// Subscribes the rooms waiting for a terrain `terrain` now knows, and refuses those the
-    /// server does not know; then, when it subscribed a room or `released` one before, puts a
-    /// new barrier behind those changes. Returns whether anything changed.
-    fn start(
-        &mut self,
-        terrain: &Terrains,
-        events: &mut VecDeque<WorldEvent>,
-        released: bool,
-    ) -> bool {
+    /// Subscribes `room`, with its terrain when `terrain` knows it: its state and
+    /// subscription.
+    fn subscribe(&self, room: RoomCoord, terrain: &Terrains) -> (DetailState, Live) {
+        let Some(rooms) = &self.access else {
+            return (
+                DetailState::Refused(Error::Anonymous.to_string()),
+                Live::Off,
+            );
+        };
+        if terrain.is_absent(room) {
+            return (DetailState::Refused(no_room(room)), Live::Off);
+        }
+        let known = terrain.known.get(&room).cloned();
+        let given = known.is_some();
+        match rooms.watch_room(self.shard.as_deref(), &room.to_string(), known) {
+            Ok(watch) => (
+                DetailState::Pending,
+                Live::Watching {
+                    watch,
+                    terrain: given,
+                },
+            ),
+            Err(error) => (DetailState::Refused(error.to_string()), Live::Off),
+        }
+    }
+
+    /// Gives the subscriptions waiting for their room's terrain the terrains `terrain` now
+    /// knows, and releases (refused) the rooms the server has no terrain for; then, after a
+    /// release, puts a new barrier behind it. Returns whether anything changed.
+    fn follow_terrain(&mut self, terrain: &Terrains, events: &mut VecDeque<WorldEvent>) -> bool {
         let Some(rooms) = &self.access else {
             return false;
         };
         let mut changed = false;
-        let mut subscribed = false;
+        let mut released = false;
         for &room in &self.order {
             let Some(detail) = self.rooms.get_mut(&room) else {
                 continue;
             };
-            if !matches!(detail.live, Live::Terrain) {
-                continue;
-            }
-            let name = room.to_string();
-            let watch = if let Some(known) = terrain.known.get(&room) {
-                rooms
-                    .watch_terrain(self.shard.as_deref(), &name, Arc::clone(known))
-                    .map_err(|error| error.to_string())
-            } else if terrain.is_absent(room) {
-                Err(format!("the server has no room {name}"))
-            } else {
+            let Live::Watching { terrain: given, .. } = &mut detail.live else {
                 continue;
             };
-            changed = true;
-            match watch {
-                Ok(watch) => {
-                    detail.live = Live::Watching(watch);
-                    subscribed = true;
-                }
-                Err(error) => {
-                    detail.live = Live::Off;
-                    detail.state = DetailState::Refused(error);
-                    events.push_back(WorldEvent::Detail(room, detail.state.clone()));
-                }
+            if *given {
+                continue;
+            }
+            if let Some(known) = terrain.known.get(&room) {
+                rooms.set_terrain(self.shard.as_deref(), &room.to_string(), Arc::clone(known));
+                *given = true;
+                changed = true;
+            } else if terrain.is_absent(room) {
+                detail.live = Live::Off;
+                detail.state = DetailState::Refused(no_room(room));
+                events.push_back(WorldEvent::Detail(room, detail.state.clone()));
+                changed = true;
+                released = true;
             }
         }
-        if subscribed || released {
+        if released {
             self.renew_barrier();
         }
         changed
     }
 
-    /// Subscribes the rooms whose terrain arrived and delivers what arrived:
+    /// Gives the subscriptions the terrains that arrived and delivers what arrived:
     /// [`DetailState::Live`] per update (also added to `live`, for what it shows of the room's
     /// overview and portals), [`DetailState::Refused`] when a subscription fails or the server
     /// refuses one. Returns whether anything changed.
@@ -174,7 +214,7 @@ impl Details {
         events: &mut VecDeque<WorldEvent>,
         live: &mut Vec<(RoomCoord, Arc<RoomSnapshot>)>,
     ) -> Result<bool, Closed> {
-        let mut changed = self.start(terrain, events, false);
+        let mut changed = self.follow_terrain(terrain, events);
         loop {
             let current = self.settle(cx)?;
             let (updated, refusal) = self.drain(cx, current, events, live)?;
@@ -217,7 +257,8 @@ impl Details {
         for &room in &self.order {
             let Some(Detail {
                 state,
-                live: Live::Watching(watch),
+                live: Live::Watching { watch, .. },
+                ..
             }) = self.rooms.get_mut(&room)
             else {
                 continue;
@@ -251,7 +292,7 @@ impl Details {
             matches!(
                 self.rooms.get(room),
                 Some(Detail {
-                    live: Live::Watching(_),
+                    live: Live::Watching { .. },
                     ..
                 })
             )
@@ -276,4 +317,9 @@ impl Details {
             .as_ref()
             .map(|rooms| rooms.barrier(self.shard.as_deref()));
     }
+}
+
+/// Why `room` cannot be watched: the server has no terrain for it.
+fn no_room(room: RoomCoord) -> String {
+    format!("the server has no room {room}")
 }

@@ -17,7 +17,7 @@ use overseer_net::core::socket::types::{RoomUser, RoomVisualItem};
 use overseer_net::core::socket::{Channel, Flag, FlagError, Payload, RoomState};
 use tokio::sync::watch;
 
-use crate::live::{Sink, Watch};
+use crate::live::{Command, Sink, Watch};
 use crate::{Error, Overseer};
 
 /// Prefix of the [`Rooms::barrier`] channels' room names, which no room has.
@@ -147,35 +147,38 @@ impl Rooms {
         self.watch_shard(Some(shard), room).await
     }
 
+    /// Subscribes first, then fetches the terrain: the server starts sending the room while
+    /// the terrain is on its way.
     async fn watch_shard(
         &self,
         shard: Option<&str>,
         room: &str,
     ) -> Result<Watch<RoomSnapshot>, Error> {
-        self.overseer.ensure_open()?;
-        self.overseer.require_user()?;
         let shard = self.overseer.resolve_shard(shard);
+        let watch = self.watch_room(shard.as_deref(), room, None)?;
         let terrain = self
             .overseer
             .client()
             .terrain(shard.as_deref(), room)
             .await?;
-        self.watch_terrain(shard.as_deref(), room, terrain)
+        self.set_terrain(shard.as_deref(), room, terrain);
+        Ok(watch)
     }
 
-    /// Watches `room` on `shard` (`None`: the default shard) whose terrain the caller already
-    /// has: subscribes without any request. A room already watched keeps the terrain of its
-    /// first watch.
+    /// Watches `room` on `shard` (`None`: the default shard): subscribes without any request.
+    /// Its updates become snapshots once the room has a terrain: `terrain` when the caller
+    /// has it, else the first given to [`Self::set_terrain`]; until then the server's state is
+    /// kept and nothing is published. A room already watched keeps the terrain it has.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Anonymous`] without a signed-in user and [`Error::Closed`] after
     /// [`Overseer::shutdown`](crate::Overseer::shutdown).
-    pub(crate) fn watch_terrain(
+    pub(crate) fn watch_room(
         &self,
         shard: Option<&str>,
         room: &str,
-        terrain: Arc<Terrain>,
+        terrain: Option<Arc<Terrain>>,
     ) -> Result<Watch<RoomSnapshot>, Error> {
         self.overseer.ensure_open()?;
         self.overseer.require_user()?;
@@ -192,12 +195,47 @@ impl Rooms {
                 receiver
             } else {
                 let (sender, receiver) = watch::channel(None);
-                entry.sinks.push(Box::new(RoomSink { sender, terrain }));
+                entry.sinks.push(Box::new(RoomSink {
+                    sender,
+                    terrain: None,
+                    refused: None,
+                }));
                 receiver
             }
         });
         let receiver = receiver.ok_or(Error::Closed)?;
-        Ok(Watch::new(receiver, registration))
+        let watch = Watch::new(receiver, registration);
+        if let Some(terrain) = terrain {
+            self.set_terrain(shard, room, terrain);
+        }
+        Ok(watch)
+    }
+
+    /// Gives the terrain of `room` on `shard` (`None`: the default shard) to its
+    /// subscription, when watched without one: the state and refusal the server sent
+    /// meanwhile are published at once.
+    pub(crate) fn set_terrain(&self, shard: Option<&str>, room: &str, terrain: Arc<Terrain>) {
+        let channel = Channel::Room {
+            shard: self.overseer.resolve_shard(shard),
+            room: room.to_owned(),
+        };
+        let given = self
+            .overseer
+            .registry()
+            .with_entry(&channel, |entry| {
+                entry.sink::<RoomSink>().is_some_and(|sink| {
+                    sink.terrain.is_none() && {
+                        sink.terrain = Some(terrain);
+                        true
+                    }
+                })
+            })
+            .unwrap_or(false);
+        if given {
+            self.overseer
+                .registry()
+                .command(Command::Republish(channel));
+        }
     }
 
     /// A barrier behind every subscription and release sent so far on `shard` (`None`: the
@@ -225,13 +263,16 @@ impl Rooms {
 /// The room channel's one sink: the snapshot sender of every watch and the room's terrain.
 pub(crate) struct RoomSink {
     sender: watch::Sender<Option<Arc<RoomSnapshot>>>,
-    terrain: Arc<Terrain>,
+    /// The terrain snapshots are built with; `None` until [`Rooms::set_terrain`] gives it.
+    terrain: Option<Arc<Terrain>>,
+    /// A refusal that arrived before the terrain, reported once it is there.
+    refused: Option<String>,
 }
 
 impl RoomSink {
-    /// The terrain snapshots are built with.
-    pub(crate) fn terrain(&self) -> Arc<Terrain> {
-        Arc::clone(&self.terrain)
+    /// The terrain snapshots are built with, once there.
+    pub(crate) fn terrain(&self) -> Option<Arc<Terrain>> {
+        self.terrain.clone()
     }
 
     /// Publishes the snapshot of an update.
@@ -240,9 +281,13 @@ impl RoomSink {
     }
 
     /// Records a refused subscription (`err@room`) in the latest snapshot, or in an empty one
-    /// before the first update.
-    pub(crate) fn refuse(&self, channel: &Channel, error: String) {
+    /// before the first update; before the terrain is there, holds it until then.
+    pub(crate) fn refuse(&mut self, channel: &Channel, error: String) {
         let Channel::Room { shard, room } = channel else {
+            return;
+        };
+        let Some(terrain) = self.terrain() else {
+            self.refused = Some(error);
             return;
         };
         let latest = self.sender.borrow().clone();
@@ -251,9 +296,16 @@ impl RoomSink {
                 subscription_error: Some(error),
                 ..RoomSnapshot::clone(&latest)
             },
-            None => RoomSnapshot::refused(room, shard.as_deref(), self.terrain(), error),
+            None => RoomSnapshot::refused(room, shard.as_deref(), terrain, error),
         };
         self.publish(snapshot);
+    }
+
+    /// Reports the refusal held until the terrain was there, if any.
+    pub(crate) fn refuse_held(&mut self, channel: &Channel) {
+        if let Some(error) = self.refused.take() {
+            self.refuse(channel, error);
+        }
     }
 }
 

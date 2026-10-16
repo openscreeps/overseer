@@ -8,10 +8,11 @@ mod portals;
 mod stats;
 mod terrain;
 
+pub use detail::DETAIL_FIRST;
 pub use focus::PREFETCH_RING;
 pub use portals::{
-    PORTAL_BACKGROUND_IN_FLIGHT, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_IN_FLIGHT,
-    PORTAL_QUIET_TTL, PORTAL_SCAN_SETTLE, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
+    PORTAL_BACKGROUND_IN_FLIGHT, PORTAL_DECAYING_TTL, PORTAL_FETCH_TIMEOUT, PORTAL_HELD_SCANS,
+    PORTAL_IN_FLIGHT, PORTAL_QUIET_TTL, PORTAL_SCAN_SETTLE, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
 };
 pub use stats::{
     STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_IN_FLIGHT, STATS_TTL,
@@ -191,7 +192,9 @@ impl WorldProgress {
 /// first, and the smallest share of the request budget (below). Portal destinations go by
 /// what is wanted now ([`Interest::portal_destinations`], see **Portals**). Viewed rooms
 /// refresh at once regardless of their lifetime, then stay fresh while viewed: their live
-/// room (see **Live rooms**) and one overview request (see **Overviews**).
+/// room (see **Live rooms**) and one overview request (see **Overviews**). Their live rooms
+/// are subscribed first, and while one waits for its first update the scans wait (see
+/// **Detail**).
 ///
 /// # Pacing per server
 ///
@@ -337,10 +340,15 @@ impl WorldProgress {
 ///   later overview response only brings the status, and scans and room-objects responses
 ///   are dropped. Live minimaps update portal presence (above); they cannot tell owners (a
 ///   user's positions mix creeps and structures).
-/// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order.
-///   Their terrain comes from the terrain above (they are wanted first, ahead of
-///   [`Interest::terrain`]), so a seeded or fetched room subscribes without any request; a
-///   room the server does not know is refused.
+/// - **Detail** (`room`): the rooms of [`Interest::detail`] are subscribed in priority order
+///   at once, with no request: their terrain comes from the terrain above (they are wanted
+///   first, ahead of [`Interest::terrain`]) and is given to the subscription when it arrives
+///   (the server's updates meanwhile become a snapshot then); a room the server does not
+///   know is refused. While a subscribed room waits for its first update (or a refusal), at
+///   most [`DETAIL_FIRST`] (5 s), background portal scans wait and at most
+///   [`PORTAL_HELD_SCANS`] (4) are in flight: otherwise the whole-world scan's subscriptions
+///   (up to [`MINIMAP_CAP`]) and their answers queue ahead of the room on the server and on
+///   the socket, and a first visit's room took seconds longer to show.
 ///   The server sends each user at most 2 rooms per update across all connections (pop-out
 ///   windows included) and refuses the others (`subscribe limit reached`, chosen at random,
 ///   on every update): the least important subscribed room is then released and reported
@@ -718,16 +726,19 @@ impl WorldMap {
             at,
             (&mut budget, &mut work.events),
         );
+        // A room wanted in detail and waiting for its first update holds scans back.
+        let held = work.details.holding(now);
         let portals = work.portals.plan(
             &self.map,
             &self.overseer,
             shard,
             at,
             (&mut budget, &work.terrain),
+            held.is_some(),
         );
         // The pacing changes back when the exemption ends.
         let exempt = work.stats.exempt_end(now);
-        let due = [terrain, stats, portals, exempt]
+        let due = [terrain, stats, portals, exempt, held]
             .into_iter()
             .flatten()
             .min();
@@ -807,8 +818,9 @@ impl Map {
     ///
     /// Its bounds come from the world size (`GET /api/game/world-size`) and which of the four
     /// central rooms exist (one `POST /api/game/rooms` for `W0N0`, `E0N0`, `W0S0` and `E0S0`,
-    /// whose terrain stays cached): screeps.com shards are centred on them, the upstream
-    /// default world and `OpenScreeps` worlds lie north-west of them (see [`RoomRect`]).
+    /// whose terrain stays cached), both at once: screeps.com shards are centred on them, the
+    /// upstream default world and `OpenScreeps` worlds lie north-west of them (see
+    /// [`RoomRect`]).
     ///
     /// # Errors
     ///
@@ -817,8 +829,12 @@ impl Map {
     pub async fn world(&self, shard: Option<&str>) -> Result<WorldMap, Error> {
         self.overseer.ensure_open()?;
         let shard = self.overseer.resolve_shard(shard);
-        let size = self.world_size(shard.as_deref()).await?;
-        let centre = self.terrain(CENTRE, shard.as_deref()).await?;
+        // Both at once: the probe does not depend on the size.
+        let (size, centre) = futures_util::future::try_join(
+            self.world_size(shard.as_deref()),
+            self.terrain(CENTRE, shard.as_deref()),
+        )
+        .await?;
         let exists = |room: &str| centre.contains_key(room);
         let sides = Sides {
             west: exists("W0N0") || exists("W0S0"),

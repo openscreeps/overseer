@@ -61,6 +61,11 @@ pub const PORTAL_BACKGROUND_IN_FLIGHT: usize = 4;
 /// when busy).
 pub const PORTAL_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Most scans in flight while a room wanted in detail waits for its first update (see
+/// [`DETAIL_FIRST`](super::DETAIL_FIRST)): viewed and visible rooms only, the background
+/// waits.
+pub const PORTAL_HELD_SCANS: usize = 4;
+
 /// How long the destinations of rooms with portals wait for scans still in flight of rooms of
 /// the same tier (or a higher one), which may be their partners (see
 /// [`WorldMap`](super::WorldMap)): screeps.com answers scans within a fraction of a second,
@@ -402,7 +407,8 @@ impl Portals {
     /// (fresh), absent (`terrain`), scanned nor waiting for their destinations, by tier
     /// (viewed, then those of the wanted rooms or visible, then the background), the rooms
     /// where portals usually stand ([`may_have_portals`]) first but for viewed ones, nearest
-    /// the centre first, as far as [`MINIMAP_CAP`] allows; then requests destinations
+    /// the centre first, as far as [`MINIMAP_CAP`] allows (while `held`, the background
+    /// waits and at most [`PORTAL_HELD_SCANS`] are in flight); then requests destinations
     /// ([`Self::fetch`]). Returns when to plan again (a scan times out, a retry or a request
     /// is due, or portals go stale).
     pub(super) fn plan(
@@ -412,6 +418,7 @@ impl Portals {
         shard: Option<&str>,
         (now, focus, _): (Instant, &Focus, Server),
         (budget, terrain): (&mut Budget<'_>, &Terrains),
+        held: bool,
     ) -> Option<Instant> {
         let Some(rect) = self.rect else {
             self.scans.clear();
@@ -440,10 +447,18 @@ impl Portals {
             due.at(at);
         }
         let mut free = MINIMAP_CAP.saturating_sub(self.minimaps + self.scans.len());
+        if held {
+            free = free.min(PORTAL_HELD_SCANS.saturating_sub(self.scans.len()));
+        }
         let millis = epoch_millis();
         while free > 0
             && let Some(room) = self.queue.pop_front()
         {
+            // The queue goes by tier: from the first background room on, all wait.
+            if held && tier(room) == Tier::Background {
+                self.queue.push_front(room);
+                break;
+            }
             let fresh = self
                 .known
                 .get(&room)
