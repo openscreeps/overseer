@@ -62,7 +62,7 @@ fn token_in(text: &str) -> Option<String> {
 }
 
 /// The requests `overseer-proxy` forwarded to the upstream, from its log (`log`): how many per
-/// method, and how many socket connections.
+/// endpoint (method and path, most first), and how many socket connections.
 pub fn forwarded(log: &Path) -> Result<String, Error> {
     let text = fs::read_to_string(log)
         .map_err(|error| format!("cannot read {}: {error}", log.display()))?;
@@ -71,7 +71,7 @@ pub fn forwarded(log: &Path) -> Result<String, Error> {
 
 /// [`forwarded`] of the log text `text`.
 fn count(text: &str) -> String {
-    let mut methods = BTreeMap::<String, usize>::new();
+    let mut endpoints = BTreeMap::<String, usize>::new();
     let mut sockets = 0_usize;
     for line in text.lines().map(strip_ansi) {
         let field = |name: &str| {
@@ -84,21 +84,28 @@ fn count(text: &str) -> String {
         };
         if path.starts_with("/socket/") {
             sockets += 1;
-        } else if path.starts_with("/api/") || path.starts_with("/room-history/") {
-            *methods.entry(method).or_default() += 1;
+        } else if path.starts_with("/api/") {
+            *endpoints.entry(format!("{method} {path}")).or_default() += 1;
+        } else if path.starts_with("/room-history/") {
+            // One path per room and tick.
+            *endpoints
+                .entry(format!("{method} /room-history/…"))
+                .or_default() += 1;
         }
     }
-    let total: usize = methods.values().sum();
-    let by_method: Vec<String> = methods
+    let total: usize = endpoints.values().sum();
+    let mut by_endpoint: Vec<(&String, &usize)> = endpoints.iter().collect();
+    by_endpoint.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let listed: Vec<String> = by_endpoint
         .iter()
-        .map(|(method, count)| format!("{method} {count}"))
+        .map(|(endpoint, count)| format!("{endpoint} {count}"))
         .collect();
     format!(
         "{total} HTTP requests ({}), {sockets} socket connections",
-        if by_method.is_empty() {
+        if listed.is_empty() {
             "none".to_owned()
         } else {
-            by_method.join(", ")
+            listed.join(", ")
         }
     )
 }
@@ -143,12 +150,15 @@ mod tests {
     fn proxy_log_lines() {
         let log = "INFO overseer_proxy::serve: request method=GET path=/api/auth/me status=200\n\
             INFO overseer_proxy::serve: request \u{1b}[3mmethod\u{1b}[0m\u{1b}[2m=\u{1b}[0mPOST \u{1b}[3mpath\u{1b}[0m\u{1b}[2m=\u{1b}[0m/api/game/map-stats status=200\n\
+            INFO overseer_proxy::serve: request method=POST path=/api/game/map-stats status=200\n\
+            INFO overseer_proxy::serve: request method=GET path=/room-history/shard0/W1N1/100.json status=200\n\
             INFO overseer_proxy::serve: request method=GET path=/index.html status=200\n\
             INFO overseer_proxy::serve: request method=GET path=/socket/websocket status=101\n\
             INFO overseer_proxy::socket: socket closed path=/socket/websocket duration_ms=5\n";
         assert_eq!(
             count(log),
-            "2 HTTP requests (GET 1, POST 1), 1 socket connections"
+            "4 HTTP requests (POST /api/game/map-stats 2, GET /api/auth/me 1, \
+             GET /room-history/… 1), 1 socket connections"
         );
         assert_eq!(count(""), "0 HTTP requests (none), 0 socket connections");
     }
