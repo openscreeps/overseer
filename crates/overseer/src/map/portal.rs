@@ -98,6 +98,17 @@ pub(crate) fn portal_rooms(rect: RoomRect) -> impl Iterator<Item = RoomCoord> {
         })
 }
 
+/// The portals among `objects`, in a stable order whatever order the server sent them in:
+/// by tile, row by row.
+pub(crate) fn portals_of<'a>(objects: impl IntoIterator<Item = &'a GameRoomObject>) -> Vec<Portal> {
+    let mut portals = objects
+        .into_iter()
+        .filter_map(Portal::from_object)
+        .collect::<Vec<_>>();
+    portals.sort_unstable_by_key(|portal| (portal.y, portal.x));
+    portals
+}
+
 #[cfg(test)]
 mod tests {
     use overseer_net::core::api::types::GameRoomObject;

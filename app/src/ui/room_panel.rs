@@ -1,8 +1,8 @@
 //! The room control: one room in its own viewer ([`Scope::Room`], [`RoomPreview`]), what is
-//! known of it ([`RoomData`], kept live by [`RoomData::watch`]) and its facts ([`RoomInfo`]:
-//! status, owner and controller level with progress, safe mode, reservation, energy for
-//! spawning, sources, mineral, creeps and structures by owner, last update, and where its
-//! portals lead, with "Go to" in the drawer).
+//! known of it ([`RoomData`]: what the world knows of it, and its live state) and its facts
+//! ([`RoomInfo`]: status, owner and controller level with progress, safe mode, reservation,
+//! energy for spawning, sources, mineral, creeps and structures by owner, last update, and
+//! where its portals lead, with "Go to" in the drawer).
 //!
 //! The drawer shows the preview and facts on its Room tab; a popped-out room window shows the
 //! whole [`RoomPanel`] (preview, facts and the room's objects). A live room that the server
@@ -29,60 +29,49 @@ use crate::ui::objects::{ObjectsPanel, Selection};
 use crate::ui::surface::{Hooks, Surface, SurfaceCanvas};
 use crate::ui::world::MapState;
 
-/// What is known of the room in focus.
+/// What is known of the room in focus: its overview and portals as the world knows them (the
+/// same as the map's), and its live state.
 #[derive(Clone, Copy)]
 pub struct RoomData {
     /// The overview (owner, level, status).
-    pub stat: RwSignal<Option<Arc<RoomStat>>, LocalStorage>,
+    pub stat: Memo<Option<Arc<RoomStat>>>,
     /// The live state.
     pub detail: RwSignal<Option<DetailState>, LocalStorage>,
     /// The room's portals, once it was scanned (empty: none).
-    pub portals: RwSignal<Option<Arc<[Portal]>>, LocalStorage>,
+    pub portals: Memo<Option<Arc<[Portal]>>>,
 }
 
 impl RoomData {
-    /// Nothing known yet.
-    pub fn new() -> Self {
-        Self {
-            stat: RwSignal::new_local(None),
-            detail: RwSignal::new_local(None),
-            portals: RwSignal::new_local(None),
-        }
-    }
-
-    /// The live snapshot, if the room is live (tracked).
-    pub fn snapshot(self) -> Option<Arc<RoomSnapshot>> {
-        self.detail.with(|detail| match detail {
-            Some(DetailState::Live(snapshot)) => Some(Arc::clone(snapshot)),
-            _ => None,
-        })
-    }
-
-    /// Keeps the data at `room` of `feed` (both reactive): its overview and live state,
-    /// asked of the world for as long as the calling component lives. Live updates also move
-    /// the map's tick.
-    pub fn watch(
-        self,
-        feed: impl Fn() -> Option<Feed> + 'static,
-        room: Signal<Option<RoomCoord>>,
-        map: MapState,
-    ) {
-        let subscription: StoredValue<Option<Subscription>, LocalStorage> =
-            StoredValue::new_local(None);
+    /// What is known of `room` (reactive) in the running world of `map`. The room is viewed
+    /// for as long as the calling component lives: asked of the world live (which refreshes
+    /// its overview and portals first and from what it shows), its live updates moving the
+    /// map's tick.
+    pub fn watch(room: Signal<Option<RoomCoord>>, map: MapState) -> Self {
         // The same room set again keeps the subscription (and the live state shown).
         let room = Memo::new(move |_| room.get());
+        let data = Self {
+            stat: Memo::new(move |_| {
+                let room = room.get()?;
+                map.knowledge(|knowledge| knowledge.stat(room)).flatten()
+            }),
+            detail: RwSignal::new_local(None),
+            portals: Memo::new(move |_| {
+                let room = room.get()?;
+                map.knowledge(|knowledge| knowledge.portals(room)).flatten()
+            }),
+        };
+        let subscription: StoredValue<Option<Subscription>, LocalStorage> =
+            StoredValue::new_local(None);
         Effect::new(move |_| {
             let room = room.get();
-            let feed = feed();
+            let feed = map.feed.get();
             subscription.set_value(None);
-            self.stat.set(None);
-            self.detail.set(None);
-            self.portals.set(None);
+            data.detail.set(None);
             let (Some(feed), Some(room)) = (feed, room) else {
                 return;
             };
             let watched = feed.subscribe(Reach::Room(room), move |event| {
-                self.deliver(map, room, event);
+                data.deliver(map, room, event);
             });
             watched.set_interest(Interest {
                 stats: Some(RoomRect::new(room, room)),
@@ -93,16 +82,20 @@ impl RoomData {
             });
             subscription.set_value(Some(watched));
         });
+        data
     }
 
-    /// Applies `event` when it concerns `room`.
+    /// The live snapshot, if the room is live (tracked).
+    pub fn snapshot(self) -> Option<Arc<RoomSnapshot>> {
+        self.detail.with(|detail| match detail {
+            Some(DetailState::Live(snapshot)) => Some(Arc::clone(snapshot)),
+            _ => None,
+        })
+    }
+
+    /// Applies `event` when it changes the live state of `room`.
     fn deliver(self, map: MapState, room: RoomCoord, event: &WorldEvent) {
         match event {
-            WorldEvent::Stats(stats) => {
-                if let Some((_, stat)) = stats.iter().find(|(at, _)| *at == room) {
-                    self.stat.try_set(Some(Arc::clone(stat)));
-                }
-            }
             WorldEvent::Detail(at, state) if *at == room => {
                 self.detail.try_set(Some(state.clone()));
                 if let DetailState::Live(snapshot) = state
@@ -113,9 +106,6 @@ impl RoomData {
             }
             WorldEvent::DetailGone(at) if *at == room => {
                 self.detail.try_set(None);
-            }
-            WorldEvent::Portals(at, portals) if *at == room => {
-                self.portals.try_set(Some(Arc::clone(portals)));
             }
             _ => {}
         }
@@ -190,6 +180,7 @@ pub fn RoomPreview(
             viewer.select(selected);
         }),
         hover: None,
+        interest: None,
     });
     Effect::new(move |_| {
         let room = room.get();

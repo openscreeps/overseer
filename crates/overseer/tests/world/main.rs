@@ -1,11 +1,12 @@
 //! The world features against an in-process server: room actions, history playback, map
-//! views, the world map, its portals and player badges.
+//! views, the world map, its scheduling, its portals and player badges.
 
 mod badges;
 mod history;
 mod map;
 mod portals;
 mod rooms;
+mod schedule;
 #[path = "../session/server.rs"]
 mod server;
 mod world_map;

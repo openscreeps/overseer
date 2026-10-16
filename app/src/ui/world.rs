@@ -22,7 +22,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::prelude::*;
-use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent, WorldProgress};
+use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent, WorldKnowledge, WorldProgress};
 use overseer::{Overseer, StartRoom};
 use overseer_view::{Lod, Scope, ViewMode, Viewer};
 use web_sys::KeyboardEvent;
@@ -122,6 +122,13 @@ impl MapState {
     /// The state provided by [`crate::ui::App`].
     pub fn expect() -> Self {
         expect_context()
+    }
+
+    /// Reads what the running world knows of its rooms (none without a world); tracked: the
+    /// caller reruns when the world or its knowledge changes.
+    pub fn knowledge<T>(self, read: impl FnOnce(&WorldKnowledge) -> T) -> Option<T> {
+        self.feed
+            .with(|feed| feed.as_ref().map(|feed| read(feed.knowledge())))
     }
 
     /// Runs `change` on the map's viewer, if it is shown.
@@ -319,7 +326,7 @@ pub fn WorldScreen(
     let camera_saver = CameraSaver::new(state, url.clone(), shard_key.clone());
     let user = overseer.user_id().map(str::to_owned);
     #[cfg(target_arch = "wasm32")]
-    let badges = BadgeWants::new(rooms, &overseer, &server);
+    let badges = BadgeWants::new(map, &overseer, &server);
     // The viewer shows the world (its scope is set): before, its camera means nothing.
     let scoped = StoredValue::new(false);
     let surface = Surface::new(Hooks {
@@ -344,8 +351,6 @@ pub fn WorldScreen(
             }
             map.frame_ms.set(Some(stats.cpu_ms));
             camera_saver.changed(viewer.camera());
-            #[cfg(target_arch = "wasm32")]
-            badges.frame(viewer);
         }),
         pick: Rc::new(move |viewer: &mut Viewer, pick| {
             // Setting the same room again would restart everything that follows the room
@@ -364,6 +369,11 @@ pub fn WorldScreen(
             viewer.select(tile);
         }),
         hover: Some(hover_hook(rooms)),
+        // The badges follow the view the feed was told about.
+        #[cfg(target_arch = "wasm32")]
+        interest: Some(Rc::new(move |viewer: &Viewer| badges.follow(viewer))),
+        #[cfg(not(target_arch = "wasm32"))]
+        interest: None,
     });
     map.surface.set_value(Some(surface));
     on_cleanup(move || {
@@ -431,7 +441,6 @@ pub fn WorldScreen(
         });
         let subscription = feed.subscribe(Reach::World, move |event| {
             surface.apply(event);
-            rooms.learn(event);
             if let WorldEvent::Detail(_, DetailState::Live(snapshot)) = event
                 && snapshot.game_time.is_some()
             {
@@ -749,33 +758,24 @@ fn hover_hook(rooms: MapRooms) -> HoverHook {
     })
 }
 
-/// How long the view must rest before the badges in view are asked for again.
-#[cfg(target_arch = "wasm32")]
-const BADGE_DELAY: Duration = Duration::from_millis(300);
-
 /// Asks the badge loader ([`crate::badges`]) for the badges of the owners and reservers in
-/// view, nearest the centre first, once the view (or what is known of its rooms) rests for
-/// [`BADGE_DELAY`]; for none while badges are too small to be drawn.
+/// view, nearest the centre first, whenever the map's interest goes to the feed (one camera
+/// change drives both) and whenever what the world knows changes while badges are drawn; for
+/// none while badges are too small to be drawn.
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy)]
 struct BadgeWants {
-    /// The map's surface (its viewer gets the badges).
-    surface: StoredValue<Option<Surface>, LocalStorage>,
-    rooms: MapRooms,
-    /// The rooms in view, whether badges are drawn and the revision of what is known, when
-    /// the loader was last asked.
-    asked: StoredValue<Option<(RoomRect, bool, u64)>>,
-    /// An ask is scheduled.
-    scheduled: StoredValue<bool>,
+    /// The rooms in view and whether badges are drawn, as the feed was last told.
+    view: RwSignal<Option<(RoomRect, bool)>>,
     loader: StoredValue<crate::badges::Badges, LocalStorage>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl BadgeWants {
-    /// Badges of `server` (`overseer` connected to it) for the map's viewer, from what
-    /// `rooms` knows.
-    fn new(rooms: MapRooms, overseer: &Overseer, server: &Server) -> Self {
-        let surface = MapState::expect().surface;
+    /// Badges of `server` (`overseer` connected to it) for the viewer of `map`, from what its
+    /// world knows.
+    fn new(map: MapState, overseer: &Overseer, server: &Server) -> Self {
+        let surface = map.surface;
         let loader = crate::badges::Badges::new(
             overseer.clone(),
             &server.url,
@@ -788,70 +788,38 @@ impl BadgeWants {
                 }
             },
         );
-        Self {
-            surface,
-            rooms,
-            asked: StoredValue::new(None),
-            scheduled: StoredValue::new(false),
+        let wants = Self {
+            view: RwSignal::new(None),
             loader: StoredValue::new_local(loader),
-        }
-    }
-
-    /// The map drew a frame with `viewer`.
-    fn frame(self, viewer: &Viewer) {
-        if self.asked.try_get_value() == Some(Some(self.view(viewer)))
-            || self.scheduled.try_get_value() != Some(false)
-        {
-            return;
-        }
-        self.scheduled.set_value(true);
-        set_timeout(
-            move || {
-                // `None`: the screen is still there.
-                if self.scheduled.try_set_value(false).is_none()
-                    && let Some(surface) = self.surface.try_get_value().flatten()
-                {
-                    surface.with_viewer(|viewer| self.ask(viewer));
-                }
-            },
-            BADGE_DELAY,
-        );
-    }
-
-    /// What the badges in view depend on.
-    fn view(self, viewer: &Viewer) -> (RoomRect, bool, u64) {
-        (
-            viewer.visible_rooms(),
-            viewer.badges_visible(),
-            self.rooms.revision.get_untracked(),
-        )
-    }
-
-    /// Asks the loader for the badges in view now.
-    fn ask(self, viewer: &Viewer) {
-        let view = self.view(viewer);
-        self.asked.set_value(Some(view));
-        let (rooms, visible, _) = view;
-        let wants = if visible {
-            #[expect(clippy::cast_precision_loss, reason = "room coordinates are small")]
-            let centre = (
-                (rooms.min.x + rooms.max.x) as f32 / 2.0,
-                (rooms.min.y + rooms.max.y) as f32 / 2.0,
-            );
-            self.rooms.known.with_value(|known| {
-                crate::badges::wanted(
-                    known
-                        .stats
-                        .iter()
-                        .filter(|(room, _)| rooms.contains(**room))
-                        .map(|(room, stat)| (*room, stat.as_ref())),
-                    centre,
-                )
-            })
-        } else {
-            Vec::new()
         };
-        self.loader.with_value(|loader| loader.want(wants));
+        Effect::new(move |_| {
+            let Some((rooms, visible)) = wants.view.get() else {
+                return;
+            };
+            let wanted = if visible {
+                map.knowledge(|knowledge| {
+                    let stats = knowledge.stats_in(rooms);
+                    crate::badges::wanted(stats.iter().map(|(room, stat)| (*room, &**stat)), rooms)
+                })
+                .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            wants.loader.with_value(|loader| loader.want(wanted));
+        });
+        wants
+    }
+
+    /// The feed was told about the view of `viewer`: the badges follow it.
+    fn follow(self, viewer: &Viewer) {
+        let view = Some((viewer.visible_rooms(), viewer.badges_visible()));
+        if self
+            .view
+            .try_get_untracked()
+            .is_some_and(|before| before != view)
+        {
+            self.view.set(view);
+        }
     }
 
     /// The screen left: no more badges.

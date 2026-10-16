@@ -153,8 +153,9 @@ impl Details {
     }
 
     /// Subscribes the rooms whose terrain arrived and delivers what arrived:
-    /// [`DetailState::Live`] per update, [`DetailState::Refused`] when a subscription fails or
-    /// the server refuses one. Returns whether anything changed.
+    /// [`DetailState::Live`] per update (also added to `live`, for what it shows of the room's
+    /// overview and portals), [`DetailState::Refused`] when a subscription fails or the server
+    /// refuses one. Returns whether anything changed.
     ///
     /// The server refuses (`err@room`) every subscription of the user beyond its limit, chosen
     /// at random, on each update until it processes a release, and answers a subscription with
@@ -171,11 +172,12 @@ impl Details {
         cx: &mut Context<'_>,
         terrain: &Terrains,
         events: &mut VecDeque<WorldEvent>,
+        live: &mut Vec<(RoomCoord, Arc<RoomSnapshot>)>,
     ) -> Result<bool, Closed> {
         let mut changed = self.start(terrain, events, false);
         loop {
             let current = self.settle(cx)?;
-            let (updated, refusal) = self.drain(cx, current, events)?;
+            let (updated, refusal) = self.drain(cx, current, events, live)?;
             changed |= updated;
             let Some(error) = refusal else {
                 return Ok(changed);
@@ -200,13 +202,15 @@ impl Details {
     }
 
     /// Takes what arrived for every subscribed room: each update becomes
-    /// [`DetailState::Live`]; refusals are dropped, but the first one is returned when they are
-    /// `current`. Returns whether a room was updated and that refusal.
+    /// [`DetailState::Live`] (and is added to `live`); refusals are dropped, but the first one
+    /// is returned when they are `current`. Returns whether a room was updated and that
+    /// refusal.
     fn drain(
         &mut self,
         cx: &mut Context<'_>,
         current: bool,
         events: &mut VecDeque<WorldEvent>,
+        live: &mut Vec<(RoomCoord, Arc<RoomSnapshot>)>,
     ) -> Result<(bool, Option<String>), Closed> {
         let mut updated = false;
         let mut refusal = None;
@@ -230,6 +234,7 @@ impl Details {
                         } else {
                             updated = true;
                             *state = DetailState::Live(Arc::clone(&snapshot));
+                            live.push((room, Arc::clone(&snapshot)));
                             events.push_back(WorldEvent::Detail(room, DetailState::Live(snapshot)));
                         }
                     }

@@ -22,7 +22,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use overseer::core::api::types::UserBadge;
-use overseer::map::{RoomCoord, RoomStat};
+use overseer::map::{RoomCoord, RoomRect, RoomStat};
 
 use crate::profiles::ServerKind;
 
@@ -87,20 +87,25 @@ pub struct Want {
     pub hash: u64,
 }
 
-/// The badges of the owners and reservers of `rooms` (with their overviews), nearest to
-/// `centre` first, each player once, at most [`MAX_WANTED`]. Players without a name or badge
-/// are skipped.
+/// The badges of the owners and reservers of `rooms` (with their overviews) in `view`,
+/// nearest its centre first, each player once, at most [`MAX_WANTED`]. Players without a name
+/// or badge are skipped.
 pub fn wanted<'a>(
     rooms: impl IntoIterator<Item = (RoomCoord, &'a RoomStat)>,
-    centre: (f32, f32),
+    view: RoomRect,
 ) -> Vec<Want> {
+    #[expect(clippy::cast_precision_loss, reason = "room coordinates are small")]
+    let centre = (
+        (view.min.x + view.max.x) as f32 / 2.0,
+        (view.min.y + view.max.y) as f32 / 2.0,
+    );
     let distance = |room: RoomCoord| {
         #[expect(clippy::cast_precision_loss, reason = "room coordinates are small")]
         let (dx, dy) = (room.x as f32 - centre.0, room.y as f32 - centre.1);
         dx.mul_add(dx, dy * dy)
     };
     let mut players: Vec<(f32, &str, &str, &UserBadge)> = Vec::new();
-    for (room, stat) in rooms {
+    for (room, stat) in rooms.into_iter().filter(|(room, _)| view.contains(*room)) {
         let owner = stat
             .owner
             .as_ref()
@@ -349,7 +354,7 @@ pub fn test_badge(shape: i64) -> UserBadge {
 mod tests {
     use std::time::Duration;
 
-    use overseer::map::{RoomCoord, RoomOwner, RoomReservation, RoomStat, RoomStatus};
+    use overseer::map::{RoomCoord, RoomOwner, RoomRect, RoomReservation, RoomStat, RoomStatus};
 
     use super::{
         OFFICIAL_INTERVAL, Want, badge_hash, premultiply, request_interval, test_badge, wanted,
@@ -409,8 +414,10 @@ mod tests {
                 (room(0, 4), &mid),
                 (room(0, 0), &empty),
                 (room(0, 1), &nameless),
+                // Out of view.
+                (room(11, 0), &stat(Some(("outside", 4)), None)),
             ],
-            (0.0, 0.0),
+            RoomRect::new(room(-10, -10), room(10, 10)),
         );
         let want = |name: &str, shape| Want {
             user: format!("id-{name}"),

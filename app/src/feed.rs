@@ -8,6 +8,12 @@
 //! subscriber ([`merge`]) into the world's. A new subscriber first gets what the world already
 //! has for its reach (terrain, overviews, minimaps, live rooms), then every event.
 //!
+//! What the world knows of each room (overviews, portals) has one copy: the world's
+//! [`WorldKnowledge`], which the UI reads through [`Feed::knowledge`] and follows by its
+//! revision; events only bring changes to the viewers' renderers and the cache. Viewing a room
+//! (the map's centre, the drawer's and the pop-outs' rooms) asks for it live ([`merge`]), and
+//! the world refreshes a live room's overview and portals from what it shows.
+//!
 //! The task also hands what the world fetched (terrain, rooms without terrain, overviews,
 //! scanned portals) to the app's cache and reports the world's loading progress
 //! ([`progress_label`] for the status bar, including when the rate limit holds overviews
@@ -23,7 +29,10 @@ use std::pin::pin;
 use std::rc::Rc;
 
 use futures_util::future::{Either, select};
-use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent, WorldMap, WorldProgress};
+use leptos::prelude::{ArcRwSignal, Set, Track};
+use overseer::map::{
+    Interest, RoomCoord, RoomRect, WorldEvent, WorldKnowledge, WorldMap, WorldProgress,
+};
 use tokio::sync::mpsc;
 
 /// What a subscriber shows.
@@ -53,6 +62,9 @@ pub struct Feed {
     commands: mpsc::UnboundedSender<Command>,
     next_id: Rc<Cell<u64>>,
     bounds: RoomRect,
+    knowledge: WorldKnowledge,
+    /// The knowledge's revision, followed while the world runs.
+    revision: ArcRwSignal<u64>,
 }
 
 impl Feed {
@@ -65,17 +77,36 @@ impl Feed {
     ) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let bounds = world.bounds();
+        let knowledge = world.knowledge();
+        let revision = ArcRwSignal::new(knowledge.revision());
+        let mut changes = knowledge.watch();
+        let follow = revision.clone();
+        // Ends with the world (its task).
+        wasm_bindgen_futures::spawn_local(async move {
+            while changes.changed().await.is_ok() {
+                follow.set(*changes.borrow_and_update());
+            }
+        });
         wasm_bindgen_futures::spawn_local(run(world, receiver, on_event, on_progress));
         Self {
             commands,
             next_id: Rc::new(Cell::new(0)),
             bounds,
+            knowledge,
+            revision,
         }
     }
 
     /// The rooms of the world.
     pub const fn bounds(&self) -> RoomRect {
         self.bounds
+    }
+
+    /// What the world knows of its rooms (overviews, portals): the one copy, read-only.
+    /// Tracked: a reactive caller reruns whenever it changes.
+    pub fn knowledge(&self) -> &WorldKnowledge {
+        self.revision.track();
+        &self.knowledge
     }
 
     /// Delivers what the world has for `reach`, then every event, to `deliver` until the
@@ -249,7 +280,9 @@ fn replay(world: &WorldMap, reach: Reach, deliver: &Deliver) {
 ///   rooms; portals likewise;
 /// - terrain and minimaps: the world subscribers' rooms, then the room controls';
 /// - live rooms: the world's first (the room under the map's centre), then the room
-///   controls'. The map's other rooms stay minimaps: the server caps live rooms per player
+///   controls' (the drawer's room, popped-out rooms). These are the viewed rooms: the world
+///   refreshes their overviews and portals first, regardless of age, and from their live
+///   state. The map's other rooms stay minimaps: the server caps live rooms per player
 ///   across every connection (2 on screeps.com and `OpenScreeps`), and the rest of that budget
 ///   goes to popped-out windows.
 ///

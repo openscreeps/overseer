@@ -1,4 +1,5 @@
-//! Terrain of the world map: batched, deduplicated, nearest first, kept for the session.
+//! Terrain of the world map: batched, deduplicated, viewed and visible rooms first, the rest
+//! of the world swept in the background, kept for the session.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -11,7 +12,8 @@ use overseer_net::rt::{BoxFuture, Instant, SystemTime, UNIX_EPOCH};
 use overseer_net::{Client, Error as NetError};
 
 use super::WorldEvent;
-use crate::map::{Map, RoomCoord};
+use super::focus::{Focus, distance};
+use crate::map::{Map, RoomCoord, RoomRect};
 use crate::{Closed, Error};
 
 /// Rooms per terrain request (`POST /api/game/rooms`).
@@ -35,14 +37,15 @@ const GLOBAL_RETRY: Duration = Duration::from_secs(60);
 /// Shortest wait after HTTP 429 with the endpoint's limit.
 const MIN_LIMIT_WAIT: Duration = Duration::from_secs(1);
 
-/// A request in flight: its rooms, nearest first, and the request.
+/// A request in flight: its rooms, nearest first, whether it is the background sweep's, and
+/// the request.
 struct Fetch {
     rooms: Vec<RoomCoord>,
+    background: bool,
     request: BoxFuture<'static, Result<BTreeMap<String, Arc<Terrain>>, Error>>,
 }
 
 /// The terrain known, wanted and being fetched.
-#[derive(Default)]
 pub(super) struct Terrains {
     /// Every terrain fetched or seeded.
     pub(super) known: HashMap<RoomCoord, Arc<Terrain>>,
@@ -50,9 +53,16 @@ pub(super) struct Terrains {
     absent: HashSet<RoomCoord>,
     /// The rooms of the latest interest.
     wanted: HashSet<RoomCoord>,
-    /// Wanted rooms not requested yet, nearest first. Rooms seeded meanwhile are skipped when
-    /// a batch is taken, so seeding never scans it.
+    /// Foreground rooms not requested yet: the viewed and wanted rooms in their order, then
+    /// the prefetch ring nearest the centre. Rooms seeded meanwhile are skipped when a batch
+    /// is taken, so seeding never scans it.
     queue: VecDeque<RoomCoord>,
+    /// Every room of the world: swept in the background.
+    world: RoomRect,
+    /// While any terrain is wanted, the room the background sweep goes out from.
+    sweep: Option<RoomCoord>,
+    /// The sweep found no room left (until a failed request gives some back).
+    swept: bool,
     /// The rooms of the requests in flight.
     pending: HashSet<RoomCoord>,
     fetches: Vec<Fetch>,
@@ -65,9 +75,35 @@ pub(super) struct Terrains {
 }
 
 impl Terrains {
-    /// Makes `rooms` (nearest first) the wanted rooms and queues those neither known, absent
-    /// nor in flight.
-    pub(super) fn want(&mut self, rooms: impl IntoIterator<Item = RoomCoord>) {
+    /// Nothing known or wanted yet of the world `world`.
+    pub(super) fn new(world: RoomRect) -> Self {
+        Self {
+            known: HashMap::new(),
+            absent: HashSet::new(),
+            wanted: HashSet::new(),
+            queue: VecDeque::new(),
+            world,
+            sweep: None,
+            swept: false,
+            pending: HashSet::new(),
+            fetches: Vec::new(),
+            not_before: None,
+            wanted_known: 0,
+            wanted_absent: 0,
+        }
+    }
+
+    /// Makes `rooms` (the viewed rooms, then the others nearest first) the wanted rooms and
+    /// queues those neither known, absent nor in flight. While a map is shown (`map`: a
+    /// terrain interest of its own, not only viewed rooms), the rest of the prefetch ring of
+    /// `focus` follows, and the rest of the world is swept in the background, nearest the
+    /// centre of `focus` first.
+    pub(super) fn want(
+        &mut self,
+        rooms: impl IntoIterator<Item = RoomCoord>,
+        focus: &Focus,
+        map: bool,
+    ) {
         self.wanted.clear();
         self.queue.clear();
         self.wanted_known = 0;
@@ -84,6 +120,22 @@ impl Terrains {
                 self.queue.push_back(room);
             }
         }
+        if let Some(visible) = focus.visible().filter(|_| map) {
+            let mut ring = visible
+                .iter()
+                .filter(|room| !self.wanted.contains(room) && self.unknown(*room))
+                .collect::<Vec<_>>();
+            ring.sort_unstable_by_key(|&room| focus.key(room));
+            self.queue.extend(ring);
+        }
+        self.sweep = map.then(|| focus.centre());
+    }
+
+    /// Whether `room` is neither known, absent nor in flight.
+    fn unknown(&self, room: RoomCoord) -> bool {
+        !self.known.contains_key(&room)
+            && !self.absent.contains(&room)
+            && !self.pending.contains(&room)
     }
 
     /// Records a terrain the app already has: it is never requested.
@@ -118,8 +170,10 @@ impl Terrains {
         (self.wanted_known, self.wanted_absent, self.wanted.len())
     }
 
-    /// Starts batches until [`TERRAIN_IN_FLIGHT`] are in flight; returns when to plan again
-    /// while a failure or the rate limit holds requests back.
+    /// Starts batches until [`TERRAIN_IN_FLIGHT`] are in flight: the foreground queue first,
+    /// then (while it is empty) one batch at a time of the background sweep, so a foreground
+    /// batch always finds a free slot. Returns when to plan again while a failure or the rate
+    /// limit holds requests back.
     pub(super) fn plan(
         &mut self,
         map: &Map,
@@ -127,7 +181,7 @@ impl Terrains {
         shard: Option<&str>,
         now: Instant,
     ) -> Option<Instant> {
-        if self.fetches.len() >= TERRAIN_IN_FLIGHT || self.queue.is_empty() {
+        if self.fetches.len() >= TERRAIN_IN_FLIGHT || (self.queue.is_empty() && !self.sweeps()) {
             return None;
         }
         let mut ready = self.not_before.filter(|&at| at > now);
@@ -153,15 +207,54 @@ impl Terrains {
                     rooms.push(room);
                 }
             }
-            if rooms.is_empty() {
-                break;
+            let background = rooms.is_empty();
+            if background {
+                if !self.sweeps() {
+                    break;
+                }
+                rooms = self.background_batch();
+                if rooms.is_empty() {
+                    self.swept = true;
+                    break;
+                }
+                self.pending.extend(rooms.iter().copied());
             }
             let names = rooms.iter().map(ToString::to_string).collect::<Vec<_>>();
             let (map, shard) = (map.clone(), shard.map(str::to_owned));
             let request = Box::pin(async move { map.terrain(names, shard.as_deref()).await });
-            self.fetches.push(Fetch { rooms, request });
+            self.fetches.push(Fetch {
+                rooms,
+                background,
+                request,
+            });
         }
         None
+    }
+
+    /// Whether the background sweep may start a batch: it is on, has rooms left and none of
+    /// its batches is in flight.
+    fn sweeps(&self) -> bool {
+        self.sweep.is_some() && !self.swept && !self.fetches.iter().any(|fetch| fetch.background)
+    }
+
+    /// The next batch of the background sweep: the [`TERRAIN_BATCH`] rooms of the world
+    /// neither known, absent nor in flight nearest the sweep's centre, nearest first.
+    fn background_batch(&self) -> Vec<RoomCoord> {
+        let Some(centre) = self.sweep else {
+            return Vec::new();
+        };
+        let key = |room: &RoomCoord| (distance(*room, centre), room.y, room.x);
+        let mut rooms = self
+            .world
+            .iter()
+            .filter(|&room| self.unknown(room))
+            .collect::<Vec<_>>();
+        if rooms.len() > TERRAIN_BATCH {
+            rooms.select_nth_unstable_by_key(TERRAIN_BATCH, key);
+            rooms.truncate(TERRAIN_BATCH);
+        }
+        rooms.sort_unstable_by_key(key);
+        rooms
     }
 
     /// Completes the requests that finished: queues a [`WorldEvent::Terrain`] per new terrain
@@ -179,7 +272,9 @@ impl Terrains {
                 index += 1;
                 continue;
             };
-            let rooms = self.fetches.remove(index).rooms;
+            let Fetch {
+                rooms, background, ..
+            } = self.fetches.remove(index);
             changed = true;
             for room in &rooms {
                 self.pending.remove(room);
@@ -187,7 +282,7 @@ impl Terrains {
             match result {
                 Ok(terrains) => self.record(rooms, terrains, events),
                 Err(Error::Closed) => return Err(Closed),
-                Err(error) => self.retry(rooms, &error),
+                Err(error) => self.retry(rooms, background, &error),
             }
         }
         Ok(changed)
@@ -220,15 +315,17 @@ impl Terrains {
         }
     }
 
-    /// Puts the rooms of a failed batch back at the front of the queue (those still wanted)
-    /// and holds requests back: until the endpoint's reset after HTTP 429, [`GLOBAL_RETRY`]
-    /// after a server-wide 429, [`RETRY`] after other failures.
-    fn retry(&mut self, rooms: Vec<RoomCoord>, error: &Error) {
+    /// Puts the rooms of a failed batch back at the front of the queue (those still wanted;
+    /// the sweep finds the others again) and holds requests back: until the endpoint's reset
+    /// after HTTP 429, [`GLOBAL_RETRY`] after a server-wide 429, [`RETRY`] after other
+    /// failures.
+    fn retry(&mut self, rooms: Vec<RoomCoord>, background: bool, error: &Error) {
         for room in rooms.into_iter().rev() {
-            if self.wanted.contains(&room) && !self.known.contains_key(&room) {
+            if !background && self.wanted.contains(&room) && !self.known.contains_key(&room) {
                 self.queue.push_front(room);
             }
         }
+        self.swept = false;
         let now = Instant::now();
         let at = match error {
             Error::Net(NetError::Api(ApiError::RateLimited(Some(limit)))) => {

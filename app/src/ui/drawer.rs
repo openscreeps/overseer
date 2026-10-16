@@ -92,8 +92,7 @@ pub fn Drawer(server: Server) -> impl IntoView {
     let user = server.user.as_ref().map(|user| user.id.clone());
 
     // The room in focus and the selection, shared with the map.
-    let data = RoomData::new();
-    data.watch(move || map.feed.get(), map.room.into(), map);
+    let data = RoomData::watch(map.room.into(), map);
     let snapshot = Signal::derive(move || data.snapshot());
     let selection = Selection::new(map.tile, map.room.into(), snapshot, move || {
         if tab.get_untracked() == DrawerTab::Room {

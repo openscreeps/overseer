@@ -84,8 +84,7 @@ fn RoomWindow(
         });
     });
     let room_signal = Signal::stored(Some(room));
-    let data = RoomData::new();
-    data.watch(move || map.feed.get(), room_signal, map);
+    let data = RoomData::watch(room_signal, map);
     let snapshot = Signal::derive(move || data.snapshot());
     let selection = Selection::new(RwSignal::new(None), room_signal, snapshot, || {});
     let user = server.user.as_ref().map(|user| user.id.clone());

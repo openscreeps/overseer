@@ -224,7 +224,8 @@ async fn terrain_fills_in_and_seeded_rooms_are_not_fetched() {
     assert!(bounds.iter().all(|room| world.terrain(room).is_some()));
     assert!(world.terrain(unknown).is_none());
 
-    // Terrain the app persisted seeds another world: never reported, the very same data.
+    // Terrain the app persisted seeds another world: never reported, the very same data (the
+    // rest of the world still comes in the background).
     let terrain = world.terrain(centre).expect("the centre's terrain");
     let mut seeded = map
         .world_with_bounds(None, bounds)
@@ -235,7 +236,12 @@ async fn terrain_fills_in_and_seeded_rooms_are_not_fetched() {
         ..Interest::default()
     });
     let events = events_during(&mut seeded, Duration::from_secs(1)).await;
-    assert!(events.is_empty(), "{events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, WorldEvent::Terrain(room, _) if *room == centre)),
+        "{events:?}"
+    );
     assert!(Arc::ptr_eq(
         &seeded.terrain(centre).expect("seeded"),
         &terrain
@@ -396,4 +402,60 @@ async fn detail_stays_within_the_servers_cap_and_is_released_when_unwanted() {
         updates == 5
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+async fn a_viewed_room_updates_its_overview_and_portals_at_once() {
+    let player = support::player().await;
+    let overseer = player.account.connect().await;
+    let user = overseer.user_id().expect("signed in").to_owned();
+    let mut world = overseer.map().world(None).await.expect("the world opens");
+    let knowledge = world.knowledge();
+    let bounds = world.bounds();
+    let mine = room(&player.room);
+
+    // Viewing the player's room: its live update is the room's overview and portals, at
+    // once, in the handle the UI reads too.
+    world.set_interest(&Interest {
+        stats: Some(bounds),
+        detail: vec![mine],
+        terrain: vec![mine],
+        ..Interest::default()
+    });
+    let mut live_level = None;
+    until(&mut world, "the live room's overview", |world, event| {
+        if let WorldEvent::Detail(room, DetailState::Live(snapshot)) = event
+            && *room == mine
+        {
+            live_level = snapshot.objects.iter().find_map(|object| match object {
+                overseer::core::api::types::GameRoomObject::Controller(controller) => {
+                    Some(controller.level)
+                }
+                _ => None,
+            });
+        }
+        live_level.is_some()
+            && world.stat(mine).is_some_and(|stat| {
+                stat.owner.as_ref().map(|owner| owner.id.as_str()) == Some(user.as_str())
+            })
+    })
+    .await;
+    let stat = knowledge.stat(mine).expect("an overview");
+    let owner = stat.owner.as_ref().expect("checked above");
+    assert_eq!(Some(u64::from(owner.level)), live_level);
+    assert_eq!(
+        owner.username.as_deref(),
+        Some(player.account.username.as_str())
+    );
+    assert_eq!(knowledge.portals(mine).as_deref(), Some(&[] as &[_]));
+    assert!(knowledge.revision() > 0);
+
+    // The whole world's overviews arrive meanwhile without undoing it.
+    until(&mut world, "every overview", |world, _| {
+        world.progress().stats_known == bounds.len()
+    })
+    .await;
+    let owner = knowledge.stat(mine).and_then(|stat| stat.owner.clone());
+    assert_eq!(owner.map(|owner| owner.id), Some(user));
 }

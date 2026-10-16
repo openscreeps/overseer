@@ -1,6 +1,10 @@
-//! The overview of one room on the world map, from `owner0` map statistics.
+//! The overview of one room on the world map, from `owner0` map statistics or a live room.
 
-use overseer_net::core::api::types::{GameMapStatsRoom, GamePublicUsers, UserBadge};
+use overseer_net::core::api::types::{
+    GameMapStatsRoom, GamePublicUsers, GameRoomObject, UserBadge,
+};
+
+use crate::RoomSnapshot;
 
 /// Whether players can enter a room (`Game.map.getRoomStatus` semantics).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,7 +47,8 @@ pub struct RoomReservation {
 }
 
 /// The overview of a room on the world map: status, owner or reservation, safe mode and
-/// mineral, from `POST /api/game/map-stats` (`owner0`).
+/// mineral, from `POST /api/game/map-stats` (`owner0`) or, while the room is live, from its
+/// objects (see [`WorldMap`](super::WorldMap)).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoomStat {
     /// Whether players can enter the room.
@@ -61,9 +66,9 @@ pub struct RoomStat {
     pub mineral: Option<String>,
     /// The mineral's density (1 to 4).
     pub mineral_density: Option<u8>,
-    /// When the server sent it, in milliseconds since the Unix epoch
-    /// ([`SystemTime`](overseer_net::rt::SystemTime)): [`WorldMap::insert_stats`] uses it to
-    /// tell how stale a cached overview is.
+    /// When the server sent it (or when the live room showed it), in milliseconds since the
+    /// Unix epoch ([`SystemTime`](overseer_net::rt::SystemTime)): [`WorldMap::insert_stats`]
+    /// uses it to tell how stale a cached overview is.
     ///
     /// [`WorldMap::insert_stats`]: super::WorldMap::insert_stats
     pub fetched_at: u64,
@@ -127,6 +132,80 @@ impl RoomStat {
                 .and_then(|density| u8::try_from(density).ok()),
             fetched_at: now,
         }
+    }
+
+    /// The overview of the live room `snapshot` at `now` (milliseconds since the Unix epoch,
+    /// also its [`Self::fetched_at`]): owner and level, reservation and safe mode from its
+    /// controller (or the level of an invader core, like map statistics), mineral from its
+    /// mineral, users named and badged from the snapshot's users. A live room cannot tell its
+    /// status: that of `previous` is kept ([`RoomStatus::Normal`] without one: the room
+    /// exists).
+    pub(crate) fn live(snapshot: &RoomSnapshot, previous: Option<&Self>, now: u64) -> Self {
+        let tick = snapshot.game_time.unwrap_or(0);
+        let user = |id: &str| snapshot.users.get(id);
+        let username = |id: &str| user(id).map(|user| user.username.clone());
+        let badge = |id: &str| user(id).and_then(|user| user.badge.clone());
+        let owner = |id: &str, level: u64| {
+            Some(RoomOwner {
+                id: id.to_owned(),
+                username: username(id),
+                badge: badge(id),
+                level: u8::try_from(level).ok().filter(|&level| level > 0)?,
+            })
+        };
+        let (mut controller_owner, mut core_owner, mut reservation) = (None, None, None);
+        let (mut safe_mode, mut mineral) = (false, None);
+        for object in &snapshot.objects {
+            match object {
+                GameRoomObject::Controller(controller) => {
+                    controller_owner = controller
+                        .user
+                        .as_deref()
+                        .and_then(|id| owner(id, controller.level));
+                    reservation = controller
+                        .reservation
+                        .as_ref()
+                        .filter(|reservation| reservation.end_time > tick)
+                        .map(|reservation| RoomReservation {
+                            id: reservation.user.clone(),
+                            username: username(&reservation.user),
+                            badge: badge(&reservation.user),
+                        });
+                    safe_mode = controller.safe_mode.is_some_and(|end| end > tick);
+                }
+                GameRoomObject::InvaderCore(core) => {
+                    core_owner = core_owner.or_else(|| owner(&core.user, core.level));
+                }
+                GameRoomObject::Mineral(found) => {
+                    mineral = Some((found.mineral_type.clone(), u8::try_from(found.density).ok()));
+                }
+                _ => {}
+            }
+        }
+        let owner = controller_owner.or(core_owner);
+        let (mineral, mineral_density) =
+            mineral.map_or((None, None), |(kind, density)| (Some(kind), density));
+        Self {
+            status: previous.map_or(RoomStatus::Normal, |previous| previous.status),
+            status_until: previous.and_then(|previous| previous.status_until),
+            reservation: reservation.filter(|_| owner.is_none()),
+            owner,
+            safe_mode,
+            mineral,
+            mineral_density,
+            fetched_at: now,
+        }
+    }
+
+    /// Whether `self` and `other` tell the same, whenever they were fetched.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.status_until == other.status_until
+            && self.owner == other.owner
+            && self.reservation == other.reservation
+            && self.safe_mode == other.safe_mode
+            && self.mineral == other.mineral
+            && self.mineral_density == other.mineral_density
     }
 }
 

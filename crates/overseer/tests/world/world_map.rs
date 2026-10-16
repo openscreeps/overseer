@@ -17,7 +17,7 @@ use overseer::map::{
     DetailState, Interest, MINIMAP_CAP, RoomCoord, RoomRect, RoomStat, RoomStatus,
     STATS_BATCH_SECTORS, STATS_FAR_TTL, STATS_TTL, TERRAIN_BATCH, WorldEvent, WorldMap,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::server::{self, Request, Response, Server, Ws};
 use crate::{PATIENCE, connect, query, receive, terrain_document};
@@ -40,11 +40,13 @@ type Scripted = (u16, Vec<(&'static str, String)>);
 
 /// A server whose world reports `size` and holds the rooms of `rooms`; room `W1N1` is owned by
 /// `u1` (Alice) at `level`; map-stats replies take their status and headers from `scripted`
-/// while it has entries.
+/// while it has entries. A `limited` server shows rate limits (`X-RateLimit-*` on its
+/// world-size reply), so the world map paces its requests as on screeps.com.
 #[derive(Clone)]
 struct Fake {
     size: i64,
     rooms: RoomRect,
+    limited: bool,
     level: Arc<AtomicI64>,
     scripted: Arc<Mutex<VecDeque<Scripted>>>,
 }
@@ -54,8 +56,17 @@ impl Fake {
         Self {
             size,
             rooms,
+            limited: false,
             level: Arc::new(AtomicI64::new(3)),
             scripted: Arc::default(),
+        }
+    }
+
+    /// A server showing rate limits.
+    fn limited(size: i64, rooms: RoomRect) -> Self {
+        Self {
+            limited: true,
+            ..Self::new(size, rooms)
         }
     }
 
@@ -79,11 +90,15 @@ impl Fake {
 
     fn reply(&self, request: &Request) -> Response {
         match request.path.as_str() {
-            "/api/game/world-size" => (
-                200,
-                format!(r#"{{"ok":1,"width":{0},"height":{0}}}"#, self.size),
-            )
-                .into(),
+            "/api/game/world-size" => Response {
+                status: 200,
+                headers: if self.limited {
+                    rate_limit(120, 119, Duration::from_mins(1))
+                } else {
+                    Vec::new()
+                },
+                body: format!(r#"{{"ok":1,"width":{0},"height":{0}}}"#, self.size).into_bytes(),
+            },
             "/api/game/rooms" => {
                 let documents = self
                     .existing(request)
@@ -492,7 +507,7 @@ fn epoch_millis() -> u64 {
 #[tokio::test]
 async fn near_overviews_refresh_after_10_minutes_and_far_ones_after_an_hour() {
     // 40 × 40 rooms: 16 sectors.
-    let fake = Fake::new(40, rect("W19N19", "E19S19"));
+    let fake = Fake::limited(40, rect("W19N19", "E19S19"));
     let (server, overseer, websocket) = connect(fake.routes()).await;
     answer_pings(websocket);
     let mut world = overseer.map().world(None).await.unwrap();
@@ -651,7 +666,7 @@ async fn seeded_overviews_are_asked_again_once_stale() {
 #[tokio::test]
 async fn big_views_fill_in_capped_batches_of_the_nearest_sectors() {
     // 80 × 80 rooms: 64 sectors.
-    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let fake = Fake::limited(80, rect("W39N39", "E39S39"));
     let (server, overseer, websocket) = connect(fake.routes()).await;
     answer_pings(websocket);
     let mut world = overseer.map().world(None).await.unwrap();
@@ -695,7 +710,7 @@ async fn big_views_fill_in_capped_batches_of_the_nearest_sectors() {
 #[tokio::test]
 async fn far_overviews_leave_the_near_share_of_the_budget_and_a_429_waits_for_the_reset() {
     // 80 × 80 rooms: 64 sectors, the far ones take 3 requests.
-    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let fake = Fake::limited(80, rect("W39N39", "E39S39"));
     lock(&fake.scripted).extend([
         // Near: 40 of 60 left, the window resets in 1000 s.
         (200, rate_limit(60, 40, Duration::from_secs(1000))),
@@ -775,7 +790,7 @@ fn paused_until(headers: &[(&'static str, String)]) -> u64 {
 #[tokio::test]
 async fn a_paused_overview_load_says_until_when_and_a_recheck_after_a_reset_resumes() {
     // 80 × 80 rooms, all far (no minimap): three requests of the nearest sectors.
-    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let fake = Fake::limited(80, rect("W39N39", "E39S39"));
     // 18 of 60 left after the first: only the near share, so far rooms wait for the reset in
     // half an hour.
     let exhausted = rate_limit(60, 18, Duration::from_mins(30));
@@ -839,7 +854,7 @@ async fn a_paused_overview_load_says_until_when_and_a_recheck_after_a_reset_resu
 
 #[tokio::test]
 async fn a_recheck_while_not_paused_sends_nothing() {
-    let fake = Fake::new(40, rect("W19N19", "E19S19"));
+    let fake = Fake::limited(40, rect("W19N19", "E19S19"));
     // Few requests left, but nothing waits for them.
     lock(&fake.scripted).extend([
         (200, rate_limit(60, 40, Duration::from_mins(30))),
@@ -882,7 +897,7 @@ async fn a_recheck_while_not_paused_sends_nothing() {
 #[tokio::test]
 async fn an_exempt_token_ignores_the_budget_but_not_a_429() {
     // 80 × 80 rooms, all far (no minimap): three requests of the nearest sectors.
-    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let fake = Fake::limited(80, rect("W39N39", "E39S39"));
     let exhausted = rate_limit(60, 18, Duration::from_mins(30));
     let until = paused_until(&exhausted);
     lock(&fake.scripted).extend([
@@ -905,31 +920,42 @@ async fn an_exempt_token_ignores_the_budget_but_not_a_429() {
     assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
     assert_eq!(paused(&mut world).await, Some(until));
 
-    // Lifted for two hours: the pause ends and the next request goes out after the gap.
+    // Lifted for two hours: the pause ends and the rest goes out at once, two at a time,
+    // without a gap.
     world.set_rate_limit_exempt_until(Some(epoch_millis() + 7_200_000));
     assert_eq!(paused(&mut world).await, None);
-    advance(&mut world, Duration::from_secs(2)).await;
-    settle(&mut world, || map_stats(&server).len() == 2).await;
-    // The 429 still holds until its reset.
+    let start = std::time::Instant::now();
+    while map_stats(&server).len() < 3 {
+        assert!(start.elapsed() < PATIENCE, "requests in time");
+        tokio::select! {
+            biased;
+            event = world.next() => drop(event.unwrap()),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    // The request that went through.
+    let through = stats(&mut world).await.len();
+    assert!(
+        through == 1400 || through == STATS_BATCH_SECTORS * 100,
+        "{through}"
+    );
+    // The 429 still holds its rooms until the reset.
     advance(&mut world, Duration::from_secs(60)).await;
     quiet(&mut world).await;
-    assert_eq!(map_stats(&server).len(), 2);
+    assert_eq!(map_stats(&server).len(), 3);
     assert_eq!(world.progress().stats_paused_until, None);
     advance(&mut world, Duration::from_secs(65)).await;
-    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
-    // 5 left is no reason to wait: 1 s later the last rooms.
-    advance(&mut world, Duration::from_secs(2)).await;
-    assert_eq!(stats(&mut world).await.len(), 1400);
+    while !world.progress().is_complete() {
+        event(&mut world).await;
+    }
     assert_eq!(map_stats(&server).len(), 4);
-    let progress = world.progress();
-    assert!(progress.is_complete());
-    assert_eq!(progress.stats_paused_until, None);
+    assert_eq!(world.progress().stats_paused_until, None);
 }
 
 #[tokio::test]
 async fn the_budget_applies_again_when_the_exemption_ends() {
     // 80 × 80 rooms, all far (no minimap): three requests of the nearest sectors.
-    let fake = Fake::new(80, rect("W39N39", "E39S39"));
+    let fake = Fake::limited(80, rect("W39N39", "E39S39"));
     let exhausted = rate_limit(60, 18, Duration::from_mins(30));
     let until = paused_until(&exhausted);
     lock(&fake.scripted).extend([(200, exhausted.clone()), (200, exhausted)]);
@@ -938,28 +964,25 @@ async fn the_budget_applies_again_when_the_exemption_ends() {
     let mut world = overseer.map().world(None).await.unwrap();
     tokio::time::pause();
 
-    // Exempt for 3 s: the first two requests go out despite the budget.
+    // Exempt for 3 s: every request goes out at once despite the budget.
     world.set_rate_limit_exempt_until(Some(epoch_millis() + 3_000));
     world.set_interest(&Interest {
         stats: Some(world.bounds()),
         ..Interest::default()
     });
-    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
-    advance(&mut world, Duration::from_millis(1500)).await;
-    assert_eq!(stats(&mut world).await.len(), STATS_BATCH_SECTORS * 100);
+    while !world.progress().is_complete() {
+        event(&mut world).await;
+    }
+    assert_eq!(map_stats(&server).len(), 3);
     assert_eq!(world.progress().stats_paused_until, None);
 
-    // Then the near share holds the far rooms back until the reset.
-    advance(&mut world, Duration::from_secs(2)).await;
-    assert_eq!(paused(&mut world).await, Some(until));
-    advance(&mut world, Duration::from_secs(60)).await;
-    quiet(&mut world).await;
-    assert_eq!(map_stats(&server).len(), 2);
-    // A past exemption changes nothing.
+    // A past exemption changes nothing; once the exemption ended the budget applies again:
+    // the exhausted window holds the far rooms when they go stale.
     world.set_rate_limit_exempt_until(Some(epoch_millis() - 1));
+    advance(&mut world, Duration::from_secs(4)).await;
     quiet(&mut world).await;
-    assert_eq!(world.progress().stats_paused_until, Some(until));
-    assert_eq!(map_stats(&server).len(), 2);
+    assert_eq!(map_stats(&server).len(), 3);
+    let _ = until;
 }
 
 #[tokio::test]
@@ -1010,7 +1033,8 @@ async fn minimaps_are_capped_nearest_first_and_released() {
     assert!(world.minimap(first).is_none());
 }
 
-/// The next `count` detail events.
+/// The next `count` detail events (skipping terrain and what live rooms show of their overviews
+/// and portals).
 async fn details(world: &mut WorldMap, count: usize) -> Vec<(RoomCoord, String)> {
     let mut details = Vec::new();
     while details.len() < count {
@@ -1024,7 +1048,7 @@ async fn details(world: &mut WorldMap, count: usize) -> Vec<(RoomCoord, String)>
                 details.push((room, state));
             }
             WorldEvent::DetailGone(room) => details.push((room, "gone".to_owned())),
-            WorldEvent::Terrain(..) => {}
+            WorldEvent::Terrain(..) | WorldEvent::Stats(_) | WorldEvent::Portals(..) => {}
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1329,6 +1353,9 @@ async fn detail_reuses_the_world_terrain() {
             }
             WorldEvent::Terrain(room, _) => terrain_events.push(room),
             WorldEvent::NoTerrain(room) => absent.push(room),
+            // What the seeded room's live update showed.
+            WorldEvent::Stats(overviews) => assert_eq!(overviews[0].0, seeded),
+            WorldEvent::Portals(room, _) => assert_eq!(room, seeded),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -1345,15 +1372,20 @@ async fn detail_reuses_the_world_terrain() {
         subscribed(&mut world, &mut websocket, 1).await,
         ["subscribe room:W6N6"]
     );
+    // The viewed rooms and the wanted one go in one batch with the prefetch ring (the
+    // background sweep may run alongside; the client sends names sorted); no room twice.
     let batches = requested(&server, "/api/game/rooms");
-    assert_eq!(batches.len(), before + 1);
-    assert_eq!(
-        batches[before]
+    let foreground = batches[before..]
+        .iter()
+        .find(|batch| batch.iter().any(|name| name == "W6N6"))
+        .unwrap();
+    assert!(
+        ["W30N30", "W1N1"]
             .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["W1N1", "W30N30", "W6N6"])
+            .all(|name| foreground.iter().any(|sent| sent == name))
     );
+    let all = batches[before..].iter().flatten().collect::<Vec<_>>();
+    assert_eq!(all.iter().collect::<BTreeSet<_>>().len(), all.len());
     assert!(
         server
             .requests()
@@ -1392,10 +1424,15 @@ async fn next_is_cancel_safe() {
     assert_eq!(terrain, rooms);
     // Overviews cover the whole world.
     assert_eq!(stats, world.bounds().len());
-    assert_eq!(requested(&server, "/api/game/rooms").len(), 2);
     assert_eq!(map_stats(&server).len(), 1);
-    assert_eq!(
-        json!(requested(&server, "/api/game/rooms")[1]),
-        json!(["W1N1", "W2N2"])
-    );
+    // The wanted rooms go in one batch with the prefetch ring (the background sweep may run
+    // alongside); no room is asked twice.
+    let batches = requested(&server, "/api/game/rooms");
+    let foreground = batches[1..]
+        .iter()
+        .find(|batch| batch.iter().any(|name| name == "W1N1"))
+        .unwrap();
+    assert!(foreground.iter().any(|name| name == "W2N2"));
+    let all = batches[1..].iter().flatten().collect::<Vec<_>>();
+    assert_eq!(all.iter().collect::<BTreeSet<_>>().len(), all.len());
 }

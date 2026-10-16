@@ -15,7 +15,7 @@ use overseer::map::{
 };
 use serde_json::Value;
 
-use crate::server::{self, Request, Server, Ws};
+use crate::server::{self, Request, Response, Server, Ws};
 use crate::{PATIENCE, connect, query, terrain_document};
 
 fn room(name: &str) -> RoomCoord {
@@ -55,10 +55,34 @@ fn objects(room: &str) -> String {
     )
 }
 
-/// A 40 × 40 world (`W19N19`..`E19S19`) and the room objects of [`objects`].
-fn routes(request: &Request) -> (u16, String) {
-    match request.path.as_str() {
-        "/api/game/world-size" => (200, r#"{"ok":1,"width":40,"height":40}"#.to_owned()),
+/// A `size` × `size` world (`W19N19`..`E19S19` for 40) and the room objects of [`objects`];
+/// a `limited` server shows rate limits (`X-RateLimit-*` on its world-size reply), so the world
+/// map paces its requests as on screeps.com.
+pub(crate) fn routes(
+    size: u32,
+    limited: bool,
+) -> impl Fn(&Request) -> Response + Send + Sync + 'static {
+    move |request: &Request| match request.path.as_str() {
+        "/api/game/world-size" => {
+            let reset = (SystemTime::now() + Duration::from_mins(1))
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let headers = if limited {
+                vec![
+                    ("X-RateLimit-Limit", "120".to_owned()),
+                    ("X-RateLimit-Remaining", "119".to_owned()),
+                    ("X-RateLimit-Reset", reset.to_string()),
+                ]
+            } else {
+                Vec::new()
+            };
+            Response {
+                status: 200,
+                headers,
+                body: format!(r#"{{"ok":1,"width":{size},"height":{size}}}"#).into_bytes(),
+            }
+        }
         "/api/game/rooms" => {
             let body: Value = serde_json::from_str(&request.body).unwrap();
             let documents = body["rooms"]
@@ -72,14 +96,15 @@ fn routes(request: &Request) -> (u16, String) {
                 200,
                 format!(r#"{{"ok":1,"rooms":[{}]}}"#, documents.join(",")),
             )
+                .into()
         }
-        "/api/game/room-objects" => (200, objects(query(request, "room").unwrap())),
-        _ => (404, r#"{"error":"not found"}"#.to_owned()),
+        "/api/game/room-objects" => (200, objects(query(request, "room").unwrap())).into(),
+        _ => (404, r#"{"error":"not found"}"#.to_owned()).into(),
     }
 }
 
 /// The rooms of each `GET /api/game/room-objects` so far.
-fn room_objects(server: &Server) -> Vec<String> {
+pub(crate) fn room_objects(server: &Server) -> Vec<String> {
     server
         .requests()
         .iter()
@@ -102,7 +127,7 @@ fn epoch_millis() -> u64 {
 /// The server's side of the socket: answers each `roomMap2` subscription at once (a map view
 /// listing a portal for [`PORTAL_ROOMS`], an empty one elsewhere) unless the room is `silent`,
 /// and records the subscriptions.
-struct Socket {
+pub(crate) struct Socket {
     websocket: Ws,
     silent: BTreeSet<String>,
     /// Rooms subscribed now.
@@ -114,7 +139,7 @@ struct Socket {
 }
 
 impl Socket {
-    fn new(websocket: Ws, silent: impl IntoIterator<Item = RoomCoord>) -> Self {
+    pub(crate) fn new(websocket: Ws, silent: impl IntoIterator<Item = RoomCoord>) -> Self {
         Self {
             websocket,
             silent: silent.into_iter().map(|room| room.to_string()).collect(),
@@ -163,7 +188,7 @@ impl Socket {
 
 /// Drives `next` and the socket (without letting the runtime idle) until `done` holds for the
 /// events so far, which it returns.
-async fn drive(
+pub(crate) async fn drive(
     world: &mut WorldMap,
     socket: &mut Socket,
     mut done: impl FnMut(&[WorldEvent]) -> bool,
@@ -222,7 +247,7 @@ fn portals(events: &[WorldEvent]) -> Vec<(RoomCoord, Arc<[Portal]>)> {
         .collect()
 }
 
-fn count(events: &[WorldEvent]) -> usize {
+pub(crate) fn count(events: &[WorldEvent]) -> usize {
     portals(events).len()
 }
 
@@ -245,7 +270,7 @@ fn portal(room_name: &str, expires_at: Option<u64>) -> Portal {
 
 #[tokio::test]
 async fn scans_take_the_nearest_candidates_within_the_cap_and_fetch_only_rooms_with_portals() {
-    let (server, overseer, websocket) = connect(routes).await;
+    let (server, overseer, websocket) = connect(routes(40, true)).await;
     let mut world = overseer.map().world(None).await.unwrap();
     let bounds = world.bounds();
     assert_eq!(bounds, rect("W19N19", "E19S19"));
@@ -356,7 +381,8 @@ async fn scans_take_the_nearest_candidates_within_the_cap_and_fetch_only_rooms_w
 /// the lifetimes themselves are unit-tested in the library.
 #[tokio::test]
 async fn seeded_scans_are_used_until_stale_or_a_portal_becomes_unstable() {
-    let (server, overseer, websocket) = connect(routes).await;
+    // The 2 × 2 world W0N0..E0S0: its candidates are those of the interest.
+    let (server, overseer, websocket) = connect(routes(2, false)).await;
     let mut world = overseer.map().world(None).await.unwrap();
     let mut socket = Socket::new(websocket, []);
     tokio::time::pause();
@@ -426,7 +452,8 @@ async fn seeded_scans_are_used_until_stale_or_a_portal_becomes_unstable() {
 
 #[tokio::test]
 async fn live_minimaps_count_as_scans_and_unanswered_scans_are_retried() {
-    let (server, overseer, websocket) = connect(routes).await;
+    // The 4 × 4 world W1N1..E1S1: its candidates are those of the interest.
+    let (server, overseer, websocket) = connect(routes(4, true)).await;
     let mut world = overseer.map().world(None).await.unwrap();
     // Minimaps are answered by hand; E0S0's scan goes unanswered at first.
     let mut socket = Socket::new(websocket, [room("W0N0"), room("W1N1"), room("E0S0")]);

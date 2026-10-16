@@ -4,7 +4,9 @@
 //! Frames are drawn from `requestAnimationFrame` only when something changed (input, data,
 //! a resize) and for as long as the viewer reports [`FrameStats::animating`], so an idle view
 //! costs nothing. After a frame whose camera or size changed, the viewer's interest goes to
-//! the feed at most every [`INTEREST_INTERVAL_MS`] (the last change always arrives).
+//! the feed at most every [`INTEREST_INTERVAL_MS`] (the last change always arrives), and the
+//! [`Hooks::interest`] hook sees the viewer at each send: one camera change drives everything
+//! that follows the view.
 //!
 //! A mouse or pen moving over the canvas without a button pressed hovers it: the
 //! [`Hooks::hover`] hook learns the point at most once per animation frame, and again when
@@ -36,6 +38,9 @@ type Hook<T> = Rc<dyn Fn(&mut Viewer, T)>;
 /// whether the view changed and needs a frame.
 pub type HoverHook = Rc<dyn Fn(&mut Viewer, Option<(f32, f32)>) -> bool>;
 
+/// Called with the viewer whenever its interest goes to the feed.
+pub type InterestHook = Rc<dyn Fn(&Viewer)>;
+
 /// What the owner of a surface does at each step.
 pub struct Hooks {
     /// The viewer was created (set its scope, camera, mode, user).
@@ -46,6 +51,9 @@ pub struct Hooks {
     pub pick: Hook<Pick>,
     /// The hovered point changed (see the module docs); `None` ignores hovering.
     pub hover: Option<HoverHook>,
+    /// The viewer's interest went to the feed (see the module docs); `None`: nothing else
+    /// follows the view.
+    pub interest: Option<InterestHook>,
 }
 
 /// One viewer canvas; `Copy` handles for event handlers and tasks.
@@ -285,12 +293,21 @@ impl Surface {
         }
     }
 
-    /// Sends the viewer's interest to the feed now.
+    /// Sends the viewer's interest to the feed now and tells the [`Hooks::interest`] hook.
     fn send_interest(self) {
-        let Some(Some((camera, interest))) = self
-            .viewer
-            .try_with_value(|viewer| viewer.as_ref().map(|v| (v.camera(), v.interest())))
-        else {
+        let hook = self
+            .hooks
+            .try_get_value()
+            .flatten()
+            .and_then(|hooks| hooks.interest.clone());
+        let Some(Some((camera, interest))) = self.viewer.try_with_value(|viewer| {
+            viewer.as_ref().map(|viewer| {
+                if let Some(hook) = &hook {
+                    hook(viewer);
+                }
+                (viewer.camera(), viewer.interest())
+            })
+        }) else {
             return;
         };
         self.interest.set_value(InterestClock {

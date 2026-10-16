@@ -1,7 +1,8 @@
-//! The world map: the continuous [`WorldMap`], room map views, map statistics, terrain,
-//! portals, player badges, world size and map visuals.
+//! The world map: the continuous [`WorldMap`] and what it knows ([`WorldKnowledge`]), room
+//! map views, map statistics, terrain, portals, player badges, world size and map visuals.
 
 mod coord;
+mod knowledge;
 mod portal;
 mod rect;
 mod stat;
@@ -9,6 +10,7 @@ mod view;
 mod world;
 
 pub use coord::RoomCoord;
+pub use knowledge::WorldKnowledge;
 pub use overseer_net::core::api::Terrain;
 pub use overseer_net::core::socket::types::RoomMap;
 pub use portal::{Portal, PortalDestination, may_have_portals};
@@ -16,9 +18,10 @@ pub use rect::RoomRect;
 pub use stat::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
 pub use view::{MapView, ViewChange};
 pub use world::{
-    DetailState, Interest, MINIMAP_CAP, PORTAL_DECAYING_TTL, PORTAL_GAP, PORTAL_SCAN_TIMEOUT,
-    PORTAL_TTL, STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_TTL, TERRAIN_BATCH,
-    TERRAIN_IN_FLIGHT, WorldEvent, WorldMap, WorldProgress,
+    DetailState, Interest, MINIMAP_CAP, PORTAL_BACKGROUND_SCANS, PORTAL_DECAYING_TTL,
+    PORTAL_FETCH_TIMEOUT, PORTAL_GAP, PORTAL_IN_FLIGHT, PORTAL_SCAN_TIMEOUT, PORTAL_TTL,
+    PREFETCH_RING, STATS_BATCH_SECTORS, STATS_FAR_SHARE, STATS_FAR_TTL, STATS_IN_FLIGHT, STATS_TTL,
+    STATS_VIEWED_FRESH, TERRAIN_BATCH, TERRAIN_IN_FLIGHT, WorldEvent, WorldMap, WorldProgress,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -162,8 +165,8 @@ impl Map {
     }
 
     /// The portals of `room` with their destinations, from one snapshot of its objects
-    /// (`GET /api/game/room-objects`); empty when it has none. [`WorldMap`] finds the rooms
-    /// with portals and asks for those.
+    /// (`GET /api/game/room-objects`), by tile row by row; empty when it has none.
+    /// [`WorldMap`] finds the rooms with portals and asks for those.
     ///
     /// # Errors
     ///
@@ -171,11 +174,7 @@ impl Map {
     /// [`Error::Net`] when the request fails.
     pub async fn portals(&self, room: &str, shard: Option<&str>) -> Result<Vec<Portal>, Error> {
         let objects = self.overseer.rooms().objects(room, shard).await?;
-        Ok(objects
-            .objects
-            .iter()
-            .filter_map(Portal::from_object)
-            .collect())
+        Ok(portal::portals_of(&objects.objects))
     }
 
     /// The signed-in user's map visuals of the previous tick (`Game.map.visual`), parsed into

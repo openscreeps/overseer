@@ -4,14 +4,12 @@
 //! The world screen learns the hovered point from its surface (at most once per frame, never
 //! while dragging or touching), asks the viewer which room and tile are there
 //! (`Viewer::room_at`), outlines that room (`Viewer::set_hover`) and keeps it in
-//! [`MapRooms::hover`]; what the tooltip says comes from the overviews and portals the map
-//! received ([`MapRooms::known`]).
-
-use std::collections::HashMap;
-use std::sync::Arc;
+//! [`MapRooms::hover`]; what the tooltip says comes from what the world knows of the room
+//! (`Feed::knowledge`, followed by its revision): the same overview and portals as the
+//! map's and the drawer's.
 
 use leptos::prelude::*;
-use overseer::map::{Portal, RoomCoord, RoomStat, RoomStatus, WorldEvent};
+use overseer::map::{Portal, RoomCoord, RoomStat, RoomStatus};
 use overseer_view::Lod;
 
 use crate::portals::{destination_text, destinations};
@@ -35,53 +33,18 @@ pub struct Hovered {
     pub point: (f32, f32),
 }
 
-/// What the map received of each room: overviews and portals.
-#[derive(Default)]
-pub struct Known {
-    /// Overviews by room.
-    pub stats: HashMap<RoomCoord, Arc<RoomStat>>,
-    /// Scanned rooms' portals.
-    pub portals: HashMap<RoomCoord, Arc<[Portal]>>,
-}
-
-impl Known {
-    /// Keeps what `event` tells; whether anything changed.
-    pub fn apply(&mut self, event: &WorldEvent) -> bool {
-        match event {
-            WorldEvent::Stats(stats) => {
-                for (room, stat) in stats {
-                    self.stats.insert(*room, Arc::clone(stat));
-                }
-                !stats.is_empty()
-            }
-            WorldEvent::Portals(room, portals) => {
-                self.portals.insert(*room, Arc::clone(portals));
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
-/// The hovered room and what the map received of each room; `Copy`, provided as context by
-/// [`crate::ui::App`] next to [`MapState`].
+/// The hovered room; `Copy`, provided as context by [`crate::ui::App`] next to [`MapState`].
 #[derive(Clone, Copy)]
 pub struct MapRooms {
     /// The room and tile under a hovering pointer (the tooltip and the status bar).
     pub hover: RwSignal<Option<Hovered>>,
-    /// Overviews and portals by room (the tooltip's, the badges').
-    pub known: StoredValue<Known, LocalStorage>,
-    /// Changes whenever [`Self::known`] does.
-    pub revision: RwSignal<u64>,
 }
 
 impl MapRooms {
-    /// Nothing hovered or known.
+    /// Nothing hovered.
     pub fn new() -> Self {
         Self {
             hover: RwSignal::new(None),
-            known: StoredValue::new_local(Known::default()),
-            revision: RwSignal::new(0),
         }
     }
 
@@ -90,18 +53,9 @@ impl MapRooms {
         expect_context()
     }
 
-    /// Keeps what `event` tells of the rooms.
-    pub fn learn(self, event: &WorldEvent) {
-        if self.known.try_update_value(|known| known.apply(event)) == Some(true) {
-            self.revision.update(|revision| *revision += 1);
-        }
-    }
-
-    /// Forgets the hovered room and every room (another world).
+    /// Forgets the hovered room (another world).
     pub fn clear(self) {
         self.hover.try_set(None);
-        self.known.try_set_value(Known::default());
-        self.revision.try_update(|revision| *revision += 1);
     }
 }
 
@@ -232,7 +186,6 @@ pub fn HoverTip() -> impl IntoView {
         Memo::new(move |_| map.phase.get() == Phase::Ready && rooms.hover.with(Option::is_some));
     let content = Memo::new(move |_| {
         let hovered = rooms.hover.get()?;
-        rooms.revision.track();
         let lod = map.lod.get();
         let shard = map.shard.get();
         #[expect(
@@ -241,16 +194,22 @@ pub fn HoverTip() -> impl IntoView {
             reason = "the epoch time in milliseconds is a non-negative integer far below u64::MAX"
         )]
         let now = js_sys::Date::now() as u64;
-        rooms.known.try_with_value(|known| {
-            tip(
-                hovered.room,
-                shows_tiles(lod).then_some(hovered.tile),
-                known.stats.get(&hovered.room).map(|stat| &**stat),
-                known.portals.get(&hovered.room).map(|portals| &**portals),
-                shard.as_ref().and_then(|shard| shard.name()),
-                now,
-            )
-        })
+        let (stat, portals) = map
+            .knowledge(|knowledge| {
+                (
+                    knowledge.stat(hovered.room),
+                    knowledge.portals(hovered.room),
+                )
+            })
+            .unwrap_or_default();
+        Some(tip(
+            hovered.room,
+            shows_tiles(lod).then_some(hovered.tile),
+            stat.as_deref(),
+            portals.as_deref(),
+            shard.as_ref().and_then(|shard| shard.name()),
+            now,
+        ))
     });
     let style = move || {
         let hovered = rooms.hover.get()?;
