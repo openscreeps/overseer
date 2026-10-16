@@ -1,7 +1,10 @@
-// A signed-in session: resuming after a reload, keeping the rotated token, signing out, and
-// which origin the app talks to in each serving mode.
+// A signed-in session: resuming after a reload, keeping the rotated token, signing out, which
+// origin the app talks to in each serving mode, and how a session ends without the user: a
+// stored token the server no longer takes, a session revoked while open, and a server that
+// cannot be reached.
 
 import { expect, SERVER_NAME, signIn, test } from './fixtures';
+import { admin, alerts, seed, sessionOf, storedToken } from './support/accounts';
 
 declare global {
   interface Window {
@@ -11,8 +14,8 @@ declare global {
 }
 
 test.describe('session', () => {
-  test('resumes after a reload', async ({ signedInPage: page, user, server }) => {
-    const account = page.getByRole('button', { name: `Account: ${user.username}` });
+  test('resumes after a reload', async ({ signedInPage: page, player, server }) => {
+    const account = page.getByRole('button', { name: `Account: ${player.username}` });
     const status = page.getByRole('contentinfo', { name: 'Status' });
     await expect(account).toBeVisible();
     await expect(status).toContainText('Connected');
@@ -21,10 +24,8 @@ test.describe('session', () => {
     await expect(status).toContainText('Connected');
     await expect(page).toHaveURL(new RegExp(`#/${server.slug}/`));
   });
-});
 
-test.describe('session', { tag: '@openscreeps' }, () => {
-  test('keeps the account menu open while the session resumes', async ({
+  test('keeps the account menu open while the session resumes', { tag: '@openscreeps' }, async ({
     page,
     account,
     server,
@@ -68,7 +69,12 @@ test.describe('session', { tag: '@openscreeps' }, () => {
     await expect(signOut).toBeVisible();
   });
 
-  test('keeps the rotated session token', async ({ signedInPage: page, player, server }) => {
+  // screeps.com's API tokens do not rotate; session tokens of password sign-ins do.
+  test('keeps the rotated session token', { tag: '@openscreeps' }, async ({
+    signedInPage: page,
+    player,
+    server,
+  }) => {
     const key = `overseer.secret.token:${server.url}`;
     await expect(page.getByRole('button', { name: `Account: ${player.username}` })).toBeVisible();
     const seeded = await page.evaluate((key) => localStorage.getItem(key), key);
@@ -96,13 +102,9 @@ test.describe('session', { tag: '@openscreeps' }, () => {
     await expect(page.getByRole('button', { name: `Sign in ${SERVER_NAME}` })).toBeVisible();
   });
 
-  test('talks to the server directly or through the proxy that serves it', async ({
-    page,
-    account,
-    server,
-    mode,
-    baseURL,
-  }) => {
+  test('talks to the server directly or through the proxy that serves it', {
+    tag: '@openscreeps',
+  }, async ({ page, account, server, mode, baseURL }) => {
     const requests: string[] = [];
     page.on('request', (request) => requests.push(request.url()));
     await signIn(page, server, account);
@@ -116,5 +118,67 @@ test.describe('session', { tag: '@openscreeps' }, () => {
       const discovery = await page.request.get('/overseer-proxy.json');
       expect(await discovery.json()).toEqual({ upstream: server.url });
     }
+  });
+
+  test('a stored token the server rejects asks to sign in again, name filled', {
+    tag: '@openscreeps',
+  }, async ({ page, server, account }) => {
+    const { user } = await sessionOf(server, account);
+    await seed(
+      page,
+      [{ name: SERVER_NAME, url: server.url, kind: 'private', login: account.username, user }],
+      { [server.url]: 'not-a-token-the-server-issued' },
+    );
+    await page.goto(`/#/${server.slug}/`);
+    const form = page.getByRole('region', { name: `Sign in to ${SERVER_NAME}` });
+    await expect(alerts(form)).toHaveText('Your session has expired. Sign in again.');
+    await expect(form.getByLabel('Username or e-mail')).toHaveValue(account.username);
+    // The rejected token is gone and the server shows signed out.
+    expect(await storedToken(page, server.url)).toBeNull();
+    await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
+
+    await form.getByLabel('Password', { exact: true }).fill(account.password);
+    await form.getByRole('button', { name: 'Sign in', exact: true }).last().click();
+    await expect(page.getByRole('button', { name: `Account: ${account.username}` })).toBeVisible();
+    await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
+  });
+
+  test('a session revoked while open ends with the sign-in form', { tag: '@openscreeps' }, async ({
+    page,
+    server,
+    account,
+  }) => {
+    await signIn(page, server, account);
+    const status = page.getByRole('contentinfo', { name: 'Status' });
+    await expect(status).toContainText('Connected');
+    // A new password revokes every session of the account at once.
+    await admin(server, { action: 'user-update', username: account.username, password: 'revoked-1234' });
+    const form = page.getByRole('region', { name: `Sign in to ${SERVER_NAME}` });
+    await expect(alerts(form)).toHaveText('Your session has expired. Sign in again.');
+    await expect(form.getByLabel('Username or e-mail')).toHaveValue(account.username);
+    await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
+    await expect(status).toContainText('Not connected');
+    expect(await storedToken(page, server.url)).toBeNull();
+  });
+
+  test('an unreachable server keeps the session and offers to try again', {
+    tag: '@openscreeps',
+  }, async ({ page, server, account }) => {
+    let down = true;
+    await page.route(
+      (url) => url.pathname.includes('/api/'),
+      (route) => (down ? route.abort('connectionrefused') : route.fallback()),
+    );
+    await signIn(page, server, account);
+    const failed = page.getByRole('alert').filter({ hasText: 'Cannot connect' });
+    await expect(failed.getByRole('heading', { name: 'Cannot connect' })).toBeVisible();
+    await expect(failed).toContainText(`Could not connect to ${SERVER_NAME}: `);
+    // Not a sign-out: the token stays for the next attempt.
+    expect(await storedToken(page, server.url)).not.toBeNull();
+
+    down = false;
+    await failed.getByRole('button', { name: 'Try again' }).click();
+    await expect(page.getByRole('button', { name: `Account: ${account.username}` })).toBeVisible();
+    await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
   });
 });
