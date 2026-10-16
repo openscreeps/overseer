@@ -5,7 +5,15 @@
 
 import type { Request } from '@playwright/test';
 import { expect, SERVER_NAME, signIn, test } from './fixtures';
-import { accountMenu, admin, alerts, seed, sessionOf, storedToken } from './support/accounts';
+import {
+  accountMenu,
+  admin,
+  alerts,
+  seed,
+  sessionOf,
+  storedToken,
+  switchServer,
+} from './support/accounts';
 
 declare global {
   interface Window {
@@ -26,22 +34,9 @@ test.describe('session', () => {
     await expect(page).toHaveURL(new RegExp(`#/${server.slug}/`));
   });
 
-  test('keeps the account menu open while the session resumes', { tag: '@openscreeps' }, async ({
-    page,
-    account,
-    server,
-  }) => {
-    // Resuming asks for the account twice: on connect (the user id), then for the username,
-    // which the app saves into its profiles. Hold the second reply until the menu is open.
-    let calls = 0;
-    let release = () => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await page.route('**/api/auth/me', async (route) => {
-      if (route.request().method() === 'GET' && ++calls === 2) await held;
-      await route.fallback();
-    });
+  test("keeps the account menu open while the session's profile is saved again", {
+    tag: '@openscreeps',
+  }, async ({ page, account, server }) => {
     await page.addInitScript(() => {
       const setItem = Storage.prototype.setItem;
       window.e2eProfileSaves = 0;
@@ -51,18 +46,21 @@ test.describe('session', () => {
       };
     });
     await signIn(page, server, account);
+    const world = page.getByRole('main').getByRole('group', { name: 'Zoom' });
+    await expect(world).toBeVisible();
+    // To screeps.com's sign-in form; the session stays live and its menu with it.
+    await switchServer(page, SERVER_NAME, /^screeps\.com/);
+    await expect(page.getByRole('region', { name: 'Sign in to screeps.com' })).toBeVisible();
+
+    // With the menu open, back (no pointer, no key): the app shows the live session again
+    // and saves its profile once more (same account). The menu is still there and open.
     const button = page.getByRole('button', { name: `Account: ${account.username}` });
     await button.click();
     const signOut = page.getByRole('menuitem', { name: 'Sign out' });
     await expect(signOut).toBeVisible();
-    await expect.poll(() => calls).toBe(2);
-    const answered = page.waitForResponse(
-      (response) => new URL(response.url()).pathname.endsWith('/api/auth/me'),
-    );
     const saves = await page.evaluate(() => window.e2eProfileSaves ?? 0);
-    release();
-    await answered;
-    // The app saves the profiles again (same account); the menu is still there and open.
+    await page.goBack();
+    await expect(world).toBeVisible();
     await expect
       .poll(() => page.evaluate(() => window.e2eProfileSaves ?? 0))
       .toBeGreaterThan(saves);
@@ -119,30 +117,43 @@ test.describe('session', () => {
     }
   });
 
-  test('signing out while the account still loads keeps the sign-in form', {
+  test('signing out while the account reloads keeps the sign-in form', {
     tag: '@openscreeps',
   }, async ({ page, server, account }) => {
-    // A session loads its account once it has begun (the second `GET /api/auth/me`, see
-    // above): hold that reply until the user has signed out.
-    let calls = 0;
+    let hold = false;
     const { promise: held, resolve: release } = Promise.withResolvers<void>();
-    let late: Request | undefined;
+    const late: Request[] = [];
     await page.route('**/api/auth/me', async (route) => {
-      if (route.request().method() === 'GET' && ++calls === 2) {
-        late = route.request();
+      if (hold && route.request().method() === 'GET') {
+        late.push(route.request());
         await held;
       }
       await route.fallback();
     });
     await signIn(page, server, account);
-    await expect.poll(() => calls).toBe(2);
+    await expect(page.getByRole('main').getByRole('group', { name: 'Zoom' })).toBeVisible();
+
+    // Saving the notification preferences makes the app read the account again: held.
+    hold = true;
+    await accountMenu(page, account.username, 'Profile');
+    const notifications = page.getByRole('region', { name: 'Notifications' });
+    await notifications.getByRole('checkbox', { name: 'Notify about new messages' }).uncheck();
+    await notifications.getByRole('button', { name: 'Save notifications' }).click();
+    await expect(notifications.getByRole('status')).toHaveText('Notification preferences saved.');
+    await expect.poll(() => late.length).toBeGreaterThan(0);
+
+    // Away and back: the live session's screen waits for its account.
+    await switchServer(page, SERVER_NAME, /^screeps\.com/);
+    await expect(page.getByRole('region', { name: 'Sign in to screeps.com' })).toBeVisible();
+    await switchServer(page, 'screeps.com', new RegExp(`^${SERVER_NAME}`));
+    await expect(page.getByText(`Connecting to ${SERVER_NAME}…`)).toBeVisible();
     await accountMenu(page, account.username, 'Sign out');
     const form = page.getByRole('region', { name: `Sign in to ${SERVER_NAME}` });
     await expect(form).toBeVisible();
 
-    // The reply comes after all (or the request ends with the session): the form stays.
+    // The account arrives after all (or its request ends with the session): the form stays.
     release();
-    await late?.response();
+    await Promise.all(late.map((request) => request.response()));
     await page.evaluate(() => {
       const { promise, resolve } = Promise.withResolvers<void>();
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));

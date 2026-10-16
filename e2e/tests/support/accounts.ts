@@ -126,3 +126,9 @@ export async function accountMenu(page: Page, username: string, item: string): P
   await page.getByRole('button', { name: `Account: ${username}` }).click();
   await page.getByRole('menuitem', { name: item }).click();
 }
+
+/** Switches from the server named `from` to the one whose menu item matches `to` (top bar). */
+export async function switchServer(page: Page, from: string, to: RegExp): Promise<void> {
+  await page.getByRole('button', { name: `Server: ${from}` }).click();
+  await page.getByRole('menuitemradio', { name: to }).click();
+}
