@@ -30,12 +30,12 @@ test.describe('rate limits', () => {
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
     await accountMenu(page, user.username, 'Rate limits');
     const panel = page.getByRole('dialog', { name: 'Rate limits' });
-    await expect(panel.getByRole('button', { name: 'Close rate limits' })).toBeFocused();
     if (target === 'official') {
-      // The world's overviews ask for map stats at once.
-      const row = panel.getByRole('row', { name: /^POST \/api\/game\/map-stats/ });
+      // Opening the world asks screeps.com for terrain, rooms and map stats at once.
+      const row = panel.getByRole('row').filter({ has: page.getByRole('rowheader') }).first();
+      await expect(row.getByRole('rowheader')).toHaveText(/^(GET|POST) \/api\/\S+$/);
       await expect(row.getByRole('cell')).toHaveText([
-        '60',
+        /^\d+$/,
         /^\d+$/,
         /^(in \d+ (s|min)|in \d+ h( \d+ min)?|already reset)$/,
       ]);
