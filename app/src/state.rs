@@ -404,7 +404,12 @@ impl AppState {
         }
         let url = url.to_owned();
         spawn_local(async move {
-            match overseer.account().me().await {
+            let me = overseer.account().me().await;
+            // Ended meanwhile (signed out, expired, replaced): its sign-in form stays.
+            if !self.is_live(epoch) {
+                return;
+            }
+            match me {
                 Ok(me) if me.username.is_none() => self.screen.set(Screen::SetUsername),
                 Ok(me) => {
                     self.remember_username(&url, me.username.clone());
