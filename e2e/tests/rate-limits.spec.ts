@@ -31,6 +31,8 @@ function corsHeaders(request: Request, exposed = ''): Record<string, string> {
 }
 
 test.describe('rate limits', { tag: '@openscreeps' }, () => {
+  // These tests hold the overview loads back: the world starts uncached.
+  test.use({ cache: 'cold' });
   test('a paused overview load says so and resumes after Check again', async ({
     page,
     server,

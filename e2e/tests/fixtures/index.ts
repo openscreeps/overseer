@@ -30,6 +30,12 @@
 //   the context blocks every request that may change something (`isMutating`: anything but
 //   `GET`, `HEAD`, `OPTIONS` and the read-only POSTs of `READ_ONLY_POSTS`) and fails the test
 //   that sent one.
+// - `cache` (option): what the app's world cache holds when a context opens ({@link Cache}):
+//   by default the world the project's setup (`cache.setup.ts`) loaded once per run, so tests
+//   do not each load the whole world again (on screeps.com: thousands of terrain rooms, map
+//   stats against the account's hourly budget, the portal scan). Tests of loading itself opt
+//   out with `test.use({ cache: 'cold' })`. `cacheFile` (option, per project): where the setup
+//   saves it.
 //
 // `openscreeps` only (tag the test `@openscreeps`):
 // - `account`: a fresh registered account without a spawn.
@@ -39,7 +45,8 @@
 //   and token in localStorage) and opens the server's world; the UI then resumes it.
 // - `addServer`, `createPlayer`, `register`, `removeUser`, `adminOf` (the admin API).
 
-import { test as base, expect, type Page } from '@playwright/test';
+import { existsSync, readFileSync } from 'node:fs';
+import { test as base, expect, type BrowserContextOptions, type Page } from '@playwright/test';
 import {
   api,
   createPlayer,
@@ -59,6 +66,28 @@ export { expect };
 
 /** How the app under test is served. */
 export type Mode = 'direct' | 'proxy';
+
+/**
+ * What the app's world cache (`IndexedDB`) holds when a test's browser context opens:
+ * - `warm` (default): the run's warmed cache, saved by the project's `cache` setup
+ *   (`cache.setup.ts`): terrain, overviews and portals of the server's world, read-only for the
+ *   test (each context gets its own copy).
+ * - `cold`: nothing, like a first start of the app (`test.use({ cache: 'cold' })`), for tests of
+ *   loading itself.
+ * - `previous`: the setup's own start: on `official` the previous run's saved cache (screeps.com
+ *   does not change between runs: the app refreshes only what went stale), else nothing.
+ * localStorage and sessionStorage always start empty: the cache holds no profile or token.
+ */
+export type Cache = 'warm' | 'cold' | 'previous';
+
+/** A saved browser storage state (`BrowserContext.storageState`). */
+type StorageState = Exclude<BrowserContextOptions['storageState'], string | undefined>;
+
+/** `state`'s origins moved to the origin of `baseURL` (the ports change from run to run). */
+function retarget(state: StorageState, baseURL: string): StorageState {
+  const origin = new URL(baseURL).origin;
+  return { ...state, origins: state.origins.map((entry) => ({ ...entry, origin })) };
+}
 
 /** A signed-in account. */
 export interface User {
@@ -217,6 +246,26 @@ export async function signIn(page: Page, server: Server, account: Account): Prom
   await seed(page, server, { id: me._id, username: me.username }, session.token, account.username);
 }
 
+/**
+ * Signs `page` in to read the world (the cache setup) and opens the server's world: with the
+ * API token `token` on `official`, as a fresh account without a spawn on `openscreeps`. Returns
+ * the `home` the tests get on `official` (the token's account), `null` on `openscreeps` (each
+ * test's player has its own).
+ */
+export async function signInReader(
+  page: Page,
+  server: Server,
+  token: string | undefined,
+): Promise<Home | null> {
+  if (!token) {
+    await signIn(page, server, await register(server.url));
+    return null;
+  }
+  const { user, home } = await officialPresence(server, token);
+  await seed(page, server, user, token, null);
+  return home;
+}
+
 /** Fails a fixture that only the disposable world has. */
 function openscreepsOnly(target: Target, fixture: string): void {
   if (target !== 'openscreeps') {
@@ -233,6 +282,8 @@ export const test = base.extend<
     signedInPage: Page;
     cleanup: (() => Promise<void>)[];
     presence: Presence;
+    cache: Cache;
+    cacheFile: string | undefined;
   },
   { mode: Mode; target: Target; server: Server; apiToken: string | undefined }
 >({
@@ -243,7 +294,24 @@ export const test = base.extend<
   server: [async ({}, use) => use(liveServer()), { scope: 'worker' }],
   // eslint-disable-next-line no-empty-pattern -- Playwright fixtures destructure their dependencies.
   apiToken: [async ({}, use) => use(liveToken()), { scope: 'worker' }],
-  // Set up before the browser context (which depends on it), so torn down after it closed.
+  cache: ['warm', { option: true }],
+  // The project's saved cache (`playwright.config.ts`); none: every context starts empty.
+  cacheFile: [undefined, { option: true }],
+  storageState: async ({ cache, cacheFile, baseURL, target, storageState }, use) => {
+    if (!cacheFile || cache === 'cold') {
+      await use(storageState);
+    } else if (cache === 'warm') {
+      if (!existsSync(cacheFile)) {
+        throw new Error(`no warmed cache at ${cacheFile}: the project's cache setup did not run`);
+      }
+      await use(cacheFile);
+    } else if (target === 'official' && baseURL && existsSync(cacheFile)) {
+      const previous = JSON.parse(readFileSync(cacheFile, 'utf8')) as StorageState;
+      await use(retarget(previous, baseURL));
+    } else {
+      await use(storageState);
+    }
+  },
   // eslint-disable-next-line no-empty-pattern -- Playwright fixtures destructure their dependencies.
   cleanup: async ({}, use) => {
     const tasks: (() => Promise<void>)[] = [];

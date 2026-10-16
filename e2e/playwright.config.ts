@@ -10,6 +10,9 @@
 //   headers), one worker (its rate limits are per account), no `@openscreeps` tests, and no
 //   traces, screenshots or videos (they would record the account's API token and data).
 //
+// Each project first runs its cache setup (`<project>-cache`, `tests/cache.setup.ts`): the
+// app's world cache loaded once and copied into every test context (the fixtures' `cache`).
+//
 // `@screens` tests (reference screenshots) run only when `OVERSEER_E2E_SCREENS` names their set
 // (`cargo xtask e2e --screens`).
 //
@@ -21,7 +24,7 @@
 import { dirname, resolve } from 'node:path';
 import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/test';
 import { currentTarget } from './tests/fixtures/api';
-import type { Mode } from './tests/fixtures';
+import type { Cache, Mode } from './tests/fixtures';
 
 const target = currentTarget();
 const official = target === 'official';
@@ -51,20 +54,30 @@ const proxyServer: NonNullable<PlaywrightTestConfig['webServer']> = {
   url: `http://127.0.0.1:${proxyPort}/overseer-proxy.json`,
   reuseExistingServer: false,
 };
-const directProject = {
-  name: 'direct',
-  use: { mode: 'direct' as const, baseURL: `http://127.0.0.1:${directPort}/` },
-};
-const proxyProject = {
-  name: 'proxy',
-  use: { mode: 'proxy' as const, baseURL: `http://127.0.0.1:${proxyPort}/` },
-};
+// Each project's world cache, loaded once per run by its setup project (`tests/cache.setup.ts`)
+// and copied into every test context (the fixtures' `cache` option). Kept next to the logs: the
+// official one seeds the next official run.
+const cacheFile = (project: string) => resolve(dirname(proxy), `cache-${target}-${project}.json`);
+/** A project serving the app in `mode` at `port`, after its cache setup. */
+function served(mode: Mode, port: number) {
+  const use = { mode, baseURL: `http://127.0.0.1:${port}/`, cacheFile: cacheFile(mode) };
+  return [
+    {
+      name: `${mode}-cache`,
+      testMatch: /cache\.setup\.ts$/,
+      use: { ...use, cache: 'previous' as const },
+    },
+    { name: mode, dependencies: [`${mode}-cache`], use },
+  ];
+}
+const directProjects = served('direct', directPort);
+const proxyProjects = served('proxy', proxyPort);
 const excluded = [
   ...(official ? ['@openscreeps'] : []),
   ...(process.env.OVERSEER_E2E_SCREENS ? [] : ['@screens']),
 ];
 
-export default defineConfig<{ mode: Mode }>({
+export default defineConfig<{ mode: Mode; cache: Cache; cacheFile: string | undefined }>({
   testDir: './tests',
   outputDir: './test-results',
   fullyParallel: true,
@@ -82,6 +95,6 @@ export default defineConfig<{ mode: Mode }>({
     video: 'off',
     launchOptions: slow ? { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] } : {},
   },
-  projects: official ? [proxyProject] : [directProject, proxyProject],
+  projects: official ? proxyProjects : [...directProjects, ...proxyProjects],
   webServer: official ? [proxyServer] : [directServer, proxyServer],
 });

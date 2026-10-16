@@ -18,10 +18,13 @@
 //!    `official` only their read-only subset, the `read_only::` modules), then Playwright
 //!    (`npx playwright test`, extra arguments after `--` are passed on), each with the target's
 //!    environment (see [`common_environment`], [`world_environment`] and
-//!    [`official_environment`]). On `official`, Playwright runs the `proxy` project only, leaves
+//!    [`official_environment`]). Each Playwright project first loads the server's world once
+//!    into the app's cache and saves it (`target/e2e/cache-<target>-<project>.json`); its tests
+//!    start from a copy (see `e2e/tests/cache.setup.ts`). On `official`, Playwright runs the
+//!    `proxy` project only, starts that setup from the previous official run's cache, leaves
 //!    out the `@openscreeps` tests and fails any test that sends a request that may change the
 //!    account (see `e2e/playwright.config.ts` and `e2e/tests/fixtures`); the summary counts the
-//!    requests the proxy forwarded to screeps.com.
+//!    requests the proxy forwarded to screeps.com per endpoint.
 //! 4. Always removes the world's container and volume: on success, on failure, on panic and on
 //!    Ctrl-C. The servers' output is kept in `target/e2e/server-live.log` and
 //!    `target/e2e/server-ui.log`, the test proxy's in `target/e2e/proxy.log`
