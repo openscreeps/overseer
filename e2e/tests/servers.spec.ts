@@ -222,7 +222,7 @@ test.describe('servers', () => {
     );
     await signIn(page, server, account);
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
-    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toBeVisible();
+    await expect(page.getByRole('main').getByRole('group', { name: 'Zoom' })).toBeVisible();
     expect(await storedToken(page, server.url)).not.toBeNull();
     await page.goto('/#/');
     const servers = page.getByRole('region', { name: 'Servers' });
@@ -271,8 +271,9 @@ test.describe('server switcher', () => {
     const status = page.getByRole('contentinfo', { name: 'Status' });
     const accountButton = page.getByRole('button', { name: `Account: ${account.username}` });
     await expect(status).toContainText('Connected');
-    // The world is on display (the session has settled).
-    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toBeVisible();
+    // The world is on display: the session has settled.
+    const world = page.getByRole('main').getByRole('group', { name: 'Zoom' });
+    await expect(world).toBeVisible();
 
     // screeps.com is signed out: its sign-in form, without contacting it.
     await page.getByRole('button', { name: `Server: ${SERVER_NAME}` }).click();
@@ -288,6 +289,7 @@ test.describe('server switcher', () => {
     await page.getByRole('button', { name: 'Server: screeps.com' }).click();
     await page.getByRole('menuitemradio', { name: new RegExp(`^${SERVER_NAME}`) }).click();
     await expect(page).toHaveURL(new RegExp(`#/${server.slug}/`));
+    await expect(world).toBeVisible();
     await expect(page.getByRole('region', { name: 'Sign in to screeps.com' })).toHaveCount(0);
     await expect(accountButton).toBeVisible();
     await expect(status).toContainText('Connected');

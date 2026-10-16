@@ -30,8 +30,11 @@ function literal(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** A start room as the profile shows it: `W8N3`, or `shard3 / W8N3` on a sharded server. */
+const START_ROOM = /(?:(\S+) \/ )?([WE]\d+[NS]\d+)/;
+
 test.describe('profile', () => {
-  test('shows the account', async ({ signedInPage: page, server, user, home }) => {
+  test('shows the account', async ({ signedInPage: page, server, user }) => {
     const profile = await openProfile(page, user.username);
     await expect(page).toHaveTitle(`Account · ${server.name} — Overseer`);
     await expect(page.getByRole('banner').getByText('Account', { exact: true })).toBeVisible();
@@ -49,21 +52,23 @@ test.describe('profile', () => {
     await expect(await stat(profile, 'World status')).toHaveText(
       /^(Playing|Lost every spawn|Not in the world \(place a spawn\))$/,
     );
-    const start = await stat(profile, 'Start room');
-    await expect(start).toContainText(
-      home.shard ? `${home.shard} / ${home.room}` : home.room,
-    );
+    await expect(await stat(profile, 'Start room')).toContainText(START_ROOM);
   });
 
   test('goes to the start room or the map, and back', async ({
     signedInPage: page,
     server,
     user,
-    home,
   }) => {
     let profile = await openProfile(page, user.username);
+    const start = await stat(profile, 'Start room');
+    await expect(start).toContainText(START_ROOM);
+    const [, shard, room] = START_ROOM.exec((await start.textContent()) ?? '') ?? [];
     await profile.getByRole('button', { name: 'Show on the map' }).click();
-    await expect(page).toHaveURL(new RegExp(`${literal(home.path.slice(1))}$`));
+    await expect(page).toHaveURL(
+      new RegExp(`#/${literal(server.slug)}/${literal(shard ?? '-')}/${room}$`),
+    );
+    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toContainText(room ?? '');
     await expect(profile).toHaveCount(0);
 
     profile = await openProfile(page, user.username);
@@ -161,8 +166,8 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     await expect(enabled).toBeChecked();
     await expect(messages).toBeChecked();
     await expect(online).not.toBeChecked();
-    await expect(interval.locator('option:checked')).toHaveText('1 hour');
-    await expect(errors.locator('option:checked')).toHaveText('Every 30 minutes');
+    await expect(interval.getByRole('option', { selected: true })).toHaveText('1 hour');
+    await expect(errors.getByRole('option', { selected: true })).toHaveText('Every 30 minutes');
 
     await enabled.uncheck();
     await messages.uncheck();
@@ -176,8 +181,8 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     await expect(enabled).not.toBeChecked();
     await expect(messages).not.toBeChecked();
     await expect(online).toBeChecked();
-    await expect(interval.locator('option:checked')).toHaveText('3 hours');
-    await expect(errors.locator('option:checked')).toHaveText('Never');
+    await expect(interval.getByRole('option', { selected: true })).toHaveText('3 hours');
+    await expect(errors.getByRole('option', { selected: true })).toHaveText('Never');
   });
 
   test('changes the e-mail address', async ({ page, server, account }) => {
