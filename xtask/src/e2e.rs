@@ -121,7 +121,9 @@ impl Summary {
             .any(|(_, outcome, _)| matches!(outcome, Outcome::Failed(_)))
     }
 
-    fn print(&self) {
+    /// Prints every step and the result: failed when a step failed or `aborted` (an error
+    /// ended the run outside the steps, for example before the first one).
+    fn print(&self, aborted: bool) {
         println!("\ne2e summary");
         for (name, outcome, elapsed) in &self.steps {
             let seconds = elapsed.as_secs_f32();
@@ -135,7 +137,11 @@ impl Summary {
         }
         println!(
             "  result: {}",
-            if self.failed() { "FAILED" } else { "passed" }
+            if aborted || self.failed() {
+                "FAILED"
+            } else {
+                "passed"
+            }
         );
     }
 }
@@ -154,7 +160,7 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
             std::thread::park();
         }
     }
-    summary.print();
+    summary.print(result.is_err());
     result?;
     if summary.failed() {
         return Err("end-to-end tests failed".into());
