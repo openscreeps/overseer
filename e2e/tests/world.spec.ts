@@ -245,7 +245,6 @@ test.describe('world', () => {
     server,
     home,
   }) => {
-    test.fixme(true, 'the room stays in focus while the camera flies out (fix on main pending)');
     await openRoom(page, home.path);
     const bounds = await worldBounds(page, server, home);
     const corners = [
