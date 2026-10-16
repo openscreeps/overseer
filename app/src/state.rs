@@ -54,6 +54,29 @@ pub enum Screen {
     Ready,
 }
 
+impl Screen {
+    /// Whether this is the sign-in, registration or failure screen of a server other than the
+    /// one with base URL `url`.
+    fn is_of_other_server(&self, url: &str) -> bool {
+        match self {
+            Self::SignIn { server, .. }
+            | Self::Register { server }
+            | Self::Failed { server, .. } => server != url,
+            Self::Starting(_) | Self::SetUsername | Self::Ready => false,
+        }
+    }
+
+    /// The screen of a session whose account has `username`: the username form while it has
+    /// none, else the route's content.
+    const fn of_account(username: Option<&str>) -> Self {
+        if username.is_some() {
+            Self::Ready
+        } else {
+            Self::SetUsername
+        }
+    }
+}
+
 /// The live session.
 #[derive(Clone)]
 pub struct Session {
@@ -208,12 +231,21 @@ impl AppState {
             self.screen.set(Screen::Ready);
             return;
         };
-        let live = self
-            .session
-            .with_untracked(|session| session.as_ref().map(|session| session.server.clone()));
-        if live.as_deref() == Some(server.url.as_str())
-            || self.resuming.get_value().as_deref() == Some(server.url.as_str())
-        {
+        let live = self.session.get_untracked();
+        if let Some(session) = live.filter(|session| session.server == server.url) {
+            // Back from another server's form or failure: the live session's screen, as when
+            // it began (the username form while the account has none).
+            if self
+                .screen
+                .with_untracked(|screen| screen.is_of_other_server(&server.url))
+            {
+                self.screen
+                    .set(Screen::Starting(format!("Connecting to {}…", server.name)));
+                self.settle(session.epoch, server.url, session.overseer);
+            }
+            return;
+        }
+        if self.resuming.get_value().as_deref() == Some(server.url.as_str()) {
             return;
         }
         if server.user.is_some() {
@@ -402,13 +434,25 @@ impl AppState {
         if self.route.get_untracked().server() != self.slug(url).as_deref() {
             self.open_server(url);
         }
-        let url = url.to_owned();
+        self.settle(epoch, url.to_owned(), overseer);
+    }
+
+    /// Shows the content of session `epoch` on `url` once its account is known: the username
+    /// form while it has none, else the route's content.
+    fn settle(self, epoch: u64, url: String, overseer: Overseer) {
         spawn_local(async move {
-            match overseer.account().me().await {
-                Ok(me) if me.username.is_none() => self.screen.set(Screen::SetUsername),
+            let me = overseer.account().me().await;
+            // Ended meanwhile (signed out, expired, replaced): its sign-in form stays.
+            if !self.is_live(epoch) {
+                return;
+            }
+            match me {
                 Ok(me) => {
-                    self.remember_username(&url, me.username.clone());
-                    self.screen.set(Screen::Ready);
+                    let screen = Screen::of_account(me.username.as_deref());
+                    if me.username.is_some() {
+                        self.remember_username(&url, me.username.clone());
+                    }
+                    self.screen.set(screen);
                 }
                 Err(error) => {
                     self.screen.set(Screen::Ready);
@@ -603,5 +647,58 @@ impl AppState {
                 server.user = None;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Screen;
+
+    const LIVE: &str = "http://127.0.0.1:21025/";
+    const OTHER: &str = "https://screeps.com/";
+
+    #[test]
+    fn only_another_servers_forms_and_failures_belong_to_another_server() {
+        let other = [
+            Screen::SignIn {
+                server: OTHER.to_owned(),
+                message: None,
+            },
+            Screen::Register {
+                server: OTHER.to_owned(),
+            },
+            Screen::Failed {
+                server: OTHER.to_owned(),
+                message: "down".to_owned(),
+            },
+        ];
+        for screen in other {
+            assert!(screen.is_of_other_server(LIVE), "{screen:?}");
+        }
+        let own = [
+            Screen::SignIn {
+                server: LIVE.to_owned(),
+                message: None,
+            },
+            Screen::Register {
+                server: LIVE.to_owned(),
+            },
+            Screen::Failed {
+                server: LIVE.to_owned(),
+                message: "down".to_owned(),
+            },
+            Screen::Starting("Starting…".to_owned()),
+            Screen::SetUsername,
+            Screen::Ready,
+        ];
+        for screen in own {
+            assert!(!screen.is_of_other_server(LIVE), "{screen:?}");
+        }
+    }
+
+    #[test]
+    fn an_account_without_a_username_gets_the_username_form() {
+        assert_eq!(Screen::of_account(None), Screen::SetUsername);
+        assert_eq!(Screen::of_account(Some("player")), Screen::Ready);
     }
 }

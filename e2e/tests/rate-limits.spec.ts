@@ -1,14 +1,15 @@
-// Rate limits: when the map-stats limit holds the world's overviews back, the status bar says
-// so and when they resume; once the limit is lifted, the Rate limits panel's "Check again"
-// resumes them at once.
+// Rate limits: the Rate limits panel (account menu) lists what the server reported; when the
+// map-stats limit holds the world's overviews back, the status bar says so and when they
+// resume; once the limit is lifted, the panel's "Check again" resumes them at once.
 //
-// The local server has no per-token limits, so the test rewrites the map-stats responses
-// (`page.route`): first a refusal (HTTP 429) carrying `X-RateLimit-Remaining: 0` and a reset in
-// half an hour, as screeps.com sends once a token's 60 requests per hour are used; then the
-// server's own answers with healthy headers, as after a reset on screeps.com.
+// The local server has no per-token limits, so the paused-load test rewrites the map-stats
+// responses (`page.route`): first a refusal (HTTP 429) carrying `X-RateLimit-Remaining: 0` and
+// a reset in half an hour, as screeps.com sends once a token's 60 requests per hour are used;
+// then the server's own answers with healthy headers, as after a reset on screeps.com.
 
-import type { Request, Route } from '@playwright/test';
+import type { Route } from '@playwright/test';
 import { expect, signIn, test } from './fixtures';
+import { accountMenu, corsHeaders } from './support/accounts';
 
 /** The `X-RateLimit-*` headers of a window of 60 with `remaining` left, resetting at `reset`. */
 function limitHeaders(remaining: number, reset: number): Record<string, string> {
@@ -19,16 +20,44 @@ function limitHeaders(remaining: number, reset: number): Record<string, string> 
   };
 }
 
-/** Lets a cross-origin page (direct mode) read the response and its rate-limit headers. */
-function corsHeaders(request: Request, exposed = ''): Record<string, string> {
-  const origin = request.headers()['origin'];
-  const expose = [exposed, 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset']
-    .filter(Boolean)
-    .join(', ');
-  return origin
-    ? { 'access-control-allow-origin': origin, 'access-control-expose-headers': expose }
-    : {};
-}
+test.describe('rate limits', () => {
+  // screeps.com reports per-token limits on its endpoints; OpenScreeps has none.
+  test('the panel lists the limits the server reported, or says there are none', async ({
+    signedInPage: page,
+    user,
+    target,
+  }) => {
+    await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
+    await accountMenu(page, user.username, 'Rate limits');
+    const panel = page.getByRole('dialog', { name: 'Rate limits' });
+    const lifted = panel.getByRole('status').filter({ hasText: "Your API token's rate limits are lifted until" });
+    const reported = panel.getByRole('row').filter({ has: page.getByRole('rowheader') });
+    // screeps.com sends no limits for a lifted token (lifted on the website): one or the other.
+    if (target === 'official') await expect(lifted.or(reported.first())).toBeVisible();
+    if (target === 'official' && (await lifted.count()) === 0) {
+      // Opening the world asks screeps.com for terrain, rooms and map stats at once.
+      const row = panel.getByRole('row').filter({ has: page.getByRole('rowheader') }).first();
+      await expect(row.getByRole('rowheader')).toHaveText(/^(GET|POST) \/api\/\S+$/);
+      await expect(row.getByRole('cell')).toHaveText([
+        /^\d+$/,
+        /^\d+$/,
+        /^(in \d+ (s|min)|in \d+ h( \d+ min)?|already reset)$/,
+      ]);
+      await expect(panel.getByRole('columnheader')).toHaveText([
+        'Endpoint',
+        'Limit',
+        'Remaining',
+        'Resets',
+      ]);
+    } else {
+      // OpenScreeps has no per-token limits; screeps.com sends none for a lifted token.
+      await expect(panel).toContainText('No endpoint has reported a rate limit in this session yet.');
+      await expect(panel.getByRole('table')).toHaveCount(0);
+    }
+    await page.keyboard.press('Escape');
+    await expect(panel).toHaveCount(0);
+  });
+});
 
 test.describe('rate limits', { tag: '@openscreeps' }, () => {
   // These tests hold the overview loads back: the world starts uncached.
@@ -101,17 +130,6 @@ test.describe('rate limits', { tag: '@openscreeps' }, () => {
     await expect(row.getByRole('cell')).toHaveText(['60', '59', /^in (30|31) min$/]);
     await expect(panel.getByRole('button', { name: 'Check again' })).toHaveCount(0);
     await panel.getByRole('button', { name: 'Close rate limits' }).click();
-    await expect(panel).toHaveCount(0);
-  });
-
-  test('the panel says when no limit is known yet', async ({ page, server, account }) => {
-    await signIn(page, server, account);
-    await page.getByRole('button', { name: `Account: ${account.username}` }).click();
-    await page.getByRole('menuitem', { name: 'Rate limits' }).click();
-    const panel = page.getByRole('dialog', { name: 'Rate limits' });
-    await expect(panel).toContainText('No endpoint has reported a rate limit in this session yet.');
-    await expect(panel.getByRole('button', { name: 'Check again' })).toHaveCount(0);
-    await page.keyboard.press('Escape');
     await expect(panel).toHaveCount(0);
   });
 });
