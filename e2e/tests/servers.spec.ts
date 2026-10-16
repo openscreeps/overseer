@@ -215,11 +215,6 @@ test.describe('servers', () => {
     server,
     account,
   }) => {
-    test.fail(
-      true,
-      'app bug: removing the live session’s server deletes its token but keeps the session ' +
-        'running, so opening it again shows its world signed in (as "Account")',
-    );
     await signIn(page, server, account);
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
     await expect(page.getByRole('main').getByRole('group', { name: 'Zoom' })).toBeVisible();
@@ -262,11 +257,6 @@ test.describe('server switcher', () => {
     server,
     account,
   }) => {
-    test.fail(
-      true,
-      'app bug: back on the live session’s server, the app still shows the sign-in form of the ' +
-        'signed-out server visited before (its screen is not reset)',
-    );
     await signIn(page, server, account);
     const status = page.getByRole('contentinfo', { name: 'Status' });
     const accountButton = page.getByRole('button', { name: `Account: ${account.username}` });

@@ -54,6 +54,19 @@ pub enum Screen {
     Ready,
 }
 
+impl Screen {
+    /// Whether this is the sign-in, registration or failure screen of a server other than the
+    /// one with base URL `url`.
+    fn is_of_other_server(&self, url: &str) -> bool {
+        match self {
+            Self::SignIn { server, .. }
+            | Self::Register { server }
+            | Self::Failed { server, .. } => server != url,
+            Self::Starting(_) | Self::SetUsername | Self::Ready => false,
+        }
+    }
+}
+
 /// The live session.
 #[derive(Clone)]
 pub struct Session {
@@ -211,9 +224,17 @@ impl AppState {
         let live = self
             .session
             .with_untracked(|session| session.as_ref().map(|session| session.server.clone()));
-        if live.as_deref() == Some(server.url.as_str())
-            || self.resuming.get_value().as_deref() == Some(server.url.as_str())
-        {
+        if live.as_deref() == Some(server.url.as_str()) {
+            // Back from another server's form or failure: the live session's content.
+            if self
+                .screen
+                .with_untracked(|screen| screen.is_of_other_server(&server.url))
+            {
+                self.screen.set(Screen::Ready);
+            }
+            return;
+        }
+        if self.resuming.get_value().as_deref() == Some(server.url.as_str()) {
             return;
         }
         if server.user.is_some() {
@@ -608,5 +629,52 @@ impl AppState {
                 server.user = None;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Screen;
+
+    const LIVE: &str = "http://127.0.0.1:21025/";
+    const OTHER: &str = "https://screeps.com/";
+
+    #[test]
+    fn only_another_servers_forms_and_failures_belong_to_another_server() {
+        let other = [
+            Screen::SignIn {
+                server: OTHER.to_owned(),
+                message: None,
+            },
+            Screen::Register {
+                server: OTHER.to_owned(),
+            },
+            Screen::Failed {
+                server: OTHER.to_owned(),
+                message: "down".to_owned(),
+            },
+        ];
+        for screen in other {
+            assert!(screen.is_of_other_server(LIVE), "{screen:?}");
+        }
+        let own = [
+            Screen::SignIn {
+                server: LIVE.to_owned(),
+                message: None,
+            },
+            Screen::Register {
+                server: LIVE.to_owned(),
+            },
+            Screen::Failed {
+                server: LIVE.to_owned(),
+                message: "down".to_owned(),
+            },
+            Screen::Starting("Starting…".to_owned()),
+            Screen::SetUsername,
+            Screen::Ready,
+        ];
+        for screen in own {
+            assert!(!screen.is_of_other_server(LIVE), "{screen:?}");
+        }
     }
 }

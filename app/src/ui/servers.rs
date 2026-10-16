@@ -85,10 +85,19 @@ fn ServerItem(server: Server) -> impl IntoView {
         let url = remove_url.clone();
         let platform = state.platform();
         let slug = state.slug(&url);
+        let live = state.session.with_untracked(|session| {
+            session
+                .as_ref()
+                .is_some_and(|session| session.server == url)
+        });
         state.update_saved(|saved| saved.forget(&url, slug.as_deref()));
         state.update_profiles(|profiles| profiles.remove(&url));
         toasts.show(ToastKind::Info, format!("Removed {removed_name}"));
         spawn_local(async move {
+            // Its session ends as with signing out.
+            if live {
+                state.sign_out().await;
+            }
             let _ = platform
                 .secret_delete(&crate::profiles::token_key(&url))
                 .await;
