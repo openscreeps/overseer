@@ -357,9 +357,9 @@ test.describe('objects', () => {
     }) => {
       await openObjects(page, home.path, home.room);
       const list = objectList(page);
-      const name = await rowName(list, /^c\d+ at \d+,\d+$/);
-      const creep = name.replace(/ at \d+,\d+$/, '');
-      await list.getByRole('button', { name, exact: true }).click();
+      // A walking creep: its row's position changes every tick.
+      const creep = (await rowName(list, /^c\d+ at \d+,\d+$/)).replace(/ at \d+,\d+$/, '');
+      await list.getByRole('button', { name: new RegExp(`^${creep} at`) }).click();
       await expect(inspector(page).getByRole('heading')).toHaveText(creep);
 
       const session = await Session.signIn(server.url, player.username, player.password);

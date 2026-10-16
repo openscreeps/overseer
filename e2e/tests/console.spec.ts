@@ -193,10 +193,16 @@ test.describe('console', () => {
 
       // Output taller than the log, followed to the bottom; scrolling up pauses.
       await run(page, `'e2e-tall' + '<br>line'.repeat(80)`);
-      await expect(log).toContainText('e2e-tall', { timeout: 30_000 });
+      // The result (the command's echo starts with a quote).
+      await expect(log.getByText(/^e2e-tall/)).toBeVisible({ timeout: 30_000 });
+      expect(await log.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
       await expect.poll(atBottom).toBe(true);
-      await log.evaluate((element) => element.scrollTo({ top: 0 }));
-      await expect(resume).toBeVisible();
+      // A line arriving in the same frame scrolls back down once (as it would under a user's
+      // wheel); the next scroll wins. Instant, so that nothing keeps scrolling afterwards.
+      await expect(async () => {
+        await log.evaluate((element) => element.scrollTo({ top: 0, behavior: 'instant' }));
+        await expect(resume).toBeVisible({ timeout: 1_000 });
+      }).toPass({ timeout: 15_000 });
       await expect(paused).toBeVisible();
       await resume.click();
       await expect(paused).toBeHidden();

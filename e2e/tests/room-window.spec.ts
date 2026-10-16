@@ -25,6 +25,9 @@ test.describe('room window', () => {
       page.waitForEvent('popup'),
       page.getByRole('button', { name: 'Pop out room' }).click(),
     ]);
+    // On screeps.com a low map-stats budget prompts to lift it; the window is not about that.
+    const prompt = popup.getByRole('dialog', { name: 'Rate limit running low' });
+    await popup.addLocatorHandler(prompt, () => prompt.getByRole('button', { name: 'Not now' }).click());
     await expect(popup).toHaveURL(new RegExp(`/${home.room}/window$`));
     await expect(popup.getByRole('heading', { level: 1 })).toContainText(home.room);
     await expect(popup).toHaveTitle(new RegExp(`^${home.room} · .+ — Overseer$`));
