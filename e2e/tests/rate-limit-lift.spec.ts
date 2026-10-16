@@ -100,6 +100,8 @@ async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: num
     const request = route.request();
     if (request.method() !== 'GET') return route.continue();
     fake.tokenLists += 1;
+    // What screeps.com knows when the request arrives, not once the token below is issued.
+    const lift = fake.lift;
     // A token the server issues right now, which the app holds once this response arrives.
     const me = await route.fetch({
       url: request.url().replace(/api\/user\/auth-token.*$/, 'api/auth/me'),
@@ -112,7 +114,7 @@ async function fakeScreeps(page: Page, fake: Fake, remaining: number, reset: num
       full: true,
       token: token.slice(0, 8),
     };
-    if (fake.lift !== null) entry.noRatelimitUntil = fake.lift;
+    if (lift !== null) entry.noRatelimitUntil = lift;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
