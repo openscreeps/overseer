@@ -85,19 +85,22 @@ async function recordLevels(page: Page): Promise<() => Promise<string[]>> {
 }
 
 /**
- * Opens the world on `home` (live), zooms out as far as the map goes with Escape (around the
- * centre, so the room stays there), then wheels back in over the centre until the room is
- * live: continuous zoom, no click. Returns the most zoomed-out level and every level the status
- * bar showed on the way in.
+ * Opens the world on `home` (live), zooms out with Escape (around the centre, so the room stays
+ * there) until the overview level or as far as the map goes, then wheels back in over the
+ * centre until the room is live: continuous zoom, no click. Returns the most zoomed-out level
+ * and every level the status bar showed on the way in.
  */
 async function zoomIntoLiveRoom(page: Page, home: Home): Promise<{ lowest: Level; levels: string[] }> {
   await openRoom(page, home.path);
   const map = worldMap(page);
   await map.focus();
   // Escape zooms out 2.25× at once: twelve presses pass the zoom limit of any world (it is
-  // clamped).
+  // clamped). A screeps.com shard reaches the overview in four, long before the limit: no
+  // further, so that the map does not load the whole shard.
   for (let i = 0; i < 12; i++) {
     await page.keyboard.press('Escape');
+    await nextFrames(page);
+    if ((await levelOf(page)) === 'World') break;
   }
   await nextFrames(page);
   const lowest = await levelOf(page);
