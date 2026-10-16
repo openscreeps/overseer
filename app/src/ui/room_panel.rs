@@ -26,8 +26,14 @@ use crate::portals::{destination_text, destinations};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, number, ticks};
 use crate::ui::objects::{ObjectsPanel, Selection};
+use crate::ui::style::{self, concatcp};
 use crate::ui::surface::{Hooks, Surface, SurfaceCanvas};
 use crate::ui::world::MapState;
+
+/// The pop-out button in the room's head.
+const POP_OUT_BUTTON: &str = concatcp!(style::ICON_BUTTON_SM, " relative ", style::TIP_END);
+/// A portal destination that takes the user through the portal.
+const PORTAL_LINK: &str = concatcp!(style::LINK_BUTTON, " font-medium");
 
 /// What is known of the room in focus: its overview and portals as the world knows them (the
 /// same as the map's), and its live state.
@@ -130,10 +136,12 @@ pub fn RoomPanel(
 ) -> impl IntoView {
     let snapshot = Signal::derive(move || data.snapshot());
     view! {
-        <div class="room-panel full">
+        <div class="flex flex-1 min-h-0 max-sm:flex-col">
             <RoomPreview feed room tile=selection.tile user=user.clone() data report=true />
-            <div class="room-side">
-                <RoomInfo room data user=user.clone() />
+            <div class="flex flex-none flex-col w-88 min-h-0 bg-panel border-l border-edge max-sm:w-auto max-sm:max-h-1/2 max-sm:border-t max-sm:border-l-0">
+                <div class="flex-none p-3 border-b border-edge">
+                    <RoomInfo room data user=user.clone() />
+                </div>
                 <ObjectsPanel room snapshot selection user />
             </div>
         </div>
@@ -154,7 +162,8 @@ pub fn RoomPreview(
     user: Option<String>,
     /// What is known of the room (the refusal notice).
     data: RoomData,
-    /// Reports frame time and backend to the status bar (the preview is the window's view).
+    /// The preview is the window's view: it fills the window (a framed square otherwise) and
+    /// reports frame time and backend to the status bar.
     #[prop(optional)]
     report: bool,
 ) -> impl IntoView {
@@ -234,8 +243,13 @@ pub fn RoomPreview(
             _ => None,
         })
     };
+    let frame = if report {
+        "relative flex-1 overflow-hidden"
+    } else {
+        "relative aspect-square overflow-hidden border border-edge rounded-md"
+    };
     view! {
-        <div class="room-control">
+        <div class=frame>
             <SurfaceCanvas
                 surface
                 testid="room-control"
@@ -248,8 +262,8 @@ pub fn RoomPreview(
                     .get()
                     .map(|error| {
                         view! {
-                            <div class="overlay" role="alert">
-                                <p>{format!("The room cannot be drawn: {error}")}</p>
+                            <div class=style::OVERLAY role="alert">
+                                <p class="max-w-128">{format!("The room cannot be drawn: {error}")}</p>
                             </div>
                         }
                     })
@@ -258,7 +272,10 @@ pub fn RoomPreview(
                 refused()
                     .map(|reason| {
                         view! {
-                            <p class="room-notice" role="status">
+                            <p
+                                class="absolute right-2 bottom-2 left-2 px-2 py-1 text-sm bg-panel-2 border border-warn rounded-md"
+                                role="status"
+                            >
                                 {format!(
                                     "Live view unavailable ({reason}): the server allows few live rooms per player, across all windows. Showing the minimap."
                                 )}
@@ -468,20 +485,19 @@ pub fn RoomInfo(
     let title = move || room.get().map(|room| room.to_string()).unwrap_or_default();
     let live = move || {
         data.detail.with(|detail| match detail {
-            Some(DetailState::Live(_)) => ("dot ok", "Live".to_owned()),
-            Some(DetailState::Pending) => ("dot busy", "Connecting…".to_owned()),
-            Some(DetailState::Refused(_)) => ("dot off", "Minimap only".to_owned()),
-            None => ("dot off", "Not live".to_owned()),
+            Some(DetailState::Live(_)) => (style::DOT_OK, "Live".to_owned()),
+            Some(DetailState::Pending) => (style::DOT_BUSY, "Connecting…".to_owned()),
+            Some(DetailState::Refused(_)) => (style::DOT, "Minimap only".to_owned()),
+            None => (style::DOT, "Not live".to_owned()),
         })
     };
     let pop_out = pop_out.map(|pop_out| {
         view! {
             <button
                 type="button"
-                class="icon-button sm"
+                class=POP_OUT_BUTTON
                 aria-label="Pop out room"
                 data-tip="Pop out room"
-                data-tip-pos="bottom-end"
                 on:click=move |_| pop_out.run(())
             >
                 <Icon kind=IconKind::PopOut />
@@ -490,8 +506,12 @@ pub fn RoomInfo(
     });
     let overview = move || {
         let Some(stat) = data.stat.get() else {
-            return view! { <p class="muted" role="status">"Loading the room's overview…"</p> }
-                .into_any();
+            return view! {
+                <p class="col-span-full text-muted" role="status">
+                    "Loading the room's overview…"
+                </p>
+            }
+            .into_any();
         };
         let live = data
             .detail
@@ -521,11 +541,17 @@ pub fn RoomInfo(
         ))
     };
     view! {
-        <section class="room-info" aria-labelledby="room-info-title">
-            <header class="room-head">
-                <h2 id="room-info-title">
-                    <span class="room-name">{title}</span>
-                    <span class="live" role="status">
+        <section class="flex flex-col gap-3" aria-labelledby="room-info-title">
+            <header class="flex items-center justify-between gap-2 min-h-control-sm">
+                <h2
+                    id="room-info-title"
+                    class="flex items-baseline gap-3 min-w-0 text-lg font-semibold leading-tight"
+                >
+                    <span>{title}</span>
+                    <span
+                        class="inline-flex items-center gap-2 text-sm font-normal text-muted whitespace-nowrap"
+                        role="status"
+                    >
                         <span class=move || live().0 aria-hidden="true"></span>
                         {move || live().1}
                     </span>
@@ -533,7 +559,7 @@ pub fn RoomInfo(
                 {pop_out}
             </header>
             {children.map(|children| children())}
-            <dl class="facts">
+            <dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-2 items-baseline text-sm [&>dt]:text-muted [&>dd]:min-w-0 [&>dd]:tabular-nums">
                 {overview}
                 {live_facts}
                 {portals}
@@ -569,7 +595,7 @@ fn portal_rows(
                 Some((destination, go_to)) => view! {
                     <button
                         type="button"
-                        class="link portal-to"
+                        class=PORTAL_LINK
                         aria-label=format!("Go to {name}")
                         title=format!("Go to {name}")
                         on:click=move |_| go_to.run(destination.clone())
@@ -578,12 +604,12 @@ fn portal_rows(
                     </button>
                 }
                 .into_any(),
-                None => view! { <span class="portal-to">{text}</span> }.into_any(),
+                None => view! { <span class="font-medium text-fg">{text}</span> }.into_any(),
             };
             view! {
-                <li>
+                <li class="flex flex-wrap items-center gap-x-2">
                     {destination}
-                    <span class="muted">{notes.join(" · ")}</span>
+                    <span class="text-muted">{notes.join(" · ")}</span>
                 </li>
             }
         })
@@ -595,7 +621,7 @@ fn portal_rows(
     };
     view! {
         <dt>{label}</dt>
-        <dd><ul class="portal-list" aria-label="Portal destinations">{rows}</ul></dd>
+        <dd><ul class="flex flex-col gap-1" aria-label="Portal destinations">{rows}</ul></dd>
     }
 }
 
@@ -646,13 +672,14 @@ fn facts_rows(facts: Facts, game_time: Option<u64>) -> impl IntoView {
             view! {
                 <dt>"Upgrade"</dt>
                 <dd>
-                    <span class="meter progress">
+                    <span class=style::METER>
                         <progress
+                            class=style::METER_BAR_PROGRESS
                             max=total.to_string()
                             value=progress.min(total).to_string()
                             aria-label=format!("Progress to level {}", controller.level + 1)
                         ></progress>
-                        <span class="meter-text">
+                        <span class=style::METER_TEXT>
                             {format!("{} / {}", number(progress), number(total))}
                         </span>
                     </span>
@@ -684,13 +711,14 @@ fn facts_rows(facts: Facts, game_time: Option<u64>) -> impl IntoView {
         view! {
             <dt>"Energy"</dt>
             <dd>
-                <span class="meter energy">
+                <span class=style::METER>
                     <progress
+                        class=style::METER_BAR_ENERGY
                         max=capacity.max(1).to_string()
                         value=energy.min(capacity).to_string()
                         aria-label="Energy available for spawning"
                     ></progress>
-                    <span class="meter-text">{format!("{} / {}", number(energy), number(capacity))}</span>
+                    <span class=style::METER_TEXT>{format!("{} / {}", number(energy), number(capacity))}</span>
                 </span>
             </dd>
         }
@@ -702,20 +730,21 @@ fn facts_rows(facts: Facts, game_time: Option<u64>) -> impl IntoView {
             .into_iter()
             .map(|(energy, capacity)| {
                 view! {
-                    <span class="meter energy">
+                    <span class=style::METER>
                         <progress
+                            class=style::METER_BAR_ENERGY
                             max=capacity.max(1).to_string()
                             value=energy.min(capacity).to_string()
                             aria-label="Source energy"
                         ></progress>
-                        <span class="meter-text">{format!("{} / {}", number(energy), number(capacity))}</span>
+                        <span class=style::METER_TEXT>{format!("{} / {}", number(energy), number(capacity))}</span>
                     </span>
                 }
             })
             .collect_view();
         view! {
             <dt>{if count == 1 { "Source" } else { "Sources" }}</dt>
-            <dd class="stack">{items}</dd>
+            <dd class="flex flex-col gap-1">{items}</dd>
         }
     });
     let mineral = facts.mineral.map(|(kind, amount, density)| {
@@ -736,23 +765,24 @@ fn facts_rows(facts: Facts, game_time: Option<u64>) -> impl IntoView {
                 if owner.sites > 0 {
                     parts.push(counted(owner.sites, "site", "sites"));
                 }
+                let tone = if owner.own { "text-ok" } else { "" };
                 view! {
-                    <li class:own=owner.own>
-                        <span class="owner">{owner.name}</span>
-                        <span class="muted">{parts.join(" · ")}</span>
+                    <li class="flex flex-wrap gap-x-2">
+                        <span class=tone>{owner.name}</span>
+                        <span class="text-muted">{parts.join(" · ")}</span>
                     </li>
                 }
             })
             .collect_view();
         view! {
             <dt>"Objects"</dt>
-            <dd><ul class="owner-counts">{rows}</ul></dd>
+            <dd><ul class="flex flex-col gap-1">{rows}</ul></dd>
         }
     });
     let tick = game_time.map(|time| {
         view! {
             <dt>"Updated"</dt>
-            <dd class="numeric">{format!("tick {time}")}</dd>
+            <dd>{format!("tick {time}")}</dd>
         }
     });
     view! { {controller} {energy} {sources} {mineral} {owners} {tick} }

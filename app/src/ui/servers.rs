@@ -8,7 +8,13 @@ use crate::platform::Platform;
 use crate::profiles::{SEASON_URL, Server, ServerKind, server_password_key};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::style::{self, concatcp};
 use crate::ui::toast::{ToastKind, Toasts};
+
+/// A saved server's account line: signed in.
+const ACCOUNT_SIGNED_IN: &str = "inline-flex items-center gap-1 text-sm text-fg";
+/// A saved server's account line: signed out.
+const ACCOUNT_SIGNED_OUT: &str = "inline-flex items-center gap-1 text-sm text-faint";
 
 /// Every saved server.
 #[component]
@@ -30,16 +36,18 @@ pub fn Servers() -> impl IntoView {
         }
     };
     view! {
-        <div class="page servers-page">
+        <div class=style::PAGE>
             <section aria-labelledby="servers-title">
-                <header class="page-head">
+                <header class="flex flex-wrap items-end justify-between gap-3 mb-4">
                     <div>
-                        <h1 id="servers-title">"Servers"</h1>
-                        <p class="muted">"Choose a server to open its world map."</p>
+                        <h1 id="servers-title" class="mb-1 text-xl font-semibold leading-tight">
+                            "Servers"
+                        </h1>
+                        <p class="text-muted">"Choose a server to open its world map."</p>
                     </div>
                     <button
                         type="button"
-                        class="primary"
+                        class=style::BUTTON_PRIMARY
                         aria-haspopup="dialog"
                         aria-controls="add-server"
                         on:click=open
@@ -48,7 +56,7 @@ pub fn Servers() -> impl IntoView {
                         "Add server"
                     </button>
                 </header>
-                <ul class="server-list">{items}</ul>
+                <ul class="flex flex-col gap-2">{items}</ul>
             </section>
             <AddServer dialog />
         </div>
@@ -109,33 +117,40 @@ fn ServerItem(server: Server) -> impl IntoView {
         if live {
             super::topbar::status_class(state.status.get())
         } else {
-            "dot off"
+            style::DOT
         }
     };
+    let account_class = if signed_in {
+        ACCOUNT_SIGNED_IN
+    } else {
+        ACCOUNT_SIGNED_OUT
+    };
     view! {
-        <li class="server">
-            <span class="server-icon"><Icon kind=icon /></span>
-            <div class="server-info">
-                <strong class="server-name">
+        <li class="flex items-center gap-4 p-4 bg-panel border border-edge rounded-lg transition-[border-color] duration-(--duration-fast) ease-standard hover:border-edge-strong max-md:flex-wrap">
+            <span class="inline-flex items-center justify-center flex-none size-10 text-muted bg-panel-2 rounded-md">
+                <Icon kind=icon class="inline flex-none size-[1.3rem]" />
+            </span>
+            <div class="flex flex-col flex-1 gap-[0.1rem] min-w-0">
+                <strong class="inline-flex items-center gap-2 text-lg">
                     {server.name}
                     <span class=dot aria-hidden="true"></span>
                 </strong>
-                <span class="muted server-meta">
-                    {kind} " · " <span class="server-url">{server.url}</span>
+                <span class="text-sm text-muted truncate">
+                    {kind} " · " <span class="font-mono text-[0.95em]">{server.url}</span>
                 </span>
-                <span class="server-account" class:signed-in=signed_in>
+                <span class=account_class>
                     <Icon kind=IconKind::User />
                     {account}
                 </span>
             </div>
-            <div class="server-actions">
+            <div class="flex flex-none items-center gap-2 max-md:ml-auto">
                 {removable
                     .then(|| {
                         let label = format!("Remove {name}");
                         view! {
                             <button
                                 type="button"
-                                class="icon-button ghost"
+                                class=concatcp!(style::ICON_BUTTON_GHOST, " relative ", style::TIP)
                                 aria-label=label.clone()
                                 data-tip=label
                                 on:click=remove
@@ -144,9 +159,9 @@ fn ServerItem(server: Server) -> impl IntoView {
                             </button>
                         }
                     })}
-                <button type="button" class="primary" on:click=open>
+                <button type="button" class=style::BUTTON_PRIMARY on:click=open>
                     {open_label}
-                    <span class="visually-hidden">{format!(" {name}")}</span>
+                    <span class="sr-only">{format!(" {name}")}</span>
                 </button>
             </div>
         </li>
@@ -220,26 +235,28 @@ fn AddServer(
     view! {
         <dialog
             id="add-server"
-            class="dialog"
+            class="m-auto w-[min(28rem,calc(100vw-2rem))] max-h-[calc(100vh-3rem)] p-5 text-fg bg-panel border border-edge rounded-lg shadow-lg open:animate-dialog-in backdrop:bg-scrim backdrop:animate-fade-in"
             node_ref=dialog
             aria-labelledby="add-title"
             on:close=move |_| reset()
         >
-            <form on:submit=submit novalidate>
-                <header class="dialog-head">
-                    <h2 id="add-title">"Add server"</h2>
+            <form class=style::FORM on:submit=submit novalidate>
+                <header class="flex items-center justify-between gap-3 mb-1">
+                    <h2 id="add-title" class="text-lg font-semibold leading-tight">
+                        "Add server"
+                    </h2>
                     <button
                         type="button"
-                        class="icon-button sm ghost"
+                        class=style::ICON_BUTTON_GHOST_SM
                         aria-label="Close"
                         on:click=move |_| close()
                     >
                         <Icon kind=IconKind::Close />
                     </button>
                 </header>
-                <div class="field">
-                    <label for="add-preset">"Server"</label>
-                    <select id="add-preset" bind:value=preset>
+                <div class=style::FIELD>
+                    <label for="add-preset" class=style::LABEL>"Server"</label>
+                    <select id="add-preset" class=style::INPUT bind:value=preset>
                         <option value="private">"Private server"</option>
                         <option value="season">"Season (screeps.com)"</option>
                     </select>
@@ -248,20 +265,28 @@ fn AddServer(
                     when=private
                     fallback=|| {
                         view! {
-                            <p class="help">
+                            <p class=style::HELP>
                                 "screeps.com's seasonal world; sign in with your screeps.com account."
                             </p>
                         }
                     }
                 >
-                    <div class="field">
-                        <label for="add-name">"Name"</label>
-                        <input id="add-name" type="text" required autofocus bind:value=name />
+                    <div class=style::FIELD>
+                        <label for="add-name" class=style::LABEL>"Name"</label>
+                        <input
+                            id="add-name"
+                            class=style::INPUT
+                            type="text"
+                            required
+                            autofocus
+                            bind:value=name
+                        />
                     </div>
-                    <div class="field">
-                        <label for="add-url">"Address"</label>
+                    <div class=style::FIELD>
+                        <label for="add-url" class=style::LABEL>"Address"</label>
                         <input
                             id="add-url"
+                            class=style::INPUT
                             type="url"
                             inputmode="url"
                             required
@@ -269,16 +294,19 @@ fn AddServer(
                             bind:value=url
                         />
                     </div>
-                    <div class="field">
-                        <label for="add-server-password">"Server password (optional)"</label>
+                    <div class=style::FIELD>
+                        <label for="add-server-password" class=style::LABEL>
+                            "Server password (optional)"
+                        </label>
                         <input
                             id="add-server-password"
+                            class=style::INPUT
                             type="password"
                             autocomplete="off"
                             aria-describedby="add-server-password-help"
                             bind:value=server_password
                         />
-                        <p id="add-server-password-help" class="help">
+                        <p id="add-server-password-help" class=style::HELP>
                             "Only for password-protected servers; kept in "
                             {move || {
                                 if state.platform.with_value(Platform::is_tauri) {
@@ -290,10 +318,14 @@ fn AddServer(
                         </p>
                     </div>
                 </Show>
-                {move || error.get().map(|error| view! { <p class="error" role="alert">{error}</p> })}
-                <footer class="dialog-actions">
-                    <button type="button" on:click=move |_| close()>"Cancel"</button>
-                    <button type="submit" class="primary">"Add"</button>
+                {move || {
+                    error.get().map(|error| view! { <p class=style::ERROR role="alert">{error}</p> })
+                }}
+                <footer class="flex justify-end gap-2 mt-3">
+                    <button type="button" class=style::BUTTON on:click=move |_| close()>
+                        "Cancel"
+                    </button>
+                    <button type="submit" class=style::BUTTON_PRIMARY>"Add"</button>
                 </footer>
             </form>
         </dialog>

@@ -40,8 +40,8 @@ test.describe('console', { tag: '@openscreeps' }, () => {
     await input.fill(expression);
     await input.press('Enter');
     await expect(input).toHaveValue('');
-    await expect(output(page).locator('.line.command')).toContainText(expression);
-    await expect(output(page).locator('.line.result')).toContainText('e2e-42', {
+    await expect(output(page).locator('[data-kind="command"]')).toContainText(expression);
+    await expect(output(page).locator('[data-kind="result"]')).toContainText('e2e-42', {
       timeout: 30_000,
     });
 
@@ -78,11 +78,11 @@ test.describe('console', { tag: '@openscreeps' }, () => {
     const log = page.getByRole('button', { name: 'Log', exact: true });
     await log.click();
     await expect(log).toHaveAttribute('aria-pressed', 'false');
-    await expect(output(page).locator('.line.log')).toHaveCount(0);
+    await expect(output(page).locator('[data-kind="log"]')).toHaveCount(0);
     await log.click();
-    await expect(output(page).locator('.line.log').first()).toBeVisible();
+    await expect(output(page).locator('[data-kind="log"]').first()).toBeVisible();
 
-    const lines = output(page).locator('.line');
+    const lines = output(page).locator('[data-kind]');
     await expect.poll(() => lines.count(), { timeout: 30_000 }).toBeGreaterThan(3);
     const before = await lines.count();
     await page.getByRole('button', { name: 'Clear console' }).click();

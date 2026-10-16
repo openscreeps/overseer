@@ -3,8 +3,8 @@
 //!
 //! An item shows only once its value is known (no "—" placeholders). While a map is shown its
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
-//! fixed minimum width with tabular digits, so values arriving or changing never shift their
-//! neighbours.
+//! fixed minimum width with tabular digits (the tick's sized for the server's shard names and a
+//! 9-digit tick), so values arriving or changing never shift their neighbours.
 
 use leptos::prelude::*;
 use overseer::ConnectionStatus;
@@ -15,6 +15,7 @@ use crate::route::Shard;
 use crate::state::AppState;
 use crate::ui::hover::{MapRooms, place_text};
 use crate::ui::rate_limits::{RateLimitsUi, StatusLifted, StatusReset};
+use crate::ui::style;
 use crate::ui::topbar::status_class;
 use crate::ui::world::{MapState, Phase};
 
@@ -120,16 +121,48 @@ impl MapItems {
     }
 }
 
-/// The status item of `slot` with `class` and `title`. The element stays while the slot is
-/// not hidden and only its text follows the value: no re-render per value, and observers of
-/// the element (the end-to-end tests) keep seeing it.
-fn item(slot: Memo<Slot>, class: &'static str, title: &'static str) -> impl IntoView {
+/// Digits the tick slot leaves room for: 9 (a long-running server's ticks have 8).
+const TICK_DIGITS: usize = 9;
+
+/// The minimum width of the tick slot, in `ch` (the width of a digit; with tabular digits every
+/// digit takes it, the letters of `tick` and of shard names take less): `tick ` and
+/// [`TICK_DIGITS`] digits, after `<shard> · ` for the longest of the server's `shards` and the
+/// `shown` one. Constant for a server, so the first tick arriving never moves the items after it.
+fn place_width(shards: &[String], shown: Option<&str>) -> usize {
+    let shard = shards
+        .iter()
+        .map(String::as_str)
+        .chain(shown)
+        .map(|name| name.chars().count())
+        .max();
+    "tick ".len() + TICK_DIGITS + shard.map_or(0, |length| length + " · ".chars().count())
+}
+
+/// The status item of `slot` with `class` and `title`, at least `min_width` `ch` wide when
+/// given. The element stays while the slot is not hidden and only its text follows the value:
+/// no re-render per value, and observers of the element (the end-to-end tests) keep seeing it.
+fn item(
+    slot: Memo<Slot>,
+    class: &'static str,
+    title: &'static str,
+    min_width: Option<Memo<usize>>,
+) -> impl IntoView {
     let shown = Memo::new(move |_| slot.with(|slot| *slot != Slot::Hidden));
     let reserved = Memo::new(move |_| slot.with(|slot| *slot == Slot::Reserved));
+    let style = move || {
+        min_width
+            .map(|width| format!("min-width: {}ch", width.get()))
+            .unwrap_or_default()
+    };
     move || {
         shown.get().then(|| {
             view! {
-                <span class=class title=title aria-hidden=move || reserved.get().then_some("true")>
+                <span
+                    class=class
+                    style=style
+                    title=title
+                    aria-hidden=move || reserved.get().then_some("true")
+                >
                     {move || slot.with(Slot::text)}
                 </span>
             }
@@ -162,6 +195,16 @@ pub fn StatusBar() -> impl IntoView {
         })
     });
     let place = Memo::new(move |_| items.with(|items| items.place.clone()));
+    // Known with the session (the server's shards) and the route (the shard shown), before
+    // the first tick.
+    let place_width = Memo::new(move |_| {
+        let shown = map.shard.get().and_then(|shard| match shard {
+            Shard::Named(name) => Some(name),
+            Shard::Single => None,
+        });
+        map.shards
+            .with(|shards| place_width(shards, shown.as_deref()))
+    });
     let level = Memo::new(move |_| items.with(|items| items.level.clone()));
     let hover = Memo::new(move |_| items.with(|items| items.hover.clone()));
     let frame = Memo::new(move |_| items.with(|items| items.frame.clone()));
@@ -191,29 +234,60 @@ pub fn StatusBar() -> impl IntoView {
     let progress = move || {
         loading.get().then(|| {
             view! {
-                <span class="status-item status-progress" role="status" title=move || title.get()>
-                    <span class="spinner small" aria-hidden="true"></span>
-                    <span class="status-text">{move || progress.get().unwrap_or_default()}</span>
+                <span
+                    class="inline-flex flex-initial items-center gap-2 min-w-0"
+                    role="status"
+                    title=move || title.get()
+                >
+                    <span class=style::SPINNER_SMALL aria-hidden="true"></span>
+                    <span class="truncate">{move || progress.get().unwrap_or_default()}</span>
                 </span>
                 <StatusReset />
             }
         })
     };
     view! {
-        <footer class="status-bar" aria-label="Status">
-            <span class="status-item status-connection" title=connection_title>
+        <footer
+            class="flex flex-none items-center gap-5 max-md:gap-3 h-statusbar px-3 overflow-hidden \
+                whitespace-nowrap text-sm tabular-nums text-muted bg-panel border-t border-edge"
+            aria-label="Status"
+        >
+            <span
+                class="inline-flex flex-none items-center gap-2 min-w-[9.5em]"
+                title=connection_title
+            >
                 <span class=move || status_class(state.status.get()) aria-hidden="true"></span>
                 {move || connection_text(state.status.get())}
             </span>
-            {item(place, "status-item status-place", "Game tick")}
-            {item(level, "status-item status-level", "Zoom level")}
-            {item(hover, "status-item status-hover", "Room under the pointer")}
+            {item(place, "inline-flex flex-none items-center gap-2", "Game tick", Some(place_width))}
+            {item(
+                level,
+                "inline-flex flex-none items-center gap-2 min-w-[4.5em] text-fg",
+                "Zoom level",
+                None,
+            )}
+            {item(
+                hover,
+                "inline-flex flex-none items-center gap-2 min-w-[6.5em] text-fg",
+                "Room under the pointer",
+                None,
+            )}
             {progress}
             <StatusLifted />
-            <span class="status-end">
-                {item(frame, "status-item status-frame", "CPU time of the last frame")}
-                {item(backend, "status-item status-backend", "Graphics backend")}
-                <span class="status-item status-platform">
+            <span class="inline-flex items-center gap-5 max-md:gap-3 ml-auto">
+                {item(
+                    frame,
+                    "inline-flex flex-none items-center gap-2 min-w-[7.5em]",
+                    "CPU time of the last frame",
+                    None,
+                )}
+                {item(
+                    backend,
+                    "inline-flex flex-none items-center gap-2 max-xs:hidden",
+                    "Graphics backend",
+                    None,
+                )}
+                <span class="inline-flex flex-none items-center gap-2 max-md:hidden">
                     {move || {
                         if state.platform.with_value(Platform::is_tauri) { "Desktop" } else { "Web" }
                     }}
@@ -230,7 +304,7 @@ mod tests {
     use overseer::ConnectionStatus;
     use overseer_view::Lod;
 
-    use super::{Facts, MapItems, Slot, connection_text, level_name};
+    use super::{Facts, MapItems, Slot, connection_text, level_name, place_width};
 
     #[test]
     fn zoom_levels_are_named_from_the_world_in_to_a_room() {
@@ -317,6 +391,22 @@ mod tests {
         assert_eq!(
             MapItems::of(&sharded).place,
             Slot::Shown("shard3 · tick 1234".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_tick_slot_fits_the_longest_shard_and_a_nine_digit_tick() {
+        // Single world: `tick 123456789`.
+        assert_eq!(place_width(&[], None), "tick 123456789".chars().count());
+        // screeps.com: `shard0 · tick 123456789`, whichever shard is shown.
+        let shards = ["shard0", "shard1", "shard2", "shard3"].map(str::to_owned);
+        let widest = "shard0 · tick 123456789".chars().count();
+        assert_eq!(place_width(&shards, Some("shard2")), widest);
+        assert_eq!(place_width(&shards, None), widest);
+        // A longer name (a season's) widens it; a shown shard counts before the list arrives.
+        assert_eq!(
+            place_width(&[], Some("shardSeason")),
+            "shardSeason · tick 123456789".chars().count()
         );
     }
 

@@ -13,8 +13,17 @@ use crate::ui::console::{ConsolePanel, ConsoleState};
 use crate::ui::objects::Selection;
 use crate::ui::room_panel::{RoomData, RoomPanel};
 use crate::ui::spawn_scoped;
+use crate::ui::style;
 use crate::ui::topbar::ModeSwitch;
 use crate::ui::world::{MapState, Phase, open_world};
+
+/// A window's screen: its head over its content.
+const SCREEN: &str = "relative flex flex-col flex-1 min-h-0";
+/// A window's head: its title and controls.
+const HEAD: &str = "flex flex-none items-center justify-between gap-4 h-11 px-3 bg-panel \
+    border-b border-edge";
+/// A window's title.
+const TITLE: &str = "text-base font-semibold leading-tight";
 
 /// `view` of `server`'s shard `shard` alone.
 #[component]
@@ -90,9 +99,13 @@ fn RoomWindow(
     let user = server.user.as_ref().map(|user| user.id.clone());
     let body = move || match map.phase.get() {
         Phase::Failed(error) => view! {
-            <div class="overlay" role="alert">
-                <p>{format!("The room could not be opened: {error}")}</p>
-                <button type="button" class="primary" on:click=move |_| attempt.update(|n| *n += 1)>
+            <div class=style::OVERLAY role="alert">
+                <p class="max-w-128">{format!("The room could not be opened: {error}")}</p>
+                <button
+                    type="button"
+                    class=style::BUTTON_PRIMARY
+                    on:click=move |_| attempt.update(|n| *n += 1)
+                >
                     "Try again"
                 </button>
             </div>
@@ -104,18 +117,18 @@ fn RoomWindow(
             }
             .into_any(),
             None => view! {
-                <div class="overlay" role="status">
-                    <span class="spinner" aria-hidden="true"></span>
-                    <p>"Opening the room…"</p>
+                <div class=style::OVERLAY role="status">
+                    <span class=style::SPINNER aria-hidden="true"></span>
+                    <p class="max-w-128">"Opening the room…"</p>
                 </div>
             }
             .into_any(),
         },
     };
     view! {
-        <div class="window-screen">
-            <header class="window-head">
-                <h1>{heading}</h1>
+        <div class=SCREEN>
+            <header class=HEAD>
+                <h1 class=TITLE>{heading}</h1>
                 <ModeSwitch />
             </header>
             {body}
@@ -133,9 +146,9 @@ fn ConsoleWindow(
 ) -> impl IntoView {
     let console = ConsoleState::start(&overseer, &server.url, shard.name().map(str::to_owned));
     view! {
-        <div class="window-screen console-window">
-            <header class="window-head">
-                <h1>{heading}</h1>
+        <div class=SCREEN>
+            <header class=HEAD>
+                <h1 class=TITLE>{heading}</h1>
             </header>
             <ConsolePanel state=console />
         </div>

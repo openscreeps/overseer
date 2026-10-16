@@ -2,6 +2,8 @@
 
 use leptos::prelude::*;
 
+use crate::ui::style;
+
 /// A labelled text input bound to `value`. `error` is announced and marks the input invalid;
 /// `status` (live checks) is announced politely.
 #[component]
@@ -42,9 +44,10 @@ pub fn Field(
         ids.join(" ")
     };
     view! {
-        <div class="field">
-            <label for=id>{label}</label>
+        <div class=style::FIELD>
+            <label for=id class=style::LABEL>{label}</label>
             <input
+                class=style::INPUT
                 id=id
                 type=kind
                 autocomplete=autocomplete
@@ -58,11 +61,11 @@ pub fn Field(
                     }
                 }
             />
-            {help.map(|help| view! { <p id=help_id class="help">{help}</p> })}
-            <p id=status_id class="check" aria-live="polite">
+            {help.map(|help| view! { <p id=help_id class=style::HELP>{help}</p> })}
+            <p id=status_id class=style::CHECK aria-live="polite">
                 {move || status.get()}
             </p>
-            <p id=error_id class="error" role="alert">
+            <p id=error_id class=style::FIELD_ERROR role="alert">
                 {move || error.get()}
             </p>
         </div>
@@ -76,7 +79,7 @@ pub fn FormError(
     error: RwSignal<Option<String>>,
 ) -> impl IntoView {
     view! {
-        <p class="error" role="alert">
+        <p class=style::ERROR role="alert">
             {move || error.get()}
         </p>
     }
@@ -89,7 +92,7 @@ pub fn FormStatus(
     message: RwSignal<Option<String>>,
 ) -> impl IntoView {
     view! {
-        <p class="success" role="status">
+        <p class=style::SUCCESS role="status">
             {move || message.get()}
         </p>
     }

@@ -4,6 +4,11 @@
 target = "index.html"
 dist = "dist"
 
+# The styles: Tailwind CSS (`tailwind.css`), built by the standalone CLI that Trunk downloads
+# (no Node.js step). Pinned: a new version may change the generated CSS.
+[tools]
+tailwindcss = "4.3.3"
+
 [watch]
 ignore = ["src-tauri"]
 

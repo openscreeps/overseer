@@ -1,6 +1,7 @@
 //! The top bar: server switcher, shard switcher, breadcrumb, room search, 2D/3D, drawer
 //! toggle and account menu. Its height never changes; world controls show on the world
-//! route only. On narrow windows the labels collapse to their icons (`style.css`).
+//! route only. On narrow windows the labels collapse to their icons and the room search to
+//! its magnifier until focused.
 
 use leptos::html::{Button, Div};
 use leptos::prelude::*;
@@ -15,7 +16,94 @@ use crate::route::{Route, Shard, parse_room};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::rate_limits::RateLimitsUi;
+use crate::ui::style::{self, concatcp};
 use crate::ui::world::MapState;
+
+/// The brand link: logo and name, back to the server list.
+const BRAND: &str = concatcp!(
+    "relative flex flex-none items-center gap-2 h-control px-2 mr-1 font-bold tracking-[0.02em] \
+    text-fg no-underline rounded-md hover:bg-hover ",
+    style::TIP
+);
+/// A 2D/3D button: a segment, narrower than a form's.
+const MODE_SEGMENT: &str = concatcp!(
+    style::BTN,
+    " ",
+    style::BTN_DEFAULT,
+    " min-h-control px-2 relative ",
+    style::SEGMENT_SHAPE,
+    " ",
+    style::TIP
+);
+/// A menu's button: its content, then a caret that turns over while the menu is open.
+const MENU_BUTTON: &str = concatcp!(
+    style::BTN,
+    " ",
+    style::BTN_DEFAULT,
+    " group min-h-control max-w-64 pl-3 pr-2 max-md:pl-2 aria-expanded:bg-panel-3 \
+    aria-expanded:border-edge-strong"
+);
+/// The list of a menu, under its button.
+const MENU_LIST: &str = "absolute top-[calc(100%+0.25rem)] left-0 z-30 min-w-60 p-1 \
+    list-none bg-panel-2 border border-edge rounded-lg shadow-lg origin-top-left animate-pop-in";
+/// The list of a menu at the window's right edge: aligned to its button's right edge.
+const MENU_LIST_END: &str = "absolute top-[calc(100%+0.25rem)] right-0 z-30 min-w-60 p-1 \
+    list-none bg-panel-2 border border-edge rounded-lg shadow-lg origin-top-right animate-pop-in";
+/// An item of a menu: a full-width quiet button (`group`: its main text marks a checked item).
+const MENU_ITEM: &str = "group flex items-center justify-start gap-2 w-full min-h-control px-2 \
+    leading-tight whitespace-nowrap text-left text-fg bg-transparent border border-transparent \
+    rounded-md cursor-pointer transition-colors duration-(--duration-fast) ease-standard \
+    enabled:hover:bg-hover focus-visible:bg-hover focus-visible:outline-offset-[-2px] \
+    disabled:opacity-55 disabled:cursor-default";
+/// The icon of a [`MENU_ITEM`].
+const MENU_ICON: &str = "inline flex-none size-[1.15em] text-muted";
+/// The main text of a [`MENU_ITEM`], accent while the item is checked.
+const ITEM_MAIN: &str = "flex-1 font-medium group-aria-checked:text-accent";
+/// A note after the main text of a [`MENU_ITEM`].
+const ITEM_NOTE: &str = "text-sm text-muted";
+/// A line between groups of menu items.
+const MENU_SEPARATOR: &str = "h-px my-1 bg-edge";
+/// An item of the breadcrumb: a "›" before every item but the first; on narrow windows only
+/// the last item shows.
+const CRUMB_ITEM: &str = "flex items-center min-w-0 not-first:before:content-['›'] \
+    not-first:before:mx-2 not-first:before:text-faint max-md:not-first:before:hidden \
+    max-md:first:not-last:hidden";
+/// The breadcrumb's "World" button.
+const CRUMB_BUTTON: &str = concatcp!(
+    "relative inline-flex items-center justify-center gap-2 min-h-control px-2 font-semibold \
+    leading-tight whitespace-nowrap text-muted bg-transparent border border-transparent \
+    rounded-md cursor-pointer transition-colors duration-(--duration-fast) ease-standard \
+    enabled:hover:text-fg enabled:hover:bg-hover aria-[current=page]:text-fg \
+    aria-[current=page]:cursor-default ",
+    style::TIP
+);
+/// The room search's input. Narrower on narrow windows; on phones only its magnifier shows
+/// until it is focused or holds text.
+const SEARCH_INPUT: &str = "peer w-44 max-lg:w-34 max-md:w-30 max-md:sm:focus:w-36 \
+    max-sm:w-control max-sm:focus:w-32 max-sm:not-placeholder-shown:w-32 min-h-control pl-8 \
+    pr-[1.9rem] max-md:pr-2 max-sm:pr-0 max-sm:focus:pr-2 max-sm:not-placeholder-shown:pr-2 \
+    max-sm:cursor-pointer max-sm:focus:cursor-text max-sm:not-placeholder-shown:cursor-text \
+    text-fg bg-sunken border border-edge rounded-md transition-[border-color,width] \
+    duration-(--duration) ease-standard hover:border-edge-strong focus-visible:outline-offset-0 \
+    focus-visible:border-focus aria-invalid:border-error placeholder:text-faint \
+    max-sm:placeholder:text-transparent max-sm:focus:placeholder:text-faint \
+    [&::-webkit-search-cancel-button]:hidden";
+/// The room search's "/" key hint, gone while the input is focused or holds text.
+const SEARCH_KEY: &str = concatcp!(
+    style::KBD,
+    " absolute top-1/2 right-2 -translate-y-1/2 pointer-events-none transition-opacity \
+    duration-(--duration-fast) ease-standard peer-focus:opacity-0 \
+    peer-not-placeholder-shown:opacity-0 max-md:hidden"
+);
+/// The room search's error, under the input (hidden while empty).
+const SEARCH_ERROR: &str = "absolute top-[calc(100%+0.5rem)] right-0 z-20 w-max max-w-72 px-2 \
+    py-1 text-sm text-error bg-panel-2 border border-error rounded-md shadow-sm empty:hidden";
+/// The drawer toggle.
+const DRAWER_TOGGLE: &str = concatcp!(style::ICON_BUTTON, " relative ", style::TIP_END);
+/// The 2D/3D switch.
+const MODE_SWITCH: &str = concatcp!(style::SEGMENTED, " flex-none");
+/// The shard switcher.
+const SHARD_SELECT: &str = concatcp!(style::INPUT, " flex-none");
 
 /// The top bar.
 #[component]
@@ -23,17 +111,18 @@ pub fn TopBar() -> impl IntoView {
     let page = expect_context::<Memo<super::Page>>();
     let on_world = move || matches!(page.get(), super::Page::World { .. });
     view! {
-        <header class="topbar">
-            <a class="brand" href="#/" aria-label="Overseer: servers" data-tip="Servers">
+        <header class="relative z-30 flex flex-none items-center gap-2 max-md:gap-1 h-topbar \
+            min-w-0 px-3 max-md:px-2 bg-panel border-b border-edge">
+            <a class=BRAND href="#/" aria-label="Overseer: servers" data-tip="Servers">
                 <img src="icon.svg" alt="" width="22" height="22" />
-                <span class="brand-name">"Overseer"</span>
+                <span class="max-lg:hidden">"Overseer"</span>
             </a>
             <ServerSwitcher />
             <Show when=on_world>
                 <ShardSwitcher />
             </Show>
             <Breadcrumb />
-            <span class="spacer"></span>
+            <span class="flex-1 min-w-0"></span>
             <Show when=on_world>
                 <RoomSearch />
                 <ModeSwitch />
@@ -62,18 +151,19 @@ pub fn ModeSwitch() -> impl IntoView {
         view! {
             <button
                 type="button"
+                class=MODE_SEGMENT
                 aria-pressed=move || (map.mode.get() == mode).to_string()
                 aria-label=name
                 data-tip=name
                 on:click=move |_| set(mode)
             >
                 <Icon kind=icon />
-                <span class="button-text">{text}</span>
+                <span class="max-lg:hidden">{text}</span>
             </button>
         }
     };
     view! {
-        <div class="segmented mode-switch" role="group" aria-label="View mode">
+        <div class=MODE_SWITCH role="group" aria-label="View mode">
             {button(ViewMode::TopDown, IconKind::TopDown, "2D", "Top-down view")}
             {button(ViewMode::Perspective, IconKind::Perspective, "3D", "Perspective view")}
         </div>
@@ -91,7 +181,11 @@ fn Menu(
     label: Signal<String>,
     /// The button's content.
     button: ViewFn,
-    /// `li role="none"` items holding `role="menuitem"` (or `menuitemradio`) buttons.
+    /// Opens the list aligned to the button's right edge (a menu at the window's right).
+    #[prop(optional)]
+    end: bool,
+    /// `li role="none"` items holding `role="menuitem"` (or `menuitemradio`) buttons, each
+    /// [`MENU_ITEM`]; `li role="separator"` lines ([`MENU_SEPARATOR`]) between groups.
     children: ChildrenFn,
 ) -> impl IntoView {
     let open = RwSignal::new(false);
@@ -167,11 +261,12 @@ fn Menu(
         _ => {}
     };
     let menu_id = id;
+    let list_class = if end { MENU_LIST_END } else { MENU_LIST };
     view! {
-        <div class="menu" data-menu=menu_id node_ref=root on:keydown=keydown>
+        <div class="relative flex-none min-w-0" data-menu=menu_id node_ref=root on:keydown=keydown>
             <button
                 type="button"
-                class="menu-button"
+                class=MENU_BUTTON
                 node_ref=trigger
                 aria-haspopup="menu"
                 aria-expanded=move || open.get().to_string()
@@ -180,12 +275,15 @@ fn Menu(
                 on:click=move |_| open.update(|open| *open = !*open)
             >
                 {move || button.run()}
-                <span class="caret"><Icon kind=IconKind::ChevronDown /></span>
+                <span class="inline-flex text-muted transition-transform duration-(--duration) \
+                    ease-standard group-aria-expanded:rotate-180">
+                    <Icon kind=IconKind::ChevronDown />
+                </span>
             </button>
             <ul
                 id=menu_id
                 role="menu"
-                class="menu-list"
+                class=list_class
                 hidden=move || !open.get()
                 on:click=move |event| {
                     let item = event
@@ -203,12 +301,14 @@ fn Menu(
     }
 }
 
-/// The CSS class of the status dot of a connection.
+/// The classes of the status dot of a connection.
 pub fn status_class(status: Option<ConnectionStatus>) -> &'static str {
     match status {
-        Some(ConnectionStatus::Connected) => "dot ok",
-        Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. }) => "dot busy",
-        _ => "dot off",
+        Some(ConnectionStatus::Connected) => style::DOT_OK,
+        Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. }) => {
+            style::DOT_BUSY
+        }
+        _ => style::DOT,
     }
 }
 
@@ -235,12 +335,12 @@ fn ServerSwitcher() -> impl IntoView {
         let dot = if live {
             status_class(state.status.get())
         } else {
-            "dot off"
+            style::DOT
         };
         let name = server.map_or_else(|| "Servers".to_owned(), |server| server.name);
         view! {
             <span class=dot aria-hidden="true"></span>
-            <span class="menu-text">{name}</span>
+            <span class="truncate max-md:max-w-28 max-sm:max-w-24 max-xs:max-w-22">{name}</span>
         }
     };
     let label = Signal::derive(move || {
@@ -269,7 +369,7 @@ fn ServerSwitcher() -> impl IntoView {
                 let dot = if live.as_deref() == Some(server.url.as_str()) {
                     status_class(state.status.get())
                 } else {
-                    "dot off"
+                    style::DOT
                 };
                 let checked = (current_url.as_deref() == Some(server.url.as_str())).to_string();
                 let url = server.url.clone();
@@ -277,13 +377,14 @@ fn ServerSwitcher() -> impl IntoView {
                     <li role="none">
                         <button
                             type="button"
+                            class=MENU_ITEM
                             role="menuitemradio"
                             aria-checked=checked
                             on:click=move |_| state.open_server(&url)
                         >
                             <span class=dot aria-hidden="true"></span>
-                            <span class="item-main">{server.name}</span>
-                            <span class="item-note">{account}</span>
+                            <span class=ITEM_MAIN>{server.name}</span>
+                            <span class=ITEM_NOTE>{account}</span>
                         </button>
                     </li>
                 }
@@ -293,11 +394,16 @@ fn ServerSwitcher() -> impl IntoView {
     view! {
         <Menu id="server-menu" label button=ViewFn::from(button)>
             {items}
-            <li role="separator"></li>
+            <li role="separator" class=MENU_SEPARATOR></li>
             <li role="none">
-                <button type="button" role="menuitem" on:click=move |_| state.navigate(Route::Servers)>
-                    <Icon kind=IconKind::Server />
-                    <span class="item-main">"Manage servers…"</span>
+                <button
+                    type="button"
+                    class=MENU_ITEM
+                    role="menuitem"
+                    on:click=move |_| state.navigate(Route::Servers)
+                >
+                    <Icon kind=IconKind::Server class=MENU_ICON />
+                    <span class=ITEM_MAIN>"Manage servers…"</span>
                 </button>
             </li>
         </Menu>
@@ -349,7 +455,7 @@ fn ShardSwitcher() -> impl IntoView {
                 })
                 .collect_view();
             view! {
-                <select class="shard-select" aria-label="Shard" on:change=change>
+                <select class=SHARD_SELECT aria-label="Shard" on:change=change>
                     {options}
                 </select>
             }
@@ -362,7 +468,8 @@ fn ShardSwitcher() -> impl IntoView {
 fn Breadcrumb() -> impl IntoView {
     let state = AppState::expect();
     let map = MapState::expect();
-    move || match state.route.get() {
+    move || {
+        match state.route.get() {
         Route::World { .. } => {
             let world = map
                 .shard
@@ -371,25 +478,27 @@ fn Breadcrumb() -> impl IntoView {
                 .unwrap_or_else(|| "World".to_owned());
             let room = map.room.get();
             view! {
-                <nav class="breadcrumb" aria-label="Breadcrumb">
-                    <ol>
-                        <li>
+                <nav class="flex-initial min-w-0 overflow-hidden" aria-label="Breadcrumb">
+                    <ol class="flex items-center min-w-0">
+                        <li class=CRUMB_ITEM>
                             <button
                                 type="button"
-                                class="crumb"
+                                class=CRUMB_BUTTON
                                 aria-current=room.is_none().then_some("page")
                                 data-tip="Show the whole world"
                                 on:click=move |_| map.show_world()
                             >
                                 <Icon kind=IconKind::Globe />
-                                <span class="crumb-text">{world}</span>
+                                <span class="max-md:hidden">{world}</span>
                             </button>
                         </li>
                         {room
                             .map(|room| {
                                 view! {
-                                    <li aria-current="page">
-                                        <span class="crumb">{room.to_string()}</span>
+                                    <li class=CRUMB_ITEM aria-current="page">
+                                        <span class="font-semibold whitespace-nowrap">
+                                            {room.to_string()}
+                                        </span>
                                     </li>
                                 }
                             })}
@@ -398,9 +507,16 @@ fn Breadcrumb() -> impl IntoView {
             }
             .into_any()
         }
-        Route::Servers => view! { <span class="crumb-title">"Servers"</span> }.into_any(),
-        Route::Profile { .. } => view! { <span class="crumb-title">"Account"</span> }.into_any(),
+        Route::Servers => view! {
+            <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Servers"</span>
+        }
+        .into_any(),
+        Route::Profile { .. } => view! {
+            <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Account"</span>
+        }
+        .into_any(),
         Route::Window { .. } => ().into_any(),
+    }
     }
 }
 
@@ -435,10 +551,13 @@ fn RoomSearch() -> impl IntoView {
         map.focus_map();
     };
     view! {
-        <form class="room-search" role="search" on:submit=submit novalidate>
-            <span class="search-icon"><Icon kind=IconKind::Search /></span>
+        <form class="relative flex flex-none items-center" role="search" on:submit=submit novalidate>
+            <span class="absolute top-1/2 left-2 -translate-y-1/2 flex text-faint pointer-events-none">
+                <Icon kind=IconKind::Search />
+            </span>
             <input
                 id="room-search"
+                class=SEARCH_INPUT
                 type="search"
                 placeholder="Go to room"
                 aria-label="Go to room"
@@ -458,8 +577,8 @@ fn RoomSearch() -> impl IntoView {
                     }
                 }
             />
-            <kbd class="search-key" aria-hidden="true">"/"</kbd>
-            <span id="room-search-error" class="search-error" role="alert">
+            <kbd class=SEARCH_KEY aria-hidden="true">"/"</kbd>
+            <span id="room-search-error" class=SEARCH_ERROR role="alert">
                 {move || error.get()}
             </span>
         </form>
@@ -485,12 +604,11 @@ fn DrawerToggle() -> impl IntoView {
     view! {
         <button
             type="button"
-            class="icon-button"
+            class=DRAWER_TOGGLE
             aria-expanded=move || open().to_string()
             aria-controls="drawer"
             aria-label="Drawer"
             data-tip=tip
-            data-tip-pos="bottom-end"
             on:click=toggle
         >
             <Icon kind=IconKind::Drawer />
@@ -542,45 +660,49 @@ fn AccountMenu() -> impl IntoView {
                 <Menu
                     id="account-menu"
                     label=label
+                    end=true
                     button=ViewFn::from(move || {
                         view! {
                             <Icon kind=IconKind::User />
-                            <span class="menu-text">{button_name.clone()}</span>
+                            <span class="truncate max-md:hidden">{button_name.clone()}</span>
                         }
                     })
                 >
                     <li role="none">
                         <button
                             type="button"
+                            class=MENU_ITEM
                             role="menuitem"
                             on:click={
                                 let slug = slug.clone();
                                 move |_| state.navigate(Route::Profile { server: slug.clone() })
                             }
                         >
-                            <Icon kind=IconKind::User />
-                            <span class="item-main">"Profile"</span>
+                            <Icon kind=IconKind::User class=MENU_ICON />
+                            <span class=ITEM_MAIN>"Profile"</span>
                         </button>
                     </li>
                     <li role="none">
                         <button
                             type="button"
+                            class=MENU_ITEM
                             role="menuitem"
                             on:click=move |_| limits.open.set(true)
                         >
-                            <Icon kind=IconKind::Gauge />
-                            <span class="item-main">"Rate limits"</span>
+                            <Icon kind=IconKind::Gauge class=MENU_ICON />
+                            <span class=ITEM_MAIN>"Rate limits"</span>
                         </button>
                     </li>
-                    <li role="separator"></li>
+                    <li role="separator" class=MENU_SEPARATOR></li>
                     <li role="none">
                         <button
                             type="button"
+                            class=MENU_ITEM
                             role="menuitem"
                             on:click=move |_| spawn_local(async move { state.sign_out().await })
                         >
-                            <Icon kind=IconKind::SignOut />
-                            <span class="item-main">"Sign out"</span>
+                            <Icon kind=IconKind::SignOut class=MENU_ICON />
+                            <span class=ITEM_MAIN>"Sign out"</span>
                         </button>
                     </li>
                 </Menu>

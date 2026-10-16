@@ -1,8 +1,10 @@
 //! Line icons drawn inline (24 × 24 view box, stroked with the current text colour), for icon
 //! buttons and menu items. They are decorative: the button carries the accessible name
-//! (`aria-label`) and the tooltip (`data-tip`, styled in `style.css`).
+//! (`aria-label`) and the tooltip (`data-tip`, `style::TIP`).
 
 use leptos::prelude::*;
+
+use crate::ui::style;
 
 /// The icons of the app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,16 +118,19 @@ impl IconKind {
     }
 }
 
-/// An icon, sized by the font (`1.15em`; `.icon` in `style.css`), hidden from assistive
-/// technology.
+/// An icon, sized by the font (`style::ICON`, 1.15em) unless `class` says otherwise, hidden
+/// from assistive technology.
 #[component]
 pub fn Icon(
     /// Which icon.
     kind: IconKind,
+    /// Its classes: size, colour, motion (`style::ICON` by default).
+    #[prop(default = style::ICON)]
+    class: &'static str,
 ) -> impl IntoView {
     view! {
         <svg
-            class="icon"
+            class=class
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"

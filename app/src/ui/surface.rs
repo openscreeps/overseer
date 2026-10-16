@@ -513,7 +513,7 @@ pub fn SurfaceCanvas(
     view! {
         <canvas
             node_ref=canvas
-            class="surface"
+            class="absolute inset-0 block size-full touch-none bg-sunken focus-visible:outline-offset-[-3px] data-quiet-focus:focus-visible:outline-none"
             data-testid=testid
             tabindex="0"
             aria-label=label
@@ -532,7 +532,7 @@ pub fn SurfaceCanvas(
                 }
             }
         ></canvas>
-        <p id=description_id class="visually-hidden">{description}</p>
+        <p id=description_id class="sr-only">{description}</p>
     }
 }
 

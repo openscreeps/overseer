@@ -31,8 +31,23 @@ use crate::profiles::ServerKind;
 use crate::rate_limits::{self, Actions, CheckSchedule, Warning, Warnings};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::style::{self, concatcp};
 use crate::ui::toast::{ToastKind, Toasts};
 use crate::ui::world::MapState;
+
+/// The head of a floating panel: title, then its close button.
+const PANEL_HEAD: &str = "flex items-center justify-between gap-4 mb-3";
+/// The title of a floating panel, after its icon.
+const PANEL_TITLE: &str = "flex items-center gap-2 text-lg font-semibold leading-tight";
+/// The icon of a [`PANEL_TITLE`].
+const PANEL_TITLE_ICON: &str = "inline flex-none size-[1.15em] text-muted";
+/// A cell of the limits table.
+const LIMITS_CELL: &str = "py-2 pr-3 text-left border-b border-edge";
+/// A column head of the limits table.
+const LIMITS_COLUMN: &str = "py-2 pr-3 text-left border-b border-edge text-xs font-semibold \
+    tracking-[0.04em] uppercase text-muted";
+/// A row head of the limits table (the endpoint).
+const LIMITS_ROW: &str = "py-2 pr-3 text-left border-b border-edge font-normal";
 
 /// What [`RateLimitsUi::follow`] tracks of the live session.
 #[derive(Debug, Default)]
@@ -415,10 +430,10 @@ pub fn StatusReset() -> impl IntoView {
     move || {
         session_actions(state, map, ui).status_reset.then(|| {
             view! {
-                <span class="status-item">
+                <span class="inline-flex flex-none items-center gap-2">
                     <button
                         type="button"
-                        class="link status-action"
+                        class=concatcp!(style::LINK_BUTTON, " text-[length:inherit]")
                         title="Lift the rate limits of your API token on screeps.com"
                         on:click=move |_| start_reset(state, ui)
                     >
@@ -443,7 +458,7 @@ pub fn StatusLifted() -> impl IntoView {
         label.get().map(|(until, label)| {
             view! {
                 <span
-                    class="status-item status-lifted"
+                    class="inline-flex flex-none items-center gap-2 text-ok"
                     title=format!(
                         "Your API token's rate limits are lifted until {}",
                         local_clock(until),
@@ -489,8 +504,8 @@ pub fn RateLimitsPanel() -> impl IntoView {
         });
         if limits.is_empty() {
             return view! {
-                <p class="empty-state">
-                    <Icon kind=IconKind::Check />
+                <p class=style::EMPTY_STATE>
+                    <Icon kind=IconKind::Check class=style::EMPTY_ICON />
                     "No endpoint has reported a rate limit in this session yet."
                 </p>
             }
@@ -504,24 +519,26 @@ pub fn RateLimitsPanel() -> impl IntoView {
                     .map_or_else(|| "already reset".to_owned(), |left| format!("in {left}"));
                 view! {
                     <tr>
-                        <th scope="row">
-                            <code>{format!("{} /{}", endpoint.method, endpoint.path)}</code>
+                        <th scope="row" class=LIMITS_ROW>
+                            <code class="font-mono text-[0.92em]">
+                                {format!("{} /{}", endpoint.method, endpoint.path)}
+                            </code>
                         </th>
-                        <td>{endpoint.limit.limit}</td>
-                        <td>{endpoint.limit.remaining}</td>
-                        <td title=local_time(reset)>{resets}</td>
+                        <td class=LIMITS_CELL>{endpoint.limit.limit}</td>
+                        <td class=LIMITS_CELL>{endpoint.limit.remaining}</td>
+                        <td class=LIMITS_CELL title=local_time(reset)>{resets}</td>
                     </tr>
                 }
             })
             .collect_view();
         view! {
-            <table class="limits">
+            <table class="w-full border-collapse text-sm tabular-nums">
                 <thead>
                     <tr>
-                        <th scope="col">"Endpoint"</th>
-                        <th scope="col">"Limit"</th>
-                        <th scope="col">"Remaining"</th>
-                        <th scope="col">"Resets"</th>
+                        <th scope="col" class=LIMITS_COLUMN>"Endpoint"</th>
+                        <th scope="col" class=LIMITS_COLUMN>"Limit"</th>
+                        <th scope="col" class=LIMITS_COLUMN>"Remaining"</th>
+                        <th scope="col" class=LIMITS_COLUMN>"Resets"</th>
                     </tr>
                 </thead>
                 <tbody>{rows}</tbody>
@@ -533,7 +550,10 @@ pub fn RateLimitsPanel() -> impl IntoView {
         let until = ui.lifted_until()?;
         let left = rate_limits::time_until(until, ui.now.get())?;
         Some(view! {
-            <p class="notice lifted" role="status">
+            <p
+                class="flex items-center gap-2 mb-4 px-3 py-2 bg-ok-soft border-l-3 border-ok rounded-r-sm"
+                role="status"
+            >
                 <Icon kind=IconKind::Check />
                 {format!(
                     "Your API token's rate limits are lifted until {} ({left} left): the map loads without waiting for its budget.",
@@ -549,7 +569,7 @@ pub fn RateLimitsPanel() -> impl IntoView {
         let left = rate_limits::time_until(until, ui.now.get())
             .map_or_else(|| "shortly".to_owned(), |left| format!("in {left}"));
         Some(view! {
-            <p class="notice">
+            <p class=style::NOTICE>
                 {format!(
                     "The map's room owners wait for the map-stats limit; loading resumes {left}."
                 )}
@@ -563,48 +583,47 @@ pub fn RateLimitsPanel() -> impl IntoView {
         let actions = session_actions(state, map, ui);
         let reset = actions.reset.then(|| {
             view! {
-                <p class="help">
+                <p class=style::HELP>
                     "screeps.com lets you lift your API token's limits early: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent, in the page's address; the full token never leaves Overseer."
                     {tauri
                         .then_some(
                             " The page opens in your browser; Overseer checks again when you come back.",
                         )}
                 </p>
-                <button type="button" class="primary" on:click=move |_| start_reset(state, ui)>
+                <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| start_reset(state, ui)>
                     "Reset on screeps.com"
                 </button>
             }
         });
         let check = actions.check_again.then(|| {
             view! {
-                <button type="button" on:click=move |_| ui.lifted(map)>
+                <button type="button" class=style::BUTTON on:click=move |_| ui.lifted(map)>
                     "Check again"
                 </button>
             }
         });
-        view! { <div class="actions">{reset}{check}</div> }
+        view! { <div class=style::ACTIONS>{reset}{check}</div> }
     };
     move || {
         ui.open.get().then(|| {
             view! {
                 <section
-                    class="panel floating rate-limits"
+                    class="fixed top-[calc(var(--spacing-topbar)+0.5rem)] right-3 z-40 w-[min(34rem,calc(100vw-1.5rem))] max-h-[calc(100vh-var(--spacing-topbar)-var(--spacing-statusbar)-2rem)] overflow-auto p-5 bg-panel-2 border border-edge rounded-lg shadow-lg origin-top-right animate-pop-in"
                     role="dialog"
                     aria-labelledby="rate-limits-title"
                     on:keydown=keydown
                 >
-                    <div class="panel-head">
-                        <h2 id="rate-limits-title">
-                            <Icon kind=IconKind::Gauge />
+                    <div class=PANEL_HEAD>
+                        <h2 id="rate-limits-title" class=PANEL_TITLE>
+                            <Icon kind=IconKind::Gauge class=PANEL_TITLE_ICON />
                             "Rate limits"
                         </h2>
                         <button
                             type="button"
-                            class="icon-button sm ghost"
+                            class=concatcp!(style::ICON_BUTTON_GHOST_SM, " relative ", style::TIP_LEFT)
                             node_ref=close
                             aria-label="Close rate limits"
                             data-tip="Close"
-                            data-tip-pos="left"
                             on:click=move |_| ui.open.set(false)
                         >
                             <Icon kind=IconKind::Close />
@@ -676,7 +695,7 @@ pub fn LiftPrompt() -> impl IntoView {
         let text = move || warning.text(ui.now.get());
         Some(view! {
             <section
-                class="panel floating lift-prompt"
+                class="fixed bottom-[calc(var(--spacing-statusbar)+1rem)] right-3 z-61 w-[min(26rem,calc(100vw-1.5rem))] max-h-[calc(100vh-var(--spacing-topbar)-var(--spacing-statusbar)-2rem)] overflow-auto p-5 bg-panel-2 border border-l-3 border-edge border-l-warn rounded-lg shadow-lg origin-bottom-right animate-pop-in"
                 role="dialog"
                 aria-labelledby="lift-prompt-title"
                 aria-describedby="lift-prompt-text"
@@ -684,21 +703,21 @@ pub fn LiftPrompt() -> impl IntoView {
                 on:keydown=keydown
                 on:focusin=focusin
             >
-                <div class="panel-head">
-                    <h2 id="lift-prompt-title">
-                        <Icon kind=IconKind::Gauge />
+                <div class=PANEL_HEAD>
+                    <h2 id="lift-prompt-title" class=PANEL_TITLE>
+                        <Icon kind=IconKind::Gauge class=PANEL_TITLE_ICON />
                         "Rate limit running low"
                     </h2>
                 </div>
-                <p id="lift-prompt-text" title=local_time(reset)>{text}</p>
-                <p class="help">
+                <p id="lift-prompt-text" class="mb-3" title=local_time(reset)>{text}</p>
+                <p class=concatcp!(style::HELP, " mb-3")>
                     "screeps.com can lift your API token's rate limits for 2 hours: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent."
                 </p>
-                <div class="actions">
-                    <button type="button" class="primary" on:click=move |_| lift()>
+                <div class=style::ACTIONS>
+                    <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| lift()>
                         "Lift limits for 2 hours"
                     </button>
-                    <button type="button" on:click=move |_| not_now()>
+                    <button type="button" class=style::BUTTON on:click=move |_| not_now()>
                         "Not now"
                     </button>
                 </div>

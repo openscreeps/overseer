@@ -16,6 +16,18 @@ use overseer::map::{PortalDestination, RoomCoord};
 
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, Inspector, kind_key, kind_label, title};
+use crate::ui::style;
+use crate::ui::style::concatcp;
+
+/// The input of a filter field over a list (the objects, the console), the filter icon
+/// ([`FILTER_ICON`]) inside its start.
+pub const FILTER_INPUT: &str = "w-full min-h-control-sm pl-[calc(1rem+1.15em)] pr-3 text-sm \
+    text-fg bg-sunken border border-edge rounded-md transition-[border-color] \
+    duration-(--duration-fast) ease-standard hover:border-edge-strong \
+    focus-visible:outline-offset-0 focus-visible:border-focus placeholder:text-faint";
+/// The icon of a filter field, over the start of its input ([`FILTER_INPUT`]).
+pub const FILTER_ICON: &str =
+    "absolute left-2 flex-none size-[1.15em] text-faint pointer-events-none";
 
 /// Kinds in list order; others follow alphabetically.
 const KIND_ORDER: [&str; 31] = [
@@ -402,27 +414,28 @@ pub fn ObjectsPanel(
             }
             Some(_) => None,
         });
-        message.map(|(text, role)| view! { <p class="empty-state" role=role>{text}</p> })
+        message.map(|(text, role)| view! { <p class=style::EMPTY_STATE role=role>{text}</p> })
     };
     let on_pick = Callback::new(move |(id, x, y): (String, u8, u8)| pick(id, x, y));
     view! {
-        <div class="objects-panel">
-            <div class="objects-bar">
-                <label class="filter">
-                    <Icon kind=IconKind::Filter />
+        <div class="flex flex-col flex-1 min-h-0">
+            <div class="flex items-center gap-2 flex-none px-3 py-2 border-b border-edge">
+                <label class="relative flex items-center flex-1 min-w-24 font-normal">
+                    <Icon kind=IconKind::Filter class=FILTER_ICON />
                     <input
                         type="search"
+                        class=FILTER_INPUT
                         placeholder="Filter objects"
                         aria-label="Filter objects"
                         prop:value=move || filter.get()
                         on:input=move |event| filter.set(event_target_value(&event))
                     />
                 </label>
-                <span class="count" title="Objects in the room">
+                <span class=style::COUNT title="Objects in the room">
                     {move || total().map(|total| total.to_string()).unwrap_or_default()}
                 </span>
             </div>
-            <nav class="objects-list" aria-label="Objects">
+            <nav class="flex-[1_1_45%] min-h-24 overflow-auto py-1" aria-label="Objects">
                 {empty}
                 // Groups keyed by kind and rows by object id, updated in place: a walking creep
                 // must not rebuild its row every tick (a click or the focus on it would be lost).
@@ -502,18 +515,30 @@ fn GroupView(
         })
     };
     view! {
-        <section class="object-group">
+        <section>
             <h3>
                 <button
                     type="button"
-                    class="group-head"
+                    class="group flex items-center justify-start gap-2 w-full min-h-control-sm px-3 \
+                        text-xs font-semibold tracking-[0.04em] uppercase leading-tight \
+                        whitespace-nowrap text-muted bg-transparent cursor-pointer \
+                        transition-colors duration-(--duration-fast) ease-standard \
+                        hover:text-fg hover:bg-hover"
                     aria-expanded=move || open().to_string()
                     aria-controls=list_id.clone()
                     on:click=toggle
                 >
-                    <span class="chevron" aria-hidden="true"><Icon kind=IconKind::ChevronDown /></span>
-                    <span class="group-label">{label}</span>
-                    <span class="count">{count}</span>
+                    <span
+                        class="inline-flex transition-transform duration-(--duration-fast) \
+                            ease-standard group-aria-[expanded=false]:-rotate-90"
+                        aria-hidden="true"
+                    >
+                        <Icon kind=IconKind::ChevronDown />
+                    </span>
+                    <span>{label}</span>
+                    <span class=concatcp!(style::COUNT, " ml-auto normal-case tracking-normal")>
+                        {count}
+                    </span>
                 </button>
             </h3>
             <ul id=list_id hidden=move || !open()>
@@ -544,14 +569,17 @@ fn ObjectRow(
     let current = move || {
         id.with_value(|id| selected.with(|selected| selected.as_deref() == Some(id.as_str())))
     };
-    let own = move || entry.with(|entry| entry.as_ref().is_some_and(|entry| entry.own));
-    // The user's own objects are marked by colour; others name their owner.
+    // The user's own objects name no owner; others name theirs.
     let owner = move || {
         let owner = entry.with(|entry| {
             let other = entry.as_ref().filter(|entry| !entry.own);
             other.and_then(|entry| entry.owner.clone())
         });
-        owner.map(|owner| view! { <span class="owner">{owner}</span> })
+        owner.map(|owner| {
+            view! {
+                <span class="min-w-0 overflow-hidden text-ellipsis text-sm text-muted">{owner}</span>
+            }
+        })
     };
     // Where the object is now, not where it was when the row was drawn.
     let pick = move |_| {
@@ -564,15 +592,23 @@ fn ObjectRow(
         <li>
             <button
                 type="button"
-                class="object-row"
-                class:own=own
+                class="flex items-center justify-start gap-2 w-full min-h-[1.9rem] \
+                    pl-[calc(1.5rem+1.15em)] pr-3 font-normal leading-tight whitespace-nowrap \
+                    text-fg bg-transparent cursor-pointer transition-colors \
+                    duration-(--duration-fast) ease-standard hover:bg-hover \
+                    aria-[current=true]:bg-accent-soft \
+                    aria-[current=true]:shadow-[inset_2px_0_0_var(--color-accent)]"
                 aria-current=move || current().then_some("true")
                 aria-label=text(|entry| format!("{} at {},{}", entry.title, entry.x, entry.y))
                 on:click=pick
             >
-                <span class="name">{text(|entry| entry.title.clone())}</span>
+                <span class="min-w-0 overflow-hidden text-ellipsis">
+                    {text(|entry| entry.title.clone())}
+                </span>
                 {owner}
-                <span class="pos">{text(|entry| format!("{},{}", entry.x, entry.y))}</span>
+                <span class="ml-auto font-mono text-xs tabular-nums text-faint">
+                    {text(|entry| format!("{},{}", entry.x, entry.y))}
+                </span>
             </button>
         </li>
     }

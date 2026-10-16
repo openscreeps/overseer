@@ -14,7 +14,9 @@ use crate::session::{self, Failure};
 use crate::state::{AppState, Screen, Start};
 use crate::ui::form::{Field, FormError};
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::sign_in::{CARD_FORM, CARD_LEAD, CARD_SUBMIT};
 use crate::ui::spawn_scoped;
+use crate::ui::style;
 
 /// Pause after typing before a value is checked with the server.
 const CHECK_DELAY: Duration = Duration::from_millis(400);
@@ -219,17 +221,18 @@ pub fn Register(
     let sign_in_url = server;
     let shown_url = sign_in_url.clone();
     view! {
-        <section class="panel narrow card" aria-labelledby="register-title">
-            <header class="card-head">
+        <section class=style::CARD aria-labelledby="register-title">
+            <header class=style::CARD_HEAD>
                 <img src="icon.svg" alt="" width="40" height="40" />
                 <div>
-                    <h1 id="register-title">{format!("Register on {name}")}</h1>
-                    <p class="muted">{shown_url}</p>
+                    <h1 id="register-title" class=style::CARD_TITLE>{format!("Register on {name}")}</h1>
+                    <p class=CARD_LEAD>{shown_url}</p>
                 </div>
             </header>
-            <div class="segmented tabs" role="group" aria-label="Account">
+            <div class=style::SEGMENTED_TABS role="group" aria-label="Account">
                 <button
                     type="button"
+                    class=style::TAB_SEGMENT
                     aria-pressed="false"
                     on:click=move |_| {
                         state
@@ -242,9 +245,9 @@ pub fn Register(
                 >
                     "Sign in"
                 </button>
-                <button type="button" aria-pressed="true">"Register"</button>
+                <button type="button" class=style::TAB_SEGMENT aria-pressed="true">"Register"</button>
             </div>
-            <form on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
+            <form class=CARD_FORM on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
                 <Field
                     id="register-username"
                     label="Username"
@@ -281,11 +284,15 @@ pub fn Register(
                     error=confirm_message
                 />
                 <FormError error />
-                <button type="submit" class="primary" disabled=move || busy.get()>
+                <button type="submit" class=CARD_SUBMIT disabled=move || busy.get()>
                     {move || if busy.get() { "Registering…" } else { "Register" }}
                 </button>
             </form>
-            <button type="button" class="link back" on:click=move |_| state.navigate(Route::Servers)>
+            <button
+                type="button"
+                class=style::BACK_BUTTON
+                on:click=move |_| state.navigate(Route::Servers)
+            >
                 <Icon kind=IconKind::ArrowLeft />
                 "Choose another server"
             </button>
@@ -371,13 +378,13 @@ pub fn SetUsername() -> impl IntoView {
         });
     };
     view! {
-        <section class="panel narrow card" aria-labelledby="username-title">
-            <header class="card-head">
+        <section class=style::CARD aria-labelledby="username-title">
+            <header class=style::CARD_HEAD>
                 <img src="icon.svg" alt="" width="40" height="40" />
-                <h1 id="username-title">"Choose your username"</h1>
+                <h1 id="username-title" class=style::CARD_TITLE>"Choose your username"</h1>
             </header>
-            <p class="lead">"Your account has no username yet. Choose one to start playing; it cannot be changed later."</p>
-            <form on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
+            <p class="mb-3 text-muted">"Your account has no username yet. Choose one to start playing; it cannot be changed later."</p>
+            <form class=CARD_FORM on:submit=submit novalidate aria-busy=move || busy.get().to_string()>
                 <Field
                     id="set-username"
                     label="Username"
@@ -396,7 +403,7 @@ pub fn SetUsername() -> impl IntoView {
                     error=email_message
                 />
                 <FormError error />
-                <button type="submit" class="primary" disabled=move || busy.get()>
+                <button type="submit" class=CARD_SUBMIT disabled=move || busy.get()>
                     "Save username"
                 </button>
             </form>

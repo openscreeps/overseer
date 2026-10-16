@@ -1,0 +1,210 @@
+/*
+ * The app's only stylesheet: Tailwind v4 (built by Trunk, `rel="tailwind-css"` in index.html,
+ * CLI version pinned in Trunk.toml). Components style themselves with utility classes in their
+ * `view!`s (`app/src/ui/**`; shared class sets in `app/src/ui/style.rs`); this file holds the
+ * design tokens and the few rules utilities cannot express.
+ *
+ * Class strings must stay literal in the Rust sources (Tailwind scans `src/` for them): never build
+ * a class name with `format!`.
+ */
+
+@import "tailwindcss" source(none);
+@source "./src";
+@source "./index.html";
+
+/*
+ * Design tokens. Every colour, size, radius, type size and duration in the app comes from here.
+ * Tailwind's default palette, type scale, radii, shadows and breakpoints are dropped so nothing
+ * else creeps in. Spacing keeps Tailwind's 0.25rem step (the rem is 15 px: `text-[15px]` on
+ * `<html>`): `p-1` … `p-8` are the app's spacing scale.
+ *
+ * Layers (z-index, plain utilities): map controls `z-5`, overlays `z-10`, popovers and tooltips
+ * `z-20`, menus and the top bar `z-30`, floating panels `z-40`, dialogs `z-50`, toasts `z-60`, the
+ * rate-limit prompt `z-61`.
+ */
+@theme {
+  /* Colours: surfaces from back to front, then text, accents and states. */
+  --color-*: initial;
+  --color-bg: #15171c;
+  --color-sunken: #0b0d11;
+  --color-panel: #1f2229;
+  --color-panel-2: #272b34;
+  --color-panel-3: #30353f;
+  --color-edge: #353a45;
+  --color-edge-strong: #4a505d;
+  --color-fg: #e3e6eb;
+  --color-muted: #9aa1ad;
+  --color-faint: #6b7280;
+  --color-accent: #ffe56d;
+  --color-accent-hover: #fff09e;
+  --color-accent-fg: #1c1f26;
+  --color-accent-soft: rgb(255 229 109 / 14%);
+  --color-focus: #7cc4ff;
+  --color-link-hover: #a8d8ff;
+  --color-info: #7cc4ff;
+  --color-ok: #6fdc8c;
+  --color-warn: #ffb35c;
+  --color-error: #ff8a80;
+  --color-info-soft: rgb(124 196 255 / 12%);
+  --color-ok-soft: rgb(111 220 140 / 12%);
+  --color-warn-soft: rgb(255 179 92 / 12%);
+  --color-error-soft: rgb(255 138 128 / 12%);
+  --color-hover: rgb(255 255 255 / 6%);
+  --color-scrim: rgb(11 13 17 / 70%);
+  --color-scrollbar: #3d4350;
+  --color-glow: #1d2230;
+
+  /* Data colours: resources and body parts, as the game draws them. */
+  --color-res-energy: #ffe56d;
+  --color-res-power: #f41f33;
+  --color-res-ops: #ff7b7b;
+  --color-res-u: #48c5e5;
+  --color-res-l: #24d490;
+  --color-res-k: #9370ff;
+  --color-res-z: #fdd388;
+  --color-res-g: #ffffff;
+  --color-res-x: #ff7a7a;
+  --color-res-ho: #cccccc;
+  --color-part-move: #a9b7c6;
+  --color-part-work: #ffe56d;
+  --color-part-carry: #777777;
+  --color-part-attack: #f93842;
+  --color-part-ranged-attack: #5d80b2;
+  --color-part-heal: #65fd62;
+  --color-part-claim: #b99cfb;
+  --color-part-tough: #ffffff;
+
+  /* Typography. */
+  --font-*: initial;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  --text-*: initial;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8667rem;
+  --text-base: 1rem;
+  --text-lg: 1.1333rem;
+  --text-xl: 1.4667rem;
+  --leading-*: initial;
+  --leading-tight: 1.2;
+  --leading-normal: 1.45;
+
+  /* Control and bar heights (`h-control`, `min-h-control-sm`, `w-control`, …). */
+  --spacing-control: 2.1333rem;
+  --spacing-control-sm: 1.7333rem;
+  --spacing-topbar: 3.2rem;
+  --spacing-statusbar: 1.8667rem;
+
+  /* Radii. */
+  --radius-*: initial;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* Shadows. */
+  --shadow-*: initial;
+  --shadow-sm: 0 2px 8px rgb(0 0 0 / 30%);
+  --shadow-lg: 0 8px 24px rgb(0 0 0 / 45%);
+  --shadow-card: 0 12px 32px rgb(0 0 0 / 35%);
+
+  /* Breakpoints, used as `max-*:` (narrower than): phone, phone/tablet, narrow, compact. */
+  --breakpoint-*: initial;
+  --breakpoint-xs: 521px;
+  --breakpoint-sm: 641px;
+  --breakpoint-md: 761px;
+  --breakpoint-lg: 1001px;
+
+  /* Motion. */
+  --ease-*: initial;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --animate-*: initial;
+  --animate-spin: spin 0.9s linear infinite;
+  --animate-spin-slow: spin 3s linear infinite;
+  --animate-shimmer: shimmer 1.4s ease-in-out infinite;
+  --animate-pop-in: pop-in var(--duration) var(--ease-standard);
+  --animate-fade-in: fade-in var(--duration-slow) var(--ease-standard);
+  --animate-fade-in-fast: fade-in var(--duration) var(--ease-standard);
+  --animate-toast-in: toast-in var(--duration-slow) var(--ease-standard);
+  --animate-dialog-in: dialog-in var(--duration-slow) var(--ease-standard);
+  --animate-drawer-in: drawer-in var(--duration) var(--ease-standard);
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes shimmer {
+    from {
+      background-position: 100% 0;
+    }
+
+    to {
+      background-position: -100% 0;
+    }
+  }
+
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.98);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+  }
+
+  @keyframes dialog-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+  }
+
+  @keyframes drawer-in {
+    from {
+      opacity: 0;
+      transform: translateX(1rem);
+    }
+  }
+}
+
+/*
+ * Durations, used as `duration-(--duration-fast)` and by the animations above. Always emitted
+ * (`static`): `<html>` sets them to 0 ms under `prefers-reduced-motion` (`motion-reduce:`).
+ */
+@theme static {
+  --duration-fast: 120ms;
+  --duration: 180ms;
+  --duration-slow: 260ms;
+}
+
+@layer base {
+  /* Every scroll container, also those the browser makes (a `<select>`'s list): no class can
+     reach them all. */
+  * {
+    scrollbar-width: thin;
+  }
+
+  /* Keyboard focus only, on every focusable element (links, buttons, canvases, the browser's own
+     controls): pointer focus draws no ring. A component may move the ring (`outline-offset-*`) or
+     drop it (`focus-visible:outline-none`). */
+  :focus {
+    outline: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+}

@@ -19,6 +19,7 @@ mod room_panel;
 mod servers;
 mod sign_in;
 mod status_bar;
+mod style;
 mod surface;
 mod toast;
 mod topbar;
@@ -34,8 +35,23 @@ use crate::route::{Route, Shard, WindowView};
 use crate::state::{AppState, Screen};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::status_bar::StatusBar;
+use crate::ui::style::concatcp;
 use crate::ui::toast::{ToastRegion, Toasts};
 use crate::ui::world::MapState;
+
+/// The main area of a page shown over the backdrop.
+const MAIN: &str = "flex-1 min-h-0 flex flex-col gap-4 px-5 py-6 max-md:px-3 max-md:py-4 \
+    overflow-auto bg-[radial-gradient(circle_at_30%_20%,var(--color-glow)_0,var(--color-bg)_60%)]";
+/// The main area of the world or a popped-out window: the page fills it.
+const MAIN_FULL: &str = "flex-1 min-h-0 flex flex-col gap-4 p-0 overflow-hidden bg-bg";
+/// A whole-page state in a narrow panel.
+const STATE_PANEL: &str = concatcp!(style::PANEL_NARROW, " ", style::STATE_CARD);
+/// A progress message: a [`STATE_PANEL`] lower on the page.
+const STARTING: &str = concatcp!(STATE_PANEL, " mt-16");
+/// The buttons of a [`STATE_PANEL`], centred.
+const STATE_ACTIONS: &str = concatcp!(style::ACTIONS, " justify-center");
+/// The banner's dismiss button.
+const BANNER_DISMISS: &str = concatcp!(style::ICON_BUTTON_GHOST_SM, " relative ", style::TIP_LEFT);
 
 /// What the main area shows; changes of the room alone keep the page.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,12 +109,20 @@ pub fn App(
         match page.get() {
         Page::Servers => view! { <servers::Servers /> }.into_any(),
         Page::UnknownServer(slug) => view! {
-            <section class="panel narrow state-card" role="alert">
-                <span class="state-icon warn"><Icon kind=IconKind::Alert /></span>
-                <h1>"Unknown server"</h1>
-                <p>{format!("No saved server is called “{slug}” here. Add it, then open the link again.")}</p>
-                <div class="actions">
-                    <button type="button" class="primary" on:click=move |_| state.navigate(Route::Servers)>
+            <section class=STATE_PANEL role="alert">
+                <span class=style::STATE_ICON_WARN>
+                    <Icon kind=IconKind::Alert class=style::STATE_ICON_SVG />
+                </span>
+                <h1 class=style::STATE_TITLE>"Unknown server"</h1>
+                <p class=style::STATE_TEXT>
+                    {format!("No saved server is called “{slug}” here. Add it, then open the link again.")}
+                </p>
+                <div class=STATE_ACTIONS>
+                    <button
+                        type="button"
+                        class=style::BUTTON_PRIMARY
+                        on:click=move |_| state.navigate(Route::Servers)
+                    >
                         "Servers"
                     </button>
                 </div>
@@ -106,12 +130,18 @@ pub fn App(
         }
         .into_any(),
         Page::UnknownShard(message) => view! {
-            <section class="panel narrow state-card" role="alert">
-                <span class="state-icon warn"><Icon kind=IconKind::Alert /></span>
-                <h1>"Unknown shard"</h1>
-                <p>{message}</p>
-                <div class="actions">
-                    <button type="button" class="primary" on:click=move |_| open_default_world(state)>
+            <section class=STATE_PANEL role="alert">
+                <span class=style::STATE_ICON_WARN>
+                    <Icon kind=IconKind::Alert class=style::STATE_ICON_SVG />
+                </span>
+                <h1 class=style::STATE_TITLE>"Unknown shard"</h1>
+                <p class=style::STATE_TEXT>{message}</p>
+                <div class=STATE_ACTIONS>
+                    <button
+                        type="button"
+                        class=style::BUTTON_PRIMARY
+                        on:click=move |_| open_default_world(state)
+                    >
                         "Open the default shard"
                     </button>
                 </div>
@@ -146,7 +176,7 @@ pub fn App(
     if state.is_popout() {
         return view! {
             <Banner />
-            <main id="main" class="popout">{content}</main>
+            <main id="main" class=MAIN_FULL>{content}</main>
             <ToastRegion />
             <StatusBar />
         }
@@ -155,7 +185,7 @@ pub fn App(
     view! {
         <topbar::TopBar />
         <Banner />
-        <main id="main" class:map-page=world_page>{content}</main>
+        <main id="main" class=move || if world_page() { MAIN_FULL } else { MAIN }>{content}</main>
         <rate_limits::RateLimitsPanel />
         <rate_limits::LiftPrompt />
         <ToastRegion />
@@ -356,10 +386,14 @@ fn session_page(state: AppState, screen: Screen) -> AnyView {
     match screen {
         Screen::Starting(text) => starting(text),
         Screen::SignIn { .. } | Screen::Register { .. } if state.is_popout() => view! {
-            <section class="panel narrow state-card" role="alert">
-                <span class="state-icon"><Icon kind=IconKind::User /></span>
-                <h1>"Signed out"</h1>
-                <p>"Sign in in Overseer's main window, then pop the window out again."</p>
+            <section class=STATE_PANEL role="alert">
+                <span class=style::STATE_ICON>
+                    <Icon kind=IconKind::User class=style::STATE_ICON_SVG />
+                </span>
+                <h1 class=style::STATE_TITLE>"Signed out"</h1>
+                <p class=style::STATE_TEXT>
+                    "Sign in in Overseer's main window, then pop the window out again."
+                </p>
             </section>
         }
         .into_any(),
@@ -369,16 +403,22 @@ fn session_page(state: AppState, screen: Screen) -> AnyView {
         Screen::Register { server } => view! { <register::Register server /> }.into_any(),
         Screen::SetUsername => view! { <register::SetUsername /> }.into_any(),
         Screen::Failed { message, .. } => view! {
-            <section class="panel narrow state-card" role="alert">
-                <span class="state-icon error"><Icon kind=IconKind::Alert /></span>
-                <h1>"Cannot connect"</h1>
-                <p>{message}</p>
-                <div class="actions">
-                    <button type="button" class="primary" on:click=move |_| state.retry()>
+            <section class=STATE_PANEL role="alert">
+                <span class=style::STATE_ICON_ERROR>
+                    <Icon kind=IconKind::Alert class=style::STATE_ICON_SVG />
+                </span>
+                <h1 class=style::STATE_TITLE>"Cannot connect"</h1>
+                <p class=style::STATE_TEXT>{message}</p>
+                <div class=STATE_ACTIONS>
+                    <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| state.retry()>
                         <Icon kind=IconKind::Refresh />
                         "Try again"
                     </button>
-                    <button type="button" on:click=move |_| state.navigate(Route::Servers)>
+                    <button
+                        type="button"
+                        class=style::BUTTON
+                        on:click=move |_| state.navigate(Route::Servers)
+                    >
                         "Servers"
                     </button>
                 </div>
@@ -392,9 +432,9 @@ fn session_page(state: AppState, screen: Screen) -> AnyView {
 /// A centred progress message.
 fn starting(text: String) -> AnyView {
     view! {
-        <section class="panel narrow state-card starting" role="status">
-            <span class="spinner" aria-hidden="true"></span>
-            <p>{text}</p>
+        <section class=STARTING role="status">
+            <span class=style::SPINNER aria-hidden="true"></span>
+            <p class=style::STATE_TEXT>{text}</p>
         </section>
     }
     .into_any()
@@ -407,15 +447,18 @@ fn Banner() -> impl IntoView {
     move || {
         state.banner.get().map(|message| {
             view! {
-                <div class="banner" role="alert">
-                    <Icon kind=IconKind::Alert />
-                    <span class="banner-text">{message}</span>
+                <div
+                    class="flex flex-none items-center gap-3 py-1 pr-2 pl-4 text-fg bg-warn-soft \
+                        border-b border-warn/45"
+                    role="alert"
+                >
+                    <Icon kind=IconKind::Alert class="inline flex-none size-[1.15em] text-warn" />
+                    <span class="flex-1 min-w-0">{message}</span>
                     <button
                         type="button"
-                        class="icon-button sm ghost"
+                        class=BANNER_DISMISS
                         aria-label="Dismiss message"
                         data-tip="Dismiss"
-                        data-tip-pos="left"
                         on:click=move |_| state.banner.set(None)
                     >
                         <Icon kind=IconKind::Close />
