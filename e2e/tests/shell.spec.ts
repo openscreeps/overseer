@@ -52,11 +52,9 @@ test.describe('shell', () => {
     await expect(bar.getByTitle('Graphics backend')).toHaveCount(0);
   });
 
-  test('status items appear once known and never shift each other', async ({
-    page,
-    server,
-    player,
-  }) => {
+  test('status items appear once known and never shift each other', {
+    tag: '@openscreeps',
+  }, async ({ page, server, player }) => {
     await recordStatusBar(page);
     await signIn(page, server, player);
     const bar = status(page);
@@ -81,7 +79,7 @@ test.describe('shell', () => {
     expect(lefts).toHaveLength(1);
   });
 
-  test.describe('in a narrow window', () => {
+  test.describe('in a narrow window', { tag: '@openscreeps' }, () => {
     test.use({ viewport: { width: 560, height: 800 } });
 
     test('the top bar keeps every control on one row', async ({ page, server, player }) => {

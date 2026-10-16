@@ -169,7 +169,7 @@ async function expectLiveRoom(page: Page, slug: string, room: string) {
   });
 }
 
-test.describe('world', () => {
+test.describe('world', { tag: '@openscreeps' }, () => {
   test('zooms from the whole world into a live room without clicks', async ({
     signedInPage: page,
     server,

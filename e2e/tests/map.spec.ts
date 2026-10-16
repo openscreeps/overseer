@@ -7,7 +7,7 @@
 // world (both are rooms the map scans for portals).
 
 import type { Page } from "@playwright/test";
-import { api, expect, test, type Server } from "./fixtures";
+import { adminOf, api, expect, test, type Server } from "./fixtures";
 
 /** The status bar. */
 const status = (page: Page) =>
@@ -50,7 +50,7 @@ async function ensurePortals(server: Server): Promise<void> {
   const reply = await fetch(new URL("admin", server.url), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${server.adminToken}`,
+      Authorization: `Bearer ${adminOf(server).token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -121,7 +121,7 @@ async function hoverTile(page: Page, room: string, x: number, y: number) {
   await page.mouse.move(settled.at.left, settled.at.top, { steps: 3 });
 }
 
-test.describe("map", () => {
+test.describe("map", { tag: "@openscreeps" }, () => {
   test("names the hovered room in a tooltip and the status bar", async ({
     signedInPage: page,
     server,

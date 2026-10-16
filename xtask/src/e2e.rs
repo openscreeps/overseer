@@ -1,25 +1,35 @@
-//! `cargo xtask e2e`: the live feature tests and the UI end-to-end tests against a disposable
-//! world of `openscreeps/server`.
+//! `cargo xtask e2e`: the live feature tests and the UI end-to-end tests, against a disposable
+//! `openscreeps/server` world in Docker (target `openscreeps`, the default) or, opt-in and read-only,
+//! against screeps.com (`--target official`). Neither runs under `cargo test`: the live tests
+//! are `#[ignore]`d there and Playwright runs only from here.
 //!
-//! 1. Finds the server checkout (`OPENSCREEPS_SERVER_DIR`, else `../server`; `npm ci` when it
-//!    has no `node_modules`).
-//! 2. Builds what the selected suites need before any world exists: the web app
-//!    (`trunk build --release` of `app/` into `target/e2e/dist/`, its own bundle: `app/dist/`
+//! 1. Prepares what the selected suites need before any world exists: the server image
+//!    (`openscreeps`; see [`world`]) or the API token (`official`; see [`official`]); the web
+//!    app (`trunk build --release` of `app/` into `target/e2e/dist/`, its own bundle: `app/dist/`
 //!    is the development build `trunk serve` rewrites on every change; skipped with
 //!    `--no-build`), the `overseer-proxy` binary (copied to `target/e2e/`) and the live test
 //!    targets; installs the Playwright project (`npm ci` in `e2e/` when needed,
 //!    `npx playwright install chromium`).
-//! 3. For each suite, creates a fresh world in a temporary directory (`init --username e2e`),
-//!    starts it on a free port with fast ticks and waits until `GET /api/version` answers.
-//!    Players and their bots slow a world down as they add up, so the suites do not share one.
-//! 4. Runs the live Rust tests (`cargo test --workspace --test live -- --ignored`), then
-//!    Playwright (`npx playwright test`, extra arguments after `--` are passed on), each with
-//!    its world's environment (see [`apply_environment`]).
-//! 5. Always stops the server and deletes the temporary directory: on success, on failure, on
-//!    panic and on Ctrl-C. The servers' output is kept in `target/e2e/server-live.log` and
-//!    `target/e2e/server-ui.log`, the test proxy's in `target/e2e/proxy.log`.
+//! 2. `openscreeps`: for each suite, creates a fresh world in a new Docker volume
+//!    (`init --username e2e`), starts it on a free loopback port with fast ticks and waits until
+//!    `GET /api/version` answers. Players and their bots slow a world down as they add up, so
+//!    the suites do not share one.
+//! 3. Runs the live Rust tests (`cargo test --workspace --test live -- --ignored`; on
+//!    `official` only their read-only subset, the `read_only::` modules), then Playwright
+//!    (`npx playwright test`, extra arguments after `--` are passed on), each with the target's
+//!    environment (see [`common_environment`], [`world_environment`] and
+//!    [`official_environment`]). On `official`, Playwright runs the `proxy` project only, leaves
+//!    out the `@openscreeps` tests and fails any test that sends a request that may change the
+//!    account (see `e2e/playwright.config.ts` and `e2e/tests/fixtures`); the summary counts the
+//!    requests the proxy forwarded to screeps.com.
+//! 4. Always removes the world's container and volume: on success, on failure, on panic and on
+//!    Ctrl-C. The servers' output is kept in `target/e2e/server-live.log` and
+//!    `target/e2e/server-ui.log`, the test proxy's in `target/e2e/proxy.log`
+//!    (`proxy-official.log` on `official`).
 //!
-//! `--rust-only` and `--ui-only` select one suite. The exit code is non-zero when any step
+//! `--rust-only` and `--ui-only` select one suite. `--screens[=<set>]` captures the reference
+//! screenshots (the `@screens` tests, `proxy` project, `openscreeps` only) into
+//! `e2e/references/<set>/` (default set `current`). The exit code is non-zero when any step
 //! fails; a summary of every step closes the run.
 //!
 //! `OVERSEER_E2E_SLOW=<factor>` (e.g. `4`) runs the UI tests the way the CI runner does on a
@@ -27,59 +37,115 @@
 //! and whose responses arrive `<factor>` × 125 ms later, and two workers (see
 //! `e2e/playwright.config.ts`).
 
+mod official;
+mod world;
+
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::Error;
 
-/// The harness's own player (`OVERSEER_LIVE_USER`).
-const USER: &str = "e2e";
-/// Milliseconds per tick: fast enough that creeps visibly move within a test.
-const TICK_MS: &str = "200";
-/// Rooms per side of the world.
-const WORLD_SIZE: &str = "11";
-/// How long the server may take to start listening and to answer.
-const STARTUP: Duration = Duration::from_secs(120);
+/// What the tests run against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// A disposable `openscreeps/server` world in Docker.
+    OpenScreeps,
+    /// screeps.com, read-only.
+    Official,
+}
+
+impl Target {
+    /// The value of `OVERSEER_E2E_TARGET`.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::OpenScreeps => "openscreeps",
+            Self::Official => "official",
+        }
+    }
+}
 
 /// What to run.
 #[derive(Debug)]
 struct Options {
+    target: Target,
     rust: bool,
     ui: bool,
     build: bool,
+    /// The reference screenshot set to capture (`--screens`).
+    screens: Option<String>,
     playwright: Vec<String>,
 }
 
 impl Options {
     fn parse(args: &[&str]) -> Result<Self, Error> {
         let mut options = Self {
+            target: Target::OpenScreeps,
             rust: true,
             ui: true,
             build: true,
+            screens: None,
             playwright: Vec::new(),
         };
+        let mut only = None;
         let mut args = args.iter();
         while let Some(&arg) = args.next() {
             match arg {
-                "--rust-only" => options.ui = false,
-                "--ui-only" => options.rust = false,
+                "--rust-only" | "--ui-only" if only.is_some() => {
+                    return Err("--rust-only and --ui-only exclude each other".into());
+                }
+                "--rust-only" | "--ui-only" => only = Some(arg),
                 "--no-build" => options.build = false,
+                "--screens" => options.screens = Some("current".to_owned()),
+                "--target" => {
+                    let value = args.next().ok_or("--target needs a value")?;
+                    options.target = Self::target(value)?;
+                }
                 "--" => options.playwright = args.by_ref().map(|&arg| arg.to_owned()).collect(),
-                _ => return Err(format!("unknown e2e option `{arg}`").into()),
+                _ => {
+                    if let Some(value) = arg.strip_prefix("--target=") {
+                        options.target = Self::target(value)?;
+                    } else if let Some(set) = arg.strip_prefix("--screens=") {
+                        if set.is_empty() || set.contains(['/', '\\', '.']) {
+                            return Err(format!("`{set}` is no screenshot set name").into());
+                        }
+                        options.screens = Some(set.to_owned());
+                    } else {
+                        return Err(format!("unknown e2e option `{arg}`").into());
+                    }
+                }
             }
         }
-        if !options.rust && !options.ui {
-            return Err("--rust-only and --ui-only exclude each other".into());
+        match only {
+            Some("--rust-only") => options.ui = false,
+            Some(_) => options.rust = false,
+            None => {}
+        }
+        if options.screens.is_some() {
+            if options.target != Target::OpenScreeps || !options.ui {
+                return Err("--screens runs UI tests on the openscreeps target only".into());
+            }
+            options.rust = false;
+            let mut playwright = vec!["--grep", "@screens", "--project", "proxy"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            playwright.append(&mut options.playwright);
+            options.playwright = playwright;
         }
         Ok(options)
+    }
+
+    fn target(value: &str) -> Result<Target, Error> {
+        match value {
+            "openscreeps" => Ok(Target::OpenScreeps),
+            "official" => Ok(Target::Official),
+            _ => Err(format!("unknown target `{value}` (openscreeps, official)").into()),
+        }
     }
 }
 
@@ -90,10 +156,11 @@ enum Outcome {
     Skipped(&'static str),
 }
 
-/// The steps run so far.
+/// The steps run so far, and notes for the summary.
 #[derive(Default)]
 struct Summary {
     steps: Vec<(String, Outcome, Duration)>,
+    notes: Vec<String>,
 }
 
 impl Summary {
@@ -121,8 +188,8 @@ impl Summary {
             .any(|(_, outcome, _)| matches!(outcome, Outcome::Failed(_)))
     }
 
-    /// Prints every step and the result: failed when a step failed or `aborted` (an error
-    /// ended the run outside the steps, for example before the first one).
+    /// Prints every step, the notes and the result: failed when a step failed or `aborted` (an
+    /// error ended the run outside the steps, for example before the first one).
     fn print(&self, aborted: bool) {
         println!("\ne2e summary");
         for (name, outcome, elapsed) in &self.steps {
@@ -135,6 +202,9 @@ impl Summary {
                 Outcome::Skipped(reason) => println!("  skipped  {name} ({reason})"),
             }
         }
+        for note in &self.notes {
+            println!("  note     {note}");
+        }
         println!(
             "  result: {}",
             if aborted || self.failed() {
@@ -146,7 +216,8 @@ impl Summary {
     }
 }
 
-/// Runs `cargo xtask e2e [--rust-only | --ui-only] [--no-build] [-- <playwright args>]`.
+/// Runs `cargo xtask e2e [--target openscreeps|official] [--rust-only | --ui-only]
+/// [--screens[=<set>]] [--no-build] [-- <playwright args>]`.
 pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     let options = Options::parse(args)?;
     install_interrupt_handler()?;
@@ -168,49 +239,75 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Runs [`teardown`] when dropped, also while a panic unwinds.
+/// Runs [`world::teardown`] when dropped, also while a panic unwinds.
 struct TeardownOnDrop;
 
 impl Drop for TeardownOnDrop {
     fn drop(&mut self) {
-        teardown();
+        world::teardown();
     }
+}
+
+/// Where the suites find what was prepared.
+struct Prepared {
+    root: PathBuf,
+    e2e: PathBuf,
+    logs: PathBuf,
+    dist: PathBuf,
+    proxy: PathBuf,
 }
 
 /// Every step; a failed preparation step skips the rest.
 fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), Error> {
-    let server = server_dir(root)?;
     let target = target_dir(root);
-    let dist = target.join("e2e").join("dist");
-    let e2e = root.join("e2e");
-    let proxy = target
-        .join("e2e")
-        .join(format!("overseer-proxy{}", std::env::consts::EXE_SUFFIX));
-    let mut prepared = summary.step("server dependencies", || npm_ci_if_missing(&server));
+    let logs = target.join("e2e");
+    let prepared = Prepared {
+        root: root.to_owned(),
+        e2e: root.join("e2e"),
+        dist: logs.join("dist"),
+        proxy: logs.join(format!("overseer-proxy{}", std::env::consts::EXE_SUFFIX)),
+        logs,
+    };
+    // Before anything is built: a missing token fails at once.
+    let token = match options.target {
+        Target::Official => Some(official::token()?),
+        Target::OpenScreeps => None,
+    };
+    let mut image = None;
+    let mut ready = match options.target {
+        Target::OpenScreeps => summary.step("server image (docker build)", || {
+            image = Some(world::image(root)?);
+            Ok(())
+        }),
+        Target::Official => true,
+    };
     if options.ui {
         if options.build {
-            prepared = prepared && summary.step("web app (trunk build)", || build_app(root, &dist));
-        } else if dist.join("index.html").is_file() {
+            ready =
+                ready && summary.step("web app (trunk build)", || build_app(root, &prepared.dist));
+        } else if prepared.dist.join("index.html").is_file() {
             summary.skip("web app (trunk build)", "--no-build");
         } else {
-            return Err(format!("{} has no build; drop --no-build", dist.display()).into());
+            return Err(
+                format!("{} has no build; drop --no-build", prepared.dist.display()).into(),
+            );
         }
-        prepared = prepared
+        ready = ready
             && summary.step("overseer-proxy binary", || {
-                build_proxy(root, &target, &proxy)
+                build_proxy(root, &target, &prepared.proxy)
             })
             && summary.step("Playwright dependencies", || {
-                npm_ci_if_missing(&e2e)?;
+                npm_ci_if_missing(&prepared.e2e)?;
                 status(
                     Command::new(program("npx"))
                         .args(["playwright", "install", "chromium"])
-                        .current_dir(&e2e),
+                        .current_dir(&prepared.e2e),
                     "playwright install",
                 )
             });
     }
     if options.rust {
-        prepared = prepared
+        ready = ready
             && summary.step("live tests (build)", || {
                 status(
                     cargo(root).args(["test", "--workspace", "--test", "live", "--no-run"]),
@@ -218,80 +315,170 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
                 )
             });
     }
-    if !prepared {
+    if !ready {
         return Ok(());
     }
-    let context = Suite {
-        server: &server,
-        target: &target,
-        dist: &dist,
-        proxy: &proxy,
-    };
-    // Each suite gets a fresh world: players and their bots slow a world down as they add up.
-    if options.rust {
-        context.run(summary, "live Rust tests", "server-live.log", || {
-            let mut test = cargo(root);
-            test.args(["test", "--workspace", "--test", "live", "--", "--ignored"]);
-            test
-        });
-    } else {
-        summary.skip("live Rust tests", "--ui-only");
-    }
-    if options.ui {
-        context.run(summary, "Playwright", "server-ui.log", || {
-            let mut playwright = Command::new(program("npx"));
-            playwright
-                .args(["playwright", "test"])
-                .args(&options.playwright)
-                .current_dir(&e2e);
-            playwright
-        });
-    } else {
-        summary.skip("Playwright", "--rust-only");
+    match (image, token) {
+        (Some(image), _) => openscreeps(&prepared, options, &image, summary),
+        (None, Some(token)) => official(&prepared, options, &token, summary),
+        (None, None) => return Err("no server image".into()),
     }
     Ok(())
 }
 
-/// What a test suite runs against.
-struct Suite<'a> {
-    server: &'a Path,
-    target: &'a Path,
-    dist: &'a Path,
-    proxy: &'a Path,
+/// The suites against fresh worlds of `image`.
+fn openscreeps(prepared: &Prepared, options: &Options, image: &str, summary: &mut Summary) {
+    // Each suite gets a fresh world: players and their bots slow a world down as they add up.
+    if options.rust {
+        on_world(
+            prepared,
+            image,
+            summary,
+            "live Rust tests",
+            "server-live.log",
+            || {
+                let mut test = cargo(&prepared.root);
+                test.args(["test", "--workspace", "--test", "live", "--", "--ignored"]);
+                test
+            },
+        );
+    } else {
+        summary.skip("live Rust tests", "--ui-only");
+    }
+    if options.ui {
+        on_world(
+            prepared,
+            image,
+            summary,
+            "Playwright",
+            "server-ui.log",
+            || {
+                let mut playwright = playwright(prepared, options);
+                if let Some(set) = &options.screens {
+                    playwright.env("OVERSEER_E2E_SCREENS", set);
+                }
+                playwright
+            },
+        );
+    } else {
+        summary.skip("Playwright", "--rust-only");
+    }
 }
 
-impl Suite<'_> {
-    /// Starts a world (its output in `target/e2e/<log>`), runs the command `suite` builds with
-    /// the world's environment and stops the world.
-    fn run(&self, summary: &mut Summary, name: &str, log: &str, suite: impl FnOnce() -> Command) {
-        let mut world = None;
-        summary.step(&format!("{name}: disposable world"), || {
-            world = Some(start_world(self.server, &self.target.join("e2e"), log)?);
-            Ok(())
+/// Starts a world (its output in `<logs>/<log>`), runs the command `suite` builds with the
+/// world's environment and removes the world.
+fn on_world(
+    prepared: &Prepared,
+    image: &str,
+    summary: &mut Summary,
+    name: &str,
+    log: &str,
+    suite: impl FnOnce() -> Command,
+) {
+    let mut started = None;
+    summary.step(&format!("{name}: disposable world"), || {
+        started = Some(world::start(image, &prepared.logs, log)?);
+        Ok(())
+    });
+    if let Some(started) = started {
+        summary.step(name, || {
+            let mut command = suite();
+            common_environment(&mut command, prepared)?;
+            world_environment(&mut command, &started);
+            status(&mut command, name)
         });
-        if let Some(world) = world {
-            summary.step(name, || {
-                let mut command = suite();
-                apply_environment(&mut command, &world, self.dist, self.proxy)?;
-                status(&mut command, name)
-            });
+    }
+    world::teardown();
+}
+
+/// The read-only suites against screeps.com.
+fn official(prepared: &Prepared, options: &Options, token: &str, summary: &mut Summary) {
+    if options.rust {
+        summary.step("live Rust tests (read-only)", || {
+            let mut test = cargo(&prepared.root);
+            test.args(["test", "--workspace", "--test", "live", "--"])
+                .args(["--ignored", "read_only::"]);
+            common_environment(&mut test, prepared)?;
+            official_environment(&mut test, token);
+            status(&mut test, "cargo test")
+        });
+    } else {
+        summary.skip("live Rust tests (read-only)", "--ui-only");
+    }
+    if options.ui {
+        let log = prepared.logs.join("proxy-official.log");
+        summary.step("Playwright (read-only)", || {
+            let mut playwright = playwright(prepared, options);
+            common_environment(&mut playwright, prepared)?;
+            official_environment(&mut playwright, token);
+            status(&mut playwright, "Playwright")
+        });
+        match official::forwarded(&log) {
+            Ok(requests) => summary.notes.push(format!(
+                "Playwright via the proxy to screeps.com: {requests}"
+            )),
+            Err(error) => summary.notes.push(error.to_string()),
         }
-        teardown();
+    } else {
+        summary.skip("Playwright (read-only)", "--rust-only");
     }
 }
 
-/// The server checkout: `OPENSCREEPS_SERVER_DIR`, else `../server` next to this repository.
-fn server_dir(root: &Path) -> Result<PathBuf, Error> {
-    let dir = std::env::var_os("OPENSCREEPS_SERVER_DIR")
-        .map_or_else(|| root.join("..").join("server"), PathBuf::from);
-    if !dir.join("package.json").is_file() {
-        return Err(format!(
-            "no openscreeps/server checkout at {} (set OPENSCREEPS_SERVER_DIR)",
-            dir.display()
+/// `npx playwright test` with the extra arguments.
+fn playwright(prepared: &Prepared, options: &Options) -> Command {
+    let mut playwright = Command::new(program("npx"));
+    playwright
+        .args(["playwright", "test"])
+        .args(&options.playwright)
+        .current_dir(&prepared.e2e);
+    playwright
+}
+
+/// Sets what both targets' tests read: `OVERSEER_E2E_DIST` (the built web app),
+/// `OVERSEER_E2E_PROXY` (the `overseer-proxy` binary) and two free ports for the Playwright
+/// web servers (`OVERSEER_E2E_DIRECT_PORT`, `OVERSEER_E2E_PROXY_PORT`). `NO_COLOR` keeps the
+/// proxy's log plain.
+fn common_environment(command: &mut Command, prepared: &Prepared) -> Result<(), Error> {
+    let direct = TcpListener::bind("127.0.0.1:0")?;
+    let proxied = TcpListener::bind("127.0.0.1:0")?;
+    command
+        .env("OVERSEER_E2E_DIST", &prepared.dist)
+        .env("OVERSEER_E2E_PROXY", &prepared.proxy)
+        .env(
+            "OVERSEER_E2E_DIRECT_PORT",
+            direct.local_addr()?.port().to_string(),
         )
-        .into());
-    }
-    Ok(dir)
+        .env(
+            "OVERSEER_E2E_PROXY_PORT",
+            proxied.local_addr()?.port().to_string(),
+        )
+        .env("NO_COLOR", "1");
+    Ok(())
+}
+
+/// Sets the world the tests run against: `OVERSEER_E2E_TARGET=openscreeps`,
+/// `OVERSEER_LIVE_URL` (server base URL), `OVERSEER_LIVE_USER`, `OVERSEER_LIVE_PASSWORD` (a
+/// player without a spawn) and `OVERSEER_LIVE_ADMIN_TOKEN` (the admin API).
+fn world_environment(command: &mut Command, world: &world::World) {
+    command
+        .env("OVERSEER_E2E_TARGET", Target::OpenScreeps.name())
+        .env("OVERSEER_LIVE_URL", &world.url)
+        .env("OVERSEER_LIVE_USER", world::USER)
+        .env("OVERSEER_LIVE_PASSWORD", &world.password)
+        .env("OVERSEER_LIVE_ADMIN_TOKEN", &world.admin_token)
+        .env_remove("OVERSEER_LIVE_TOKEN");
+}
+
+/// Sets screeps.com as the server: `OVERSEER_E2E_TARGET=official`, `OVERSEER_LIVE_URL` and
+/// `OVERSEER_LIVE_TOKEN` (the API token); nothing of a disposable world.
+fn official_environment(command: &mut Command, token: &str) {
+    command
+        .env("OVERSEER_E2E_TARGET", Target::Official.name())
+        .env("OVERSEER_LIVE_URL", official::URL)
+        .env("OVERSEER_LIVE_TOKEN", token)
+        .env_remove("OVERSEER_LIVE_USER")
+        .env_remove("OVERSEER_LIVE_PASSWORD")
+        .env_remove("OVERSEER_LIVE_ADMIN_TOKEN");
 }
 
 /// `npm ci` in `dir` unless it already has `node_modules`.
@@ -337,232 +524,21 @@ fn build_proxy(root: &Path, target: &Path, copy: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// The running world and what the tests need to reach it.
-struct World {
-    url: String,
-    password: String,
-    admin_token: String,
-}
-
-/// Sets the variables the live tests and the Playwright project read: `OVERSEER_LIVE_URL`
-/// (server base URL), `OVERSEER_LIVE_USER`, `OVERSEER_LIVE_PASSWORD` (a player without a
-/// spawn), `OVERSEER_LIVE_ADMIN_TOKEN` (the admin API), `OVERSEER_E2E_DIST` (the built web
-/// app), `OVERSEER_E2E_PROXY` (the `overseer-proxy` binary) and two free ports for the
-/// Playwright web servers (`OVERSEER_E2E_DIRECT_PORT`, `OVERSEER_E2E_PROXY_PORT`).
-fn apply_environment(
-    command: &mut Command,
-    world: &World,
-    dist: &Path,
-    proxy: &Path,
-) -> Result<(), Error> {
-    let direct = TcpListener::bind("127.0.0.1:0")?;
-    let proxied = TcpListener::bind("127.0.0.1:0")?;
-    command
-        .env("OVERSEER_LIVE_URL", &world.url)
-        .env("OVERSEER_LIVE_USER", USER)
-        .env("OVERSEER_LIVE_PASSWORD", &world.password)
-        .env("OVERSEER_LIVE_ADMIN_TOKEN", &world.admin_token)
-        .env("OVERSEER_E2E_DIST", dist)
-        .env("OVERSEER_E2E_PROXY", proxy)
-        .env(
-            "OVERSEER_E2E_DIRECT_PORT",
-            direct.local_addr()?.port().to_string(),
-        )
-        .env(
-            "OVERSEER_E2E_PROXY_PORT",
-            proxied.local_addr()?.port().to_string(),
-        );
-    Ok(())
-}
-
-/// What must be undone however the run ends; taken by the first [`teardown`].
-struct Cleanup {
-    server: Option<Child>,
-    dir: PathBuf,
-}
-
-static CLEANUP: Mutex<Option<Cleanup>> = Mutex::new(None);
-
 /// Set by Ctrl-C (and SIGTERM on Unix): the run ends without a summary.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
-/// Stops the server and deletes the world's directory, once. Holds the lock throughout, so a
-/// concurrent call (the interrupt handler) returns only after the cleanup is complete.
-fn teardown() {
-    let mut guard = CLEANUP.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(mut cleanup) = guard.take() else {
-        return;
-    };
-    if let Some(mut server) = cleanup.server.take() {
-        // Ignored: the server may have exited already (Ctrl-C reaches it too).
-        let _ = server.kill();
-        let _ = server.wait();
-    }
-    // SQLite and the OS may hold the files a moment after the process ended.
-    for _ in 0..20 {
-        if fs::remove_dir_all(&cleanup.dir).is_ok() || !cleanup.dir.exists() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    eprintln!("warning: could not delete {}", cleanup.dir.display());
-}
 
 /// Ctrl-C (and SIGTERM on Unix) tears down, then exits with status 130.
 fn install_interrupt_handler() -> Result<(), Error> {
     ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
-        eprintln!("\ninterrupted: stopping the server");
-        teardown();
+        eprintln!("\ninterrupted: removing the world");
+        world::teardown();
         std::process::exit(130);
     })?;
     Ok(())
 }
 
-/// Creates a world in a new temporary directory, starts it on a free port (its output in
-/// `logs/<log>`) and waits until it answers.
-fn start_world(server: &Path, logs: &Path, log: &str) -> Result<World, Error> {
-    let nonce = nonce();
-    let dir = std::env::temp_dir().join(format!("overseer-e2e-{nonce}"));
-    fs::create_dir_all(&dir)?;
-    *CLEANUP.lock().unwrap_or_else(PoisonError::into_inner) = Some(Cleanup {
-        server: None,
-        dir: dir.clone(),
-    });
-    let database = dir.join("world.sqlite");
-    let password = format!("e2e-{nonce}");
-    let mut init = node_cli(server);
-    init.arg("init")
-        .arg("--database")
-        .arg(&database)
-        .args([
-            "--world-size",
-            WORLD_SIZE,
-            "--seed",
-            "1",
-            "--username",
-            USER,
-        ])
-        .env("SCREEPS_INITIAL_PASSWORD", &password)
-        .stdout(Stdio::null());
-    status(&mut init, "server init")?;
-    let admin_token = fs::read_to_string(dir.join("world.sqlite.admin-token"))?
-        .trim()
-        .to_owned();
-
-    fs::create_dir_all(logs)?;
-    let log_path = logs.join(log);
-    let mut log = File::create(&log_path)?;
-    let mut start = node_cli(server);
-    start
-        .arg("start")
-        .arg("--database")
-        .arg(&database)
-        .args(["--port", "0", "--tick-duration", TICK_MS])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = start
-        .spawn()
-        .map_err(|error| format!("cannot start the server: {error}"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    if let Some(cleanup) = CLEANUP
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_mut()
-    {
-        cleanup.server = Some(child);
-    } else {
-        // Interrupted while starting: the teardown already ran.
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("interrupted".into());
-    }
-    // Both streams go to the log; stdout is scanned for the listen line first.
-    let (listening, url) = mpsc::channel();
-    if let Some(stderr) = stderr {
-        let mut log = log.try_clone()?;
-        std::thread::spawn(move || {
-            let _ = std::io::copy(&mut BufReader::new(stderr), &mut log);
-        });
-    }
-    if let Some(stdout) = stdout {
-        std::thread::spawn(move || {
-            let mut sent = false;
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = writeln!(log, "{line}");
-                if !sent && let Some(url) = listen_url(&line) {
-                    sent = listening.send(url).is_ok();
-                }
-            }
-        });
-    }
-    let url = url.recv_timeout(STARTUP).map_err(|_| {
-        format!(
-            "the server did not start listening; see {}",
-            log_path.display()
-        )
-    })?;
-    wait_ready(&url)?;
-    println!("    world at {url} ({})", dir.display());
-    Ok(World {
-        url,
-        password,
-        admin_token,
-    })
-}
-
-/// The URL of `OpenScreeps server listening on http://127.0.0.1:PORT/`.
-fn listen_url(line: &str) -> Option<String> {
-    let (_, url) = line.split_once("listening on ")?;
-    let url = url.trim();
-    url.starts_with("http://").then(|| url.to_owned())
-}
-
-/// Polls `GET /api/version` until it answers 200.
-fn wait_ready(url: &str) -> Result<(), Error> {
-    let address = url
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_owned();
-    let deadline = Instant::now() + STARTUP;
-    loop {
-        if version_ok(&address) {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            return Err(format!("{url}api/version never answered 200").into());
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// Whether `GET /api/version` on `address` answers HTTP 200.
-fn version_ok(address: &str) -> bool {
-    let Ok(mut stream) = TcpStream::connect(address) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let request =
-        format!("GET /api/version HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let mut status = [0; 12];
-    stream.read_exact(&mut status).is_ok() && status.ends_with(b" 200")
-}
-
-/// `node --import tsx src/cli.ts` in the server checkout: the server's `npm run cli` without
-/// npm in between, so that stopping the process stops the server.
-fn node_cli(server: &Path) -> Command {
-    let mut command = Command::new("node");
-    command
-        .args(["--import", "tsx", "src/cli.ts"])
-        .current_dir(server);
-    command
-}
-
-/// A value unique enough for a directory name and a throwaway password.
+/// A value unique enough for a container name and a throwaway password.
 fn nonce() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -606,4 +582,46 @@ fn status(command: &mut Command, name: &str) -> Result<(), Error> {
         return Err(format!("{name} failed ({status})").into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options() {
+        let default = Options::parse(&[]).unwrap();
+        assert_eq!(default.target, Target::OpenScreeps);
+        assert!(default.rust && default.ui && default.build);
+
+        let official =
+            Options::parse(&["--target", "official", "--ui-only", "--", "--grep", "x"]).unwrap();
+        assert_eq!(official.target, Target::Official);
+        assert!(!official.rust && official.ui);
+        assert_eq!(official.playwright, ["--grep", "x"]);
+        assert_eq!(
+            Options::parse(&["--target=official"]).unwrap().target,
+            Target::Official
+        );
+
+        let screens = Options::parse(&["--screens=before", "--", "--headed"]).unwrap();
+        assert_eq!(screens.screens.as_deref(), Some("before"));
+        assert!(!screens.rust && screens.ui);
+        assert_eq!(
+            screens.playwright,
+            ["--grep", "@screens", "--project", "proxy", "--headed"]
+        );
+        assert_eq!(
+            Options::parse(&["--screens"]).unwrap().screens.as_deref(),
+            Some("current")
+        );
+
+        assert!(Options::parse(&["--rust-only", "--ui-only"]).is_err());
+        assert!(Options::parse(&["--target", "mars"]).is_err());
+        assert!(Options::parse(&["--target"]).is_err());
+        assert!(Options::parse(&["--screens", "--target", "official"]).is_err());
+        assert!(Options::parse(&["--screens", "--rust-only"]).is_err());
+        assert!(Options::parse(&["--screens=../x"]).is_err());
+        assert!(Options::parse(&["--node"]).is_err());
+    }
 }

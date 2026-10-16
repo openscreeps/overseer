@@ -13,7 +13,7 @@ async function openProfile(page: Page, account: Account) {
   await expect(page.getByRole('heading', { level: 1, name: account.username })).toBeVisible();
 }
 
-test.describe('profile', () => {
+test.describe('profile', { tag: '@openscreeps' }, () => {
   test("shows the player's account", async ({ signedInPage: page, player }) => {
     await openProfile(page, player);
     const profile = page.getByRole('region', { name: player.username });

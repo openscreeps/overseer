@@ -105,7 +105,7 @@ async function unclaim(server: Server, player: Player) {
     .toBeNull();
 }
 
-test.describe('live overview', () => {
+test.describe('live overview', { tag: '@openscreeps' }, () => {
   test('a viewed room’s tooltip and drawer follow the live room at once', async ({
     signedInPage: page,
     server,

@@ -24,7 +24,7 @@ async function lastTick(page: Page): Promise<number> {
   return ticks.length ? Math.max(...ticks) : 0;
 }
 
-test.describe('console', () => {
+test.describe('console', { tag: '@openscreeps' }, () => {
   test('shows the bot live, runs an expression and recalls it after a reload', async ({
     signedInPage: page,
     server,

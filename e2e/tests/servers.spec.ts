@@ -3,7 +3,7 @@
 
 import { addServer, expect, SERVER_NAME, test } from './fixtures';
 
-test.describe('servers', () => {
+test.describe('servers', { tag: '@openscreeps' }, () => {
   test('lists screeps.com and adds, keeps and removes a private server', async ({ page, server }) => {
     await page.goto('/#/');
     const servers = page.getByRole('region', { name: 'Servers' });

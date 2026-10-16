@@ -75,7 +75,7 @@ function rowTile(name: string): [number, number] {
   return [Number(match[1]), Number(match[2])];
 }
 
-test.describe('drawer', () => {
+test.describe('drawer', { tag: '@openscreeps' }, () => {
   test('lists the room objects and selects them both ways with the map', async ({
     signedInPage: page,
     server,
