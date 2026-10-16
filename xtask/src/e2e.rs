@@ -319,15 +319,15 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
         return Ok(());
     }
     match (image, token) {
-        (Some(image), _) => openscreeps(&prepared, options, &image, summary),
-        (None, Some(token)) => official(&prepared, options, &token, summary),
+        (Some(image), _) => openscreeps_suites(&prepared, options, &image, summary),
+        (None, Some(token)) => official_suites(&prepared, options, &token, summary),
         (None, None) => return Err("no server image".into()),
     }
     Ok(())
 }
 
 /// The suites against fresh worlds of `image`.
-fn openscreeps(prepared: &Prepared, options: &Options, image: &str, summary: &mut Summary) {
+fn openscreeps_suites(prepared: &Prepared, options: &Options, image: &str, summary: &mut Summary) {
     // Each suite gets a fresh world: players and their bots slow a world down as they add up.
     if options.rust {
         on_world(
@@ -392,7 +392,7 @@ fn on_world(
 }
 
 /// The read-only suites against screeps.com.
-fn official(prepared: &Prepared, options: &Options, token: &str, summary: &mut Summary) {
+fn official_suites(prepared: &Prepared, options: &Options, token: &str, summary: &mut Summary) {
     if options.rust {
         summary.step("live Rust tests (read-only)", || {
             let mut test = cargo(&prepared.root);
