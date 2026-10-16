@@ -8,10 +8,12 @@
 //! recheck ([`crate::feed::Feed::recheck_rate_limit`]) sends nothing unless the world's
 //! overviews are paused by the limit.
 //!
-//! On screeps.com API-token sessions (main window only), [`RateLimitsUi::follow`] checks
-//! whether the token's limits are lifted ([`overseer::Account::rate_limit_exemption`]): when
-//! the session starts, after a reset, after `Check again`, after HTTP 429 replies (at most
-//! every [`RATE_LIMITED_DEBOUNCE_MS`]), every [`EXEMPT_RECHECK_MS`] while lifted and when the
+//! On screeps.com API-token sessions (main window only, [`rate_limits::follows_lift`]),
+//! [`RateLimitsUi::follow`] checks whether the token's limits are lifted
+//! ([`overseer::Account::rate_limit_exemption`]) as [`CheckSchedule`] says: when the session
+//! starts, after a reset, after `Check again`, after HTTP 429 replies, when the window gets
+//! focus or the page becomes visible again (the user may have lifted them on the website),
+//! every minute while loading waits on the limits, and while lifted now and then and when the
 //! lift ends. The world map ignores its budget while lifted
 //! ([`crate::feed::Feed::set_rate_limit_exempt_until`]).
 
@@ -22,12 +24,11 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::Account;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::{FocusEvent, HtmlElement, KeyboardEvent, Node};
 
 use crate::profiles::ServerKind;
-use crate::rate_limits::{
-    self, Actions, EXEMPT_RECHECK_MS, RATE_LIMITED_DEBOUNCE_MS, Warning, Warnings,
-};
+use crate::rate_limits::{self, Actions, CheckSchedule, Warning, Warnings};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::toast::{ToastKind, Toasts};
@@ -38,18 +39,8 @@ use crate::ui::world::MapState;
 struct Monitor {
     /// The session followed ([`crate::state::Session::epoch`]).
     epoch: Option<u64>,
-    /// A check of the lift is in flight.
-    checking: bool,
-    /// Check at once (session start, reset success, `Check again`).
-    check_now: bool,
-    /// When the latest check started (milliseconds since the Unix epoch).
-    last_check: u64,
-    /// When to check again (while lifted: slowly, and at the lift's end).
-    next_check: Option<u64>,
-    /// The client's count of HTTP 429 replies already seen.
-    rate_limited: u64,
-    /// HTTP 429 replies arrived since the latest check.
-    after_rate_limited: bool,
+    /// When to check the lift.
+    schedule: CheckSchedule,
     /// The lift (its end) whose ending toast is shown, and the toast.
     toasted: Option<(u64, u64)>,
     /// The prompts shown in this session.
@@ -106,7 +97,9 @@ impl RateLimitsUi {
     }
 
     /// Rechecks after a reset: on the page's success message (browser) or when the window
-    /// regains focus after the shell opened the page. For as long as the page lives.
+    /// regains focus after the shell opened the page; and when the window gets focus or the
+    /// page becomes visible again ([`CheckSchedule::attention`]). For as long as the page
+    /// lives.
     pub fn listen(self, map: MapState) {
         let message = window_event_listener(leptos::ev::message, move |event| {
             if rate_limits::is_reset_success(&event.origin(), event.data().as_string().as_deref()) {
@@ -118,9 +111,19 @@ impl RateLimitsUi {
                 self.awaiting_focus.set_value(false);
                 self.lifted(map);
             }
+            self.attention();
         });
         std::mem::forget(message);
         std::mem::forget(focus);
+        let visible = Closure::<dyn Fn()>::new(move || {
+            if document().visibility_state() == web_sys::VisibilityState::Visible {
+                self.attention();
+            }
+        });
+        // Lives as long as the page, like the listeners above.
+        let _ = document()
+            .add_event_listener_with_callback("visibilitychange", visible.as_ref().unchecked_ref());
+        visible.forget();
     }
 
     /// The limits may have been lifted: resumes the world's overviews paused by the rate
@@ -128,13 +131,19 @@ impl RateLimitsUi {
     fn lifted(self, map: MapState) {
         recheck(map);
         self.monitor
-            .update_value(|monitor| monitor.check_now = true);
+            .update_value(|monitor| monitor.schedule.request());
     }
 
-    /// Follows the lift of the live session's token on screeps.com API-token sessions: checks
-    /// it (see the module docs), tells the world map, toasts before it ends and prompts to
-    /// lift the limits when an endpoint runs low. For the main window, as long as the page
-    /// lives.
+    /// The app got the user's attention back: check the lift (throttled).
+    fn attention(self) {
+        self.monitor
+            .update_value(|monitor| monitor.schedule.attention());
+    }
+
+    /// Follows the lift of the live session's token on screeps.com API-token sessions in the
+    /// main window ([`rate_limits::follows_lift`]): checks it (see the module docs), tells the
+    /// world map, toasts before it ends and prompts to lift the limits when an endpoint runs
+    /// low. As long as the page lives.
     pub fn follow(self, state: AppState, map: MapState) {
         let toasts = Toasts::expect();
         let lift_again = Callback::new(move |()| start_reset(state, self));
@@ -146,6 +155,7 @@ impl RateLimitsUi {
                 }
             });
         });
+        let popout = state.is_popout();
         Effect::new(move |_| {
             let now = self.now.get();
             let (kind, api_token) = session_server(state);
@@ -156,10 +166,13 @@ impl RateLimitsUi {
                         .as_ref()
                         .map(|session| (session.epoch(), session.overseer.clone()))
                 })
-                .filter(|_| rate_limits::lift_applies(kind, api_token));
+                .filter(|_| rate_limits::follows_lift(kind, api_token, popout));
             match session {
                 Some((epoch, overseer)) => {
-                    self.tick(now, epoch, &overseer, toasts, lift_again);
+                    let held_back = map
+                        .progress
+                        .with_untracked(|progress| rate_limits::held_back(progress.as_ref()));
+                    self.tick(now, epoch, held_back, &overseer, toasts, lift_again);
                 }
                 None => self.stop(toasts),
             }
@@ -194,17 +207,23 @@ impl RateLimitsUi {
         }
     }
 
-    /// One second of following session `epoch` at `now`.
+    /// One second of following session `epoch` at `now`, with loading `held_back` by the
+    /// limits or not ([`rate_limits::held_back`]).
     fn tick(
         self,
         now: u64,
         epoch: u64,
+        held_back: bool,
         overseer: &overseer::Overseer,
         toasts: Toasts,
         lift_again: Callback<()>,
     ) {
         let client = overseer.client();
         let rate_limited = client.rate_limited_count();
+        let lifted = self
+            .exempt_until
+            .get_untracked()
+            .filter(|until| *until > now);
         let mut fresh = false;
         let due = self
             .monitor
@@ -212,30 +231,15 @@ impl RateLimitsUi {
                 if monitor.epoch != Some(epoch) {
                     *monitor = Monitor {
                         epoch: Some(epoch),
-                        check_now: true,
-                        rate_limited,
+                        schedule: CheckSchedule::new(rate_limited),
                         toasted: monitor.toasted,
                         ..Monitor::default()
                     };
                     fresh = true;
                 }
-                if rate_limited > monitor.rate_limited {
-                    monitor.rate_limited = rate_limited;
-                    monitor.after_rate_limited = true;
-                }
-                let due = !monitor.checking
-                    && (monitor.check_now
-                        || (monitor.after_rate_limited
-                            && now.saturating_sub(monitor.last_check) >= RATE_LIMITED_DEBOUNCE_MS)
-                        || monitor.next_check.is_some_and(|at| now >= at));
-                if due {
-                    monitor.checking = true;
-                    monitor.check_now = false;
-                    monitor.after_rate_limited = false;
-                    monitor.next_check = None;
-                    monitor.last_check = now;
-                }
-                due
+                monitor
+                    .schedule
+                    .due(now, rate_limited, !fresh && lifted.is_some(), held_back)
             })
             .unwrap_or(false);
         if fresh {
@@ -245,10 +249,7 @@ impl RateLimitsUi {
         if due {
             self.check(epoch, overseer.account());
         }
-        let lifted = self
-            .exempt_until
-            .get_untracked()
-            .filter(|until| *until > now);
+        let lifted = lifted.filter(|_| !fresh);
         // The ending toast belongs to one lift: gone once it ended or another replaced it.
         self.dismiss_toast(toasts, lifted);
         if let Some(until) = lifted {
@@ -261,11 +262,11 @@ impl RateLimitsUi {
             }
             return;
         }
-        // Not lifted (as far as known once a check completed: every check starts with a
-        // `last_check`): prompt when an endpoint runs low.
+        // Not lifted (as far as known once a check completed): prompt when an endpoint runs
+        // low.
         let ready = self
             .monitor
-            .with_value(|monitor| monitor.last_check > 0 && !monitor.checking);
+            .with_value(|monitor| monitor.schedule.settled());
         if !ready || self.warning.with_untracked(Option::is_some) {
             return;
         }
@@ -291,18 +292,17 @@ impl RateLimitsUi {
         spawn_local(async move {
             let result = account.rate_limit_exemption().await;
             let now = epoch_millis();
+            let until = match &result {
+                Ok(until) => *until,
+                Err(_) => self.exempt_until.get_untracked(),
+            };
             let live = self
                 .monitor
                 .try_update_value(|monitor| {
                     if monitor.epoch != Some(epoch) {
                         return false;
                     }
-                    monitor.checking = false;
-                    // While lifted: again now and then, and when it ends.
-                    monitor.next_check = match result {
-                        Ok(Some(until)) => Some(until.min(now + EXEMPT_RECHECK_MS)),
-                        _ => None,
-                    };
+                    monitor.schedule.finished(now, until);
                     true
                 })
                 .unwrap_or(false);

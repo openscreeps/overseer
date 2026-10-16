@@ -83,9 +83,7 @@ pub fn App(
     limits.listen(map);
     provide_context(Toasts::new());
     state.start();
-    if !state.is_popout() {
-        limits.follow(state, map);
-    }
+    limits.follow(state, map);
     follow_shards(state, map);
     resolve_shard(state);
     let page = Memo::new(move |_| page(state));

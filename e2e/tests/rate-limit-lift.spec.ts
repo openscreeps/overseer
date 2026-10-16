@@ -11,6 +11,10 @@
 // a refusal (HTTP 429), and screeps.com's reset page is a stand-in that posts its success
 // message to the app, as the real one does once its captcha is solved.
 //
+// The user may also lift the limits on the website itself, with no message to the app: the
+// tests that cover it switch the token list to lifted behind the app's back and move the
+// page's clock (`page.clock`) instead of waiting for the app's 15 s and 60 s re-checks.
+//
 // The local server rotates the session token on every authenticated request. The rewritten
 // token list therefore names a token the server just issued (one `GET /api/auth/me` with the
 // request's headers) and hands it over through `X-Token`, so the app compares the list with the
@@ -164,6 +168,13 @@ async function resetPage(page: Page, open: () => Promise<void>): Promise<void> {
 }
 
 test.describe('lifted rate limits', () => {
+  // A rewritten response still fetching from the server when the test ends must not fail
+  // the run once the page has closed.
+  test.afterEach(async ({ page }) => {
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await page.context().unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
   test('the lift shows and ends, then a low endpoint prompts to lift it again', async ({
     page,
     server,
@@ -250,6 +261,80 @@ test.describe('lifted rate limits', () => {
     await expect.poll(() => fake.mapStats).toBeGreaterThan(requests);
     await page.waitForTimeout(2_000);
     await expect(prompt).toHaveCount(0);
+  });
+
+  test('a lift on the website shows once the page is visible again, focus re-checks at most every 15 s', async ({
+    page,
+    server,
+    account,
+  }) => {
+    await page.clock.install();
+    const reset = Math.floor(Date.now() / 1000) + 30 * 60;
+    const fake: Fake = { lift: null, tokenLists: 0, mapStats: 0 };
+    await fakeScreeps(page, fake, 10, reset);
+    await signInAs(page, server, account, 'official', true);
+
+    // Checked at the start: not lifted, and map stats run low.
+    const prompt = page.getByRole('dialog', { name: 'Rate limit running low' });
+    await expect(prompt).toBeVisible({ timeout: 30_000 });
+    expect(fake.tokenLists).toBe(1);
+
+    // Lifted on the website: the app does not know yet, and does not ask on its own within
+    // the minute.
+    fake.lift = Date.now() + 2 * 3600_000;
+    await page.clock.fastForward(16_000);
+    await page.waitForTimeout(1_500);
+    expect(fake.tokenLists).toBe(1);
+    const status = page.getByRole('contentinfo', { name: 'Status' });
+    const lifted = status.getByTitle(/^Your API token's rate limits are lifted until /);
+    await expect(lifted).toHaveCount(0);
+
+    // The user comes back to the page: one check, and the lift shows.
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await expect(lifted).toHaveText(/^Rate limits lifted · (2 h|1 h 5\d min)$/, { timeout: 10_000 });
+    expect(fake.tokenLists).toBe(2);
+    await expect(prompt).toHaveCount(0);
+
+    // Focus right after: nothing until 15 s after that check.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.waitForTimeout(1_500);
+    expect(fake.tokenLists).toBe(2);
+    await page.clock.fastForward(15_000);
+    await expect.poll(() => fake.tokenLists, { timeout: 10_000 }).toBe(3);
+  });
+
+  test('a lift on the website shows within a minute while loading waits on the limits', async ({
+    page,
+    server,
+    account,
+  }) => {
+    await page.clock.install();
+    const reset = Math.floor(Date.now() / 1000) + 30 * 60;
+    const fake: Fake = { lift: null, tokenLists: 0, mapStats: 0 };
+    // Refused: the owners wait for the reset half an hour away.
+    await fakeScreeps(page, fake, 0, reset);
+    await signInAs(page, server, account, 'official', true);
+
+    const status = page.getByRole('contentinfo', { name: 'Status' });
+    await expect(status.getByTitle('Loading the world')).toContainText(
+      'waiting for the rate limit',
+      { timeout: 30_000 },
+    );
+    // Checked at the start, and once more 30 s after the refusal (when it came after the
+    // start).
+    await expect.poll(() => fake.tokenLists).toBe(1);
+    await page.clock.fastForward(31_000);
+    await page.waitForTimeout(1_500);
+    const checks = fake.tokenLists;
+
+    // Lifted on the website; no focus, no visibility change, no new refusal: the minute's
+    // check finds it and the owners no longer wait for the budget.
+    fake.lift = Date.now() + 2 * 3600_000;
+    await page.clock.fastForward(61_000);
+    const lifted = status.getByTitle(/^Your API token's rate limits are lifted until /);
+    await expect(lifted).toHaveText(/^Rate limits lifted · (2 h|1 h 5\d min)$/, { timeout: 10_000 });
+    expect(fake.tokenLists).toBe(checks + 1);
+    await expect(status).not.toContainText('waiting for the rate limit', { timeout: 30_000 });
   });
 
   for (const [kind, apiToken, what] of [
