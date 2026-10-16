@@ -1,14 +1,22 @@
 # UI reference screenshots
 
 Taken by `e2e/tests/screens.spec.ts` (tag `@screens`, excluded from normal runs):
-`cargo xtask e2e --screens[=<set>]` (until that flag exists:
+`cargo xtask e2e --screens[=<set>]` (before that flag exists:
 `OVERSEER_E2E_SCREENS=<set> cargo xtask e2e --ui-only -- --grep @screens --project proxy`).
 Each set has `desktop/` (1440×900) and `small/` (390×844). They show the UI for people comparing
 changes; they are not assertions (the canvases depend on the GPU, accounts and rooms are random).
 
 Sets:
-- `before/`: the hand-written stylesheets (`style.css`, `drawer.css`), before the switch to Tailwind.
-- `after/`: the same screens after the switch to Tailwind v4.
+- `before/`: the hand-written stylesheets (`style.css`, `drawer.css`) at 632bc23, before the
+  switch to Tailwind.
+- `after/`: the same screens after the switch to Tailwind v4 (on top of 5881d91, whose room tab
+  and inspector also show the controller's upgrade progress).
+
+Differences between the two, apart from the random rooms and accounts: none visible in the
+page chrome (servers, dialog, sign-in, register, profile, menus, panels, drawer, console,
+windows match within a pixel or two). The console of `11-drawer-console` may show "Paused · N
+new lines" in either set: the console's auto-follow loses a race with fast output (a scroll
+event read after the next line arrived), independent of the styling.
 
 | Image | Shows |
 | --- | --- |
