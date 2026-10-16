@@ -26,7 +26,7 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{PointerEvent, ResizeObserver, WheelEvent};
 
 use crate::feed::Subscription;
-use crate::ui::spawn_scoped;
+use crate::ui::{next_id, spawn_scoped};
 
 /// Wheel delta of one line (`deltaMode` 1), in pixels.
 const LINE_PIXELS: f64 = 16.0;
@@ -534,18 +534,6 @@ pub fn SurfaceCanvas(
         ></canvas>
         <p id=description_id class="sr-only">{description}</p>
     }
-}
-
-/// A unique number for element ids.
-fn next_id() -> u64 {
-    thread_local! {
-        static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    }
-    NEXT.with(|next| {
-        let id = next.get();
-        next.set(id + 1);
-        id
-    })
 }
 
 /// Creates the viewer once the canvas is in the document, and requests a frame whenever the

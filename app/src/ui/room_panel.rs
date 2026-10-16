@@ -25,6 +25,7 @@ use crate::feed::{Feed, Reach, Subscription};
 use crate::portals::{destination_text, destinations};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, number, ticks};
+use crate::ui::next_id;
 use crate::ui::objects::{ObjectsPanel, Selection};
 use crate::ui::style::{self, concatcp};
 use crate::ui::surface::{Hooks, Surface, SurfaceCanvas};
@@ -540,11 +541,15 @@ pub fn RoomInfo(
             go_to,
         ))
     };
+    // Its own heading id: another instance in the page (one being replaced, say) must not
+    // take the region's name.
+    let title_id = format!("room-info-title-{}", next_id());
+    let labelled_by = title_id.clone();
     view! {
-        <section class="flex flex-col gap-3" aria-labelledby="room-info-title">
+        <section class="flex flex-col gap-3" aria-labelledby=labelled_by>
             <header class="flex items-center justify-between gap-2 min-h-control-sm">
                 <h2
-                    id="room-info-title"
+                    id=title_id
                     class="flex items-baseline gap-3 min-w-0 text-lg font-semibold leading-tight"
                 >
                     <span>{title}</span>

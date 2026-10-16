@@ -480,6 +480,19 @@ pub fn spawn_scoped(future: impl Future<Output = ()> + 'static) {
     });
 }
 
+/// A number no other element id of the page has: components that may be shown more than once
+/// at a time give their elements ids of their own with it.
+pub fn next_id() -> u64 {
+    thread_local! {
+        static NEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    NEXT.with(|next| {
+        let id = next.get();
+        next.set(id + 1);
+        id
+    })
+}
+
 /// Opens `url` outside the app; failures go to the banner.
 pub fn open_external(url: &'static str) {
     let state = AppState::expect();
