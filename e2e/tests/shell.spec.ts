@@ -1,8 +1,10 @@
 // The shell around the pages: the status bar (no placeholders, no reflow, zoom level names),
-// the top bar on a narrow window, and motion that respects `prefers-reduced-motion`.
+// the top bar (one row on a narrow window, the brand link, its menus' keyboard and pointer
+// handling), toasts, and motion that respects `prefers-reduced-motion`.
 
 import type { Page } from '@playwright/test';
-import { expect, signIn, test } from './fixtures';
+import { expect, test } from './fixtures';
+import { status } from './support/room';
 
 declare global {
   interface Window {
@@ -13,9 +15,6 @@ declare global {
   }
 }
 
-/** The status bar. */
-const status = (page: Page) => page.getByRole('contentinfo', { name: 'Status' });
-
 /**
  * Records, from the page's first script on, every text of the status bar and every position of
  * its zoom level item (a DOM observer, so no intermediate state is missed).
@@ -25,7 +24,7 @@ async function recordStatusBar(page: Page): Promise<void> {
     window.e2eStatusTexts = [];
     window.e2eLevelLefts = [];
     new MutationObserver(() => {
-      const bar = document.querySelector('footer[aria-label="Status"]');
+      const bar = document.querySelector('[aria-label="Status"]');
       if (!bar) return;
       const text = bar.textContent ?? '';
       if (window.e2eStatusTexts?.at(-1) !== text) window.e2eStatusTexts?.push(text);
@@ -36,6 +35,21 @@ async function recordStatusBar(page: Page): Promise<void> {
       }
     }).observe(document, { childList: true, subtree: true, characterData: true });
   });
+}
+
+/** Adds a private server named `name` (never contacted) through the "Add server" dialog. */
+async function addServer(page: Page, name: string) {
+  await page
+    .getByRole('region', { name: 'Servers' })
+    .getByRole('button', { name: 'Add server' })
+    .click();
+  const dialog = page.getByRole('dialog', { name: 'Add server' });
+  await dialog.getByLabel('Name', { exact: true }).fill(name);
+  await dialog
+    .getByLabel('Address', { exact: true })
+    .fill(`http://${name.toLowerCase().replaceAll(' ', '-')}.invalid/`);
+  await dialog.getByRole('button', { name: 'Add', exact: true }).click();
+  await expect(dialog).toBeHidden();
 }
 
 test.describe('shell', () => {
@@ -52,17 +66,20 @@ test.describe('shell', () => {
     await expect(bar.getByTitle('Graphics backend')).toHaveCount(0);
   });
 
-  test('status items appear once known and never shift each other', {
-    tag: '@openscreeps',
-  }, async ({ page, server, player }) => {
+  test('status items appear once known and never shift each other', async ({
+    signedInPage: page,
+  }) => {
     await recordStatusBar(page);
-    await signIn(page, server, player);
+    await page.reload();
     const bar = status(page);
     await expect(bar).toContainText('Connected', { timeout: 30_000 });
     await expect(bar.getByTitle('Zoom level', { exact: true })).toHaveText('Room', {
       timeout: 30_000,
     });
-    await expect(bar.getByTitle('Game tick')).toHaveText(/^tick \d+$/, { timeout: 30_000 });
+    // On a sharded server the shard comes first (`shard3 · tick N`).
+    await expect(bar.getByTitle('Game tick')).toHaveText(/^(\w+ · )?tick \d+$/, {
+      timeout: 30_000,
+    });
     await expect(bar.getByTitle('Graphics backend')).toHaveText(/^(WebGPU|WebGL2)$/);
     await expect(bar.getByTitle('CPU time of the last frame')).toHaveText(/^frame \d+\.\d\d ms$/);
     const { texts, lefts } = await page.evaluate(() => ({
@@ -79,11 +96,10 @@ test.describe('shell', () => {
     expect(lefts).toHaveLength(1);
   });
 
-  test.describe('in a narrow window', { tag: '@openscreeps' }, () => {
+  test.describe('in a narrow window', () => {
     test.use({ viewport: { width: 560, height: 800 } });
 
-    test('the top bar keeps every control on one row', async ({ page, server, player }) => {
-      await signIn(page, server, player);
+    test('the top bar keeps every control on one row', async ({ signedInPage: page, user }) => {
       await expect(status(page)).toContainText('Connected', { timeout: 30_000 });
       const topbar = page.getByRole('banner');
       const controls = [
@@ -93,7 +109,7 @@ test.describe('shell', () => {
         topbar.getByRole('button', { name: 'Top-down view' }),
         topbar.getByRole('button', { name: 'Perspective view' }),
         topbar.getByRole('button', { name: 'Drawer', exact: true }),
-        topbar.getByRole('button', { name: `Account: ${player.username}` }),
+        topbar.getByRole('button', { name: `Account: ${user.username}` }),
       ];
       const bar = await topbar.boundingBox();
       if (!bar) throw new Error('the top bar has no box');
@@ -113,21 +129,92 @@ test.describe('shell', () => {
     });
   });
 
+  test('the brand leads to the servers', async ({ signedInPage: page }) => {
+    await page.getByRole('banner').getByRole('link', { name: 'Overseer: servers' }).click();
+    await expect(page).toHaveURL(/#\/$/);
+    await expect(page.getByRole('region', { name: 'Servers' })).toBeVisible();
+  });
+
+  test('menus move with the arrow keys and close with Escape, Tab or a click elsewhere', async ({
+    signedInPage: page,
+    user,
+  }) => {
+    await expect(status(page)).toContainText('Connected', { timeout: 30_000 });
+    const servers = page.getByRole('button', { name: /^Server: / });
+    const menu = page.getByRole('menu');
+    const items = menu.getByRole('menuitem').or(menu.getByRole('menuitemradio'));
+    await expect(servers).toHaveAttribute('aria-expanded', 'false');
+
+    await servers.click();
+    await expect(servers).toHaveAttribute('aria-expanded', 'true');
+    await expect(menu).toBeVisible();
+    // The current server is checked; "Manage servers…" comes last.
+    await expect(menu.getByRole('menuitemradio', { checked: true })).toHaveCount(1);
+    await expect(items.last()).toHaveText('Manage servers…');
+    await page.keyboard.press('ArrowDown');
+    await expect(items.first()).toBeFocused();
+    await page.keyboard.press('ArrowUp');
+    await expect(items.last()).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(items.first()).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await expect(servers).toHaveAttribute('aria-expanded', 'false');
+    await expect(servers).toBeFocused();
+
+    // ↓ on the button opens the menu on its first item; Tab leaves and closes it.
+    await page.keyboard.press('ArrowDown');
+    await expect(menu).toBeVisible();
+    await expect(items.first()).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(menu).toBeHidden();
+
+    // A click elsewhere closes it, also on the other menu, which opens alone.
+    await servers.click();
+    await expect(menu).toBeVisible();
+    const account = page.getByRole('button', { name: `Account: ${user.username}` });
+    await account.click();
+    await expect(servers).toHaveAttribute('aria-expanded', 'false');
+    await expect(account).toHaveAttribute('aria-expanded', 'true');
+    await expect(menu).toHaveCount(1);
+    await expect(menu.getByRole('menuitem')).toHaveText(['Profile', 'Rate limits', 'Sign out']);
+    await status(page).click();
+    await expect(menu).toBeHidden();
+    await expect(account).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  test('a toast confirms, can be dismissed and goes by itself', async ({ page }) => {
+    await page.goto('/#/');
+    await addServer(page, 'Toast one');
+    const first = page.getByRole('status').filter({ hasText: 'Added Toast one' });
+    await expect(first).toBeVisible();
+    await first.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(first).toBeHidden();
+
+    await addServer(page, 'Toast two');
+    const second = page.getByRole('status').filter({ hasText: 'Added Toast two' });
+    await expect(second).toBeVisible();
+    const shown = Date.now();
+    await expect(second).toBeHidden({ timeout: 15_000 });
+    // Long enough to read.
+    expect(Date.now() - shown).toBeGreaterThan(3_000);
+  });
+
   test.describe('with reduced motion', () => {
     test.use({ reducedMotion: 'reduce' });
 
     test('menus open without animating', async ({ page }) => {
       await page.goto('/#/');
-      const duration = await page.evaluate(() =>
-        getComputedStyle(document.documentElement).getPropertyValue('--duration').trim(),
-      );
-      expect(duration).toBe('0ms');
       await page.getByRole('button', { name: /^Server: / }).click();
       const menu = page.getByRole('menu');
       await expect(menu).toBeVisible();
-      expect(await menu.evaluate((element) => getComputedStyle(element).animationDuration)).toBe(
-        '0s',
-      );
+      const motion = await menu.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return [style.animationDuration, style.transitionDuration];
+      });
+      for (const duration of motion) {
+        expect(duration.split(',').every((part) => Number.parseFloat(part) === 0)).toBe(true);
+      }
     });
   });
 });
