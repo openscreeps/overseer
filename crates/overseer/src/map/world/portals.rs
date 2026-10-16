@@ -22,7 +22,7 @@ use overseer_net::{Client, Error as NetError};
 use super::focus::{Budget, Focus, Server, Tier, distance};
 use super::stats::epoch_millis;
 use super::terrain::{Terrains, reset_at};
-use super::{MINIMAP_CAP, WorldEvent};
+use super::{HELD_ROOM_MAPS, MINIMAP_CAP, WorldEvent};
 use crate::map::portal::portals_of;
 use crate::map::{
     Map, Portal, PortalDestination, RoomCoord, RoomRect, WorldKnowledge, may_have_portals,
@@ -60,11 +60,6 @@ pub const PORTAL_BACKGROUND_IN_FLIGHT: usize = 4;
 /// queue, behind the tick being processed (0.5 to 0.9 s on an idle disposable world, seconds
 /// when busy).
 pub const PORTAL_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Most scans in flight while a room wanted in detail waits for its first update (see
-/// [`DETAIL_FIRST`](super::DETAIL_FIRST)): viewed and visible rooms only, the background
-/// waits.
-pub const PORTAL_HELD_SCANS: usize = 4;
 
 /// How long the destinations of rooms with portals wait for scans still in flight of rooms of
 /// the same tier (or a higher one), which may be their partners (see
@@ -408,7 +403,7 @@ impl Portals {
     /// (viewed, then those of the wanted rooms or visible, then the background), the rooms
     /// where portals usually stand ([`may_have_portals`]) first but for viewed ones, nearest
     /// the centre first, as far as [`MINIMAP_CAP`] allows (while `held`, the background
-    /// waits and at most [`PORTAL_HELD_SCANS`] are in flight); then requests destinations
+    /// waits and at most [`HELD_ROOM_MAPS`] are in flight); then requests destinations
     /// ([`Self::fetch`]). Returns when to plan again (a scan times out, a retry or a request
     /// is due, or portals go stale).
     pub(super) fn plan(
@@ -448,7 +443,7 @@ impl Portals {
         }
         let mut free = MINIMAP_CAP.saturating_sub(self.minimaps + self.scans.len());
         if held {
-            free = free.min(PORTAL_HELD_SCANS.saturating_sub(self.scans.len()));
+            free = free.min(HELD_ROOM_MAPS.saturating_sub(self.scans.len()));
         }
         let millis = epoch_millis();
         while free > 0

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures_util::{FutureExt, StreamExt};
 use overseer::core::api::endpoints;
 use overseer::map::{
-    DETAIL_FIRST, DetailState, Interest, MINIMAP_CAP, PORTAL_HELD_SCANS, RoomCoord, RoomRect,
+    DETAIL_FIRST, DetailState, HELD_ROOM_MAPS, Interest, MINIMAP_CAP, RoomCoord, RoomRect,
     RoomStat, RoomStatus, STATS_BATCH_SECTORS, STATS_FAR_TTL, STATS_TTL, TERRAIN_BATCH, WorldEvent,
     WorldMap,
 };
@@ -1682,7 +1682,7 @@ async fn a_detail_room_subscribes_first_and_holds_scans_until_its_first_update()
         "{sent:?}"
     );
     let held = scans(&sent);
-    assert_eq!(held.len(), PORTAL_HELD_SCANS, "{sent:?}");
+    assert_eq!(held.len(), HELD_ROOM_MAPS, "{sent:?}");
     assert!(held.iter().all(|&scan| in_view_and_ring().contains(scan)));
     assert!(matches!(
         world.detail(room("W5N5")),
@@ -1709,7 +1709,7 @@ async fn a_detail_room_subscribes_first_and_holds_scans_until_its_first_update()
 #[tokio::test]
 async fn a_refused_detail_room_releases_the_scans() {
     let (mut world, mut websocket, sent) = detail_with_scans().await;
-    assert_eq!(scans(&sent).len(), PORTAL_HELD_SCANS);
+    assert_eq!(scans(&sent).len(), HELD_ROOM_MAPS);
     let barrier = sent[1].strip_prefix("subscribe ").unwrap().to_owned();
     server::send(&mut websocket, &format!(r#"["{barrier}",{{}}]"#)).await;
     // The server refuses the room on every update until it is released.
@@ -1730,13 +1730,13 @@ async fn held_scans_go_on_after_the_detail_deadline() {
     tokio::time::pause();
     world.set_interest(&detail_interest());
     let mut sent = Vec::new();
-    while scans(&sent).len() < PORTAL_HELD_SCANS {
+    while scans(&sent).len() < HELD_ROOM_MAPS {
         sent.extend(sent_for(&mut world, &mut websocket).await);
     }
     // The server never answers the room: the scans wait until the deadline, no longer.
     tokio::time::advance(DETAIL_FIRST.saturating_sub(Duration::from_millis(100))).await;
     sent.extend(sent_for(&mut world, &mut websocket).await);
-    assert_eq!(scans(&sent).len(), PORTAL_HELD_SCANS);
+    assert_eq!(scans(&sent).len(), HELD_ROOM_MAPS);
     tokio::time::advance(Duration::from_millis(101)).await;
     sent.extend(sent_for(&mut world, &mut websocket).await);
     assert!(scans(&sent).len() > 100, "{} scans", scans(&sent).len());
@@ -1781,4 +1781,37 @@ async fn a_room_updated_before_its_terrain_arrives_shows_once_it_does() {
         &snapshot.terrain,
         &world.terrain(room("W5N5")).unwrap()
     ));
+}
+
+#[tokio::test]
+async fn a_detail_room_goes_ahead_of_the_minimaps_until_its_first_update() {
+    let fake = Fake::new(12, rect("W10N10", "W0N0"));
+    let (_server, overseer, mut websocket) = connect(fake.routes()).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let minimaps = rect("W9N9", "W1N1").iter().collect::<Vec<_>>();
+    world.set_interest(&Interest {
+        detail: vec![room("W5N5")],
+        terrain: vec![room("W5N5")],
+        minimaps: minimaps.clone(),
+        ..Interest::default()
+    });
+    let sent = sent_for(&mut world, &mut websocket).await;
+    // The room first; then only the nearest minimaps while it waits.
+    assert_eq!(sent[0], "subscribe room:W5N5");
+    assert_eq!(
+        rooms_of(&scans(&sent)),
+        rooms_of(&minimaps[..HELD_ROOM_MAPS])
+    );
+    update(&mut websocket, room("W5N5"), 9).await;
+    let mut more = Vec::new();
+    while !matches!(world.detail(room("W5N5")), Some(DetailState::Live(_))) {
+        more.extend(sent_for(&mut world, &mut websocket).await);
+    }
+    more.extend(sent_for(&mut world, &mut websocket).await);
+    // Then all of them.
+    assert_eq!(scans(&more).len(), minimaps.len() - HELD_ROOM_MAPS);
+    assert_eq!(
+        rooms_of(&scans(&more)),
+        rooms_of(&minimaps[HELD_ROOM_MAPS..])
+    );
 }

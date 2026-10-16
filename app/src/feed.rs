@@ -163,7 +163,9 @@ impl Drop for Subscription {
 struct Sink {
     reach: Reach,
     deliver: Deliver,
-    interest: Interest,
+    /// What it needs; `None` until it says: it then needs nothing (a room control's room
+    /// rectangle would otherwise stand for its interest, with no live room yet).
+    interest: Option<Interest>,
 }
 
 /// The task: owns `world`, serves commands and forwards events.
@@ -197,36 +199,15 @@ async fn run(
             // The session closed, or the UI dropped the feed and every subscription.
             Either::Left(Err(_)) | Either::Right(None) => break,
             Either::Right(Some(command)) => {
-                match command {
-                    Command::Subscribe(id, reach, deliver) => {
-                        replay(&world, reach, &deliver);
-                        sinks.insert(
-                            id,
-                            Sink {
-                                reach,
-                                deliver,
-                                interest: Interest::default(),
-                            },
-                        );
-                    }
-                    Command::Interest(id, interest) => {
-                        if let Some(sink) = sinks.get_mut(&id) {
-                            sink.interest = interest;
-                        }
-                    }
-                    Command::Unsubscribe(id) => {
-                        sinks.remove(&id);
-                    }
-                    Command::RecheckRateLimit => {
-                        world.recheck_rate_limit();
-                    }
-                    Command::RateLimitExemptUntil(until) => {
-                        world.set_rate_limit_exempt_until(until);
-                    }
+                // Every command queued behind it too, then one interest: the world never
+                // plans for a half-applied burst (a new subscriber, then its interest).
+                handle(&mut world, &mut sinks, command);
+                while let Ok(command) = commands.try_recv() {
+                    handle(&mut world, &mut sinks, command);
                 }
                 let interests: Vec<(Reach, &Interest)> = sinks
                     .values()
-                    .map(|sink| (sink.reach, &sink.interest))
+                    .filter_map(|sink| Some((sink.reach, sink.interest.as_ref()?)))
                     .collect();
                 world.set_interest(&merge(&interests));
             }
@@ -235,6 +216,37 @@ async fn run(
         if now != progress {
             progress = now;
             on_progress(progress);
+        }
+    }
+}
+
+/// Applies a subscriber's `command`.
+fn handle(world: &mut WorldMap, sinks: &mut BTreeMap<u64, Sink>, command: Command) {
+    match command {
+        Command::Subscribe(id, reach, deliver) => {
+            replay(world, reach, &deliver);
+            sinks.insert(
+                id,
+                Sink {
+                    reach,
+                    deliver,
+                    interest: None,
+                },
+            );
+        }
+        Command::Interest(id, interest) => {
+            if let Some(sink) = sinks.get_mut(&id) {
+                sink.interest = Some(interest);
+            }
+        }
+        Command::Unsubscribe(id) => {
+            sinks.remove(&id);
+        }
+        Command::RecheckRateLimit => {
+            world.recheck_rate_limit();
+        }
+        Command::RateLimitExemptUntil(until) => {
+            world.set_rate_limit_exempt_until(until);
         }
     }
 }
