@@ -316,6 +316,10 @@ mod idb {
     const DB_VERSION: u32 = 3;
     /// How long records wait to be written with those arriving after them.
     const FLUSH_DELAY: Duration = Duration::from_secs(1);
+    /// Most records written in one transaction: each is encoded and put on the main thread,
+    /// so thousands at once (an overview response, a second of portal scans) are written in
+    /// turns of a few milliseconds, the browser handling input and frames in between.
+    const FLUSH_CHUNK: usize = 250;
 
     /// What a world's cache holds.
     #[derive(Default)]
@@ -477,9 +481,18 @@ mod idb {
             }
         }
 
-        /// Writes the queued records in one transaction, terrain as far as the bound allows.
+        /// Writes the queued records, [`FLUSH_CHUNK`] per transaction, terrain as far as the
+        /// bound allows.
         async fn flush(&self) -> Result<(), String> {
             let writes = std::mem::take(&mut *self.pending.borrow_mut());
+            for chunk in writes.chunks(FLUSH_CHUNK) {
+                self.write(chunk).await?;
+            }
+            Ok(())
+        }
+
+        /// Writes `writes` in one transaction, terrain as far as the bound allows.
+        async fn write(&self, writes: &[Write]) -> Result<(), String> {
             let terrain_count = writes
                 .iter()
                 .filter(|write| matches!(write, Write::Terrain(..)))
@@ -494,7 +507,7 @@ mod idb {
             let terrain = transaction.object_store(TERRAIN).map_err(js_message)?;
             let stats = transaction.object_store(STATS).map_err(js_message)?;
             let portals = transaction.object_store(PORTALS).map_err(js_message)?;
-            for write in &writes {
+            for write in writes {
                 match write {
                     Write::Terrain(room, record) => {
                         if allowed == 0 {

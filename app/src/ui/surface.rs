@@ -1,9 +1,11 @@
 //! A canvas with an `overseer-view` [`Viewer`]: its creation, the DOM events, the frame loop,
 //! the feed subscription and the interest the viewer reports.
 //!
-//! Frames are drawn from `requestAnimationFrame` only when something changed (input, data,
-//! a resize) and for as long as the viewer reports [`FrameStats::animating`], so an idle view
-//! costs nothing. After a frame whose camera or size changed, the viewer's interest goes to
+//! Frames are drawn from `requestAnimationFrame` only when something changed (input, a
+//! resize, data of the rooms in view: [`shows`]) and for as long as the viewer reports
+//! [`FrameStats::animating`], so an idle view costs nothing, and neither does the rest of
+//! the world loading in the background (its data waits in the viewer for the next frame).
+//! After a frame whose camera or size changed, the viewer's interest goes to
 //! the feed at most every [`INTEREST_INTERVAL_MS`] (the last change always arrives), and the
 //! [`Hooks::interest`] hook sees the viewer at each send: one camera change drives everything
 //! that follows the view.
@@ -17,7 +19,7 @@ use std::rc::Rc;
 
 use leptos::html::Canvas;
 use leptos::prelude::*;
-use overseer::map::{DetailState, WorldEvent};
+use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent};
 use overseer_view::{CameraState, FrameStats, Pick, PointerButton, Viewer};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -136,9 +138,25 @@ impl Surface {
         self.send_interest();
     }
 
-    /// Applies a feed event to the viewer.
+    /// Applies a feed event to the viewer; requests a frame when it changes what the canvas
+    /// shows ([`shows`]), else sends the interest when the event changed what the viewer
+    /// needs ([`Viewer::interest_revision`]: portals of rooms out of view, say).
     pub fn apply(self, event: &WorldEvent) {
-        self.with_viewer(|viewer| apply(viewer, event));
+        let outcome = self
+            .viewer
+            .try_update_value(|viewer| {
+                viewer.as_mut().map(|viewer| {
+                    let (view, revision) = (viewer.visible_rooms(), viewer.interest_revision());
+                    apply(viewer, event);
+                    (shows(view, event), viewer.interest_revision() != revision)
+                })
+            })
+            .flatten();
+        match outcome {
+            Some((true, _)) => self.request(),
+            Some((false, true)) => self.follow_interest(),
+            _ => {}
+        }
     }
 
     /// Requests a frame unless one is pending.
@@ -208,19 +226,27 @@ impl Surface {
         }
     }
 
-    /// Sends the interest when the camera, size or [`Viewer::interest_revision`] changed
-    /// (the hovered or selected room, portals arriving whose destinations the map wants), at
-    /// most every [`INTEREST_INTERVAL_MS`]; schedules a trailing send otherwise. A camera
-    /// that moved under a hovering pointer updates the hover.
+    /// Updates the hover when the camera moved under a hovering pointer, and follows the
+    /// interest ([`Self::follow_interest`]).
     fn after_frame(self) {
-        let Some((camera, revision)) =
-            self.with_viewer_quiet(|viewer| (viewer.camera(), viewer.interest_revision()))
-        else {
+        let Some(camera) = self.with_viewer_quiet(Viewer::camera) else {
             return;
         };
         if self.pointer.get_value().is_some() && self.hover.get_value().1 != Some(camera) {
             self.request_hover();
         }
+        self.follow_interest();
+    }
+
+    /// Sends the interest when the camera, size or [`Viewer::interest_revision`] changed
+    /// (the hovered or selected room, portals arriving whose destinations the map wants), at
+    /// most every [`INTEREST_INTERVAL_MS`]; schedules a trailing send otherwise.
+    fn follow_interest(self) {
+        let Some((camera, revision)) =
+            self.with_viewer_quiet(|viewer| (viewer.camera(), viewer.interest_revision()))
+        else {
+            return;
+        };
         let Some(clock) = self.interest.try_get_value() else {
             return;
         };
@@ -363,6 +389,40 @@ pub fn apply(viewer: &mut Viewer, event: &WorldEvent) {
         WorldEvent::Portals(room, portals) => viewer.set_portals(*room, portals),
         // Pauses show in the status bar (the world's progress).
         WorldEvent::Detail(_, DetailState::Pending) | WorldEvent::StatsPaused(_) => {}
+    }
+}
+
+/// Whether `event` changes what a canvas showing `view` (its visible rooms) draws: data of a
+/// room in view or next to it (outlines, labels and portal runs reach over the edge), portals
+/// leading into it, and every change of a live room or detail state.
+pub fn shows(view: RoomRect, event: &WorldEvent) -> bool {
+    let near = RoomRect::new(
+        RoomCoord {
+            x: view.min.x - 1,
+            y: view.min.y - 1,
+        },
+        RoomCoord {
+            x: view.max.x + 1,
+            y: view.max.y + 1,
+        },
+    );
+    match event {
+        WorldEvent::Terrain(room, _)
+        | WorldEvent::NoTerrain(room)
+        | WorldEvent::Minimap(room, _)
+        | WorldEvent::MinimapGone(room) => near.contains(*room),
+        WorldEvent::Stats(stats) => stats.iter().any(|(room, _)| near.contains(*room)),
+        WorldEvent::Portals(room, portals) => {
+            near.contains(*room)
+                || portals.iter().any(|portal| {
+                    portal
+                        .destination
+                        .as_ref()
+                        .is_some_and(|destination| near.contains(destination.room))
+                })
+        }
+        WorldEvent::Detail(..) | WorldEvent::DetailGone(_) => true,
+        WorldEvent::StatsPaused(_) => false,
     }
 }
 
@@ -625,4 +685,84 @@ async fn create_viewer(canvas: web_sys::HtmlCanvasElement) -> Result<Viewer, Str
 #[expect(clippy::unused_async, reason = "the same signature as in browsers")]
 async fn create_viewer(_canvas: web_sys::HtmlCanvasElement) -> Result<Viewer, String> {
     Err("the viewer needs a browser".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use overseer::map::{
+        DetailState, Portal, PortalDestination, RoomCoord, RoomRect, RoomStat, RoomStatus,
+        WorldEvent,
+    };
+
+    use super::shows;
+
+    fn room(name: &str) -> RoomCoord {
+        name.parse().unwrap()
+    }
+
+    fn stat(rooms: &[&str]) -> WorldEvent {
+        let stat = Arc::new(RoomStat {
+            status: RoomStatus::Normal,
+            status_until: None,
+            owner: None,
+            reservation: None,
+            safe_mode: false,
+            mineral: None,
+            mineral_density: None,
+            fetched_at: 0,
+        });
+        WorldEvent::Stats(
+            rooms
+                .iter()
+                .map(|name| (room(name), Arc::clone(&stat)))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn background_rooms_draw_nothing_until_they_come_into_view() {
+        // W2N2..W0N0 in view: W3N3 touches it, W5N5 and E5S5 do not.
+        let view = RoomRect::new(room("W2N2"), room("W0N0"));
+        assert!(shows(view, &WorldEvent::NoTerrain(room("W1N1"))));
+        assert!(shows(view, &WorldEvent::NoTerrain(room("W3N3"))));
+        assert!(shows(view, &WorldEvent::NoTerrain(room("E0S0"))));
+        assert!(!shows(view, &WorldEvent::NoTerrain(room("W5N5"))));
+        assert!(!shows(view, &WorldEvent::MinimapGone(room("E5S5"))));
+        // One room of a batch in view is enough.
+        assert!(!shows(view, &stat(&["W9N9", "E5S5"])));
+        assert!(shows(view, &stat(&["W9N9", "W2N1"])));
+        assert!(!shows(view, &WorldEvent::StatsPaused(Some(1))));
+        // Live rooms and detail states always draw.
+        assert!(shows(view, &WorldEvent::DetailGone(room("E5S5"))));
+        assert!(shows(
+            view,
+            &WorldEvent::Detail(room("E5S5"), DetailState::Pending)
+        ));
+    }
+
+    #[test]
+    fn portals_draw_when_they_stand_or_lead_into_view() {
+        let view = RoomRect::new(room("W2N2"), room("W0N0"));
+        let portals = |at: &str, to: Option<&str>| {
+            let mut portal = Portal::pending(room(at), 25, 25);
+            portal.destination = to.map(|to| PortalDestination {
+                room: room(to),
+                shard: None,
+                x: Some(25),
+                y: Some(25),
+            });
+            WorldEvent::Portals(room(at), Arc::from(vec![portal]))
+        };
+        assert!(shows(view, &portals("W1N1", None)));
+        assert!(!shows(view, &portals("W10N10", None)));
+        assert!(shows(view, &portals("W10N10", Some("W1N1"))));
+        assert!(!shows(view, &portals("W10N10", Some("W20N20"))));
+        // No portals left in a room out of view.
+        assert!(!shows(
+            view,
+            &WorldEvent::Portals(room("W10N10"), Arc::from(Vec::new()))
+        ));
+    }
 }

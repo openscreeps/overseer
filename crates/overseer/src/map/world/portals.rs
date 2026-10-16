@@ -151,8 +151,11 @@ pub(super) struct Portals {
     /// When the queue is to be rebuilt for rooms going stale or due a retry.
     next_check: Option<Instant>,
     /// The latest [`Self::progress`] and the count of absent rooms it was computed with;
-    /// cleared by every change of what is known or wanted.
+    /// cleared when what is wanted changes.
     progress: Cell<Option<(usize, (usize, usize))>>,
+    /// Rooms whose portals became known since the latest [`Self::progress`]: it counts them
+    /// then, rather than every wanted room again after each scan.
+    learnt: Cell<Vec<RoomCoord>>,
     /// The live minimaps, which take their share of [`MINIMAP_CAP`].
     minimaps: usize,
     scans: Vec<Scan>,
@@ -185,6 +188,7 @@ impl Portals {
             world,
             rect: None,
             progress: Cell::new(None),
+            learnt: Cell::new(Vec::new()),
             queue: VecDeque::new(),
             reorder: true,
             next_check: None,
@@ -279,16 +283,19 @@ impl Portals {
             return;
         }
         let stale_at = stale_at(room, &portals, scanned_at, Instant::now(), epoch_millis());
-        self.known.insert(
-            room,
-            Known {
-                some: !portals.is_empty(),
-                inferred: false,
-                scanned_at,
-                live_at: None,
-                stale_at,
-            },
-        );
+        let learnt = self
+            .known
+            .insert(
+                room,
+                Known {
+                    some: !portals.is_empty(),
+                    inferred: false,
+                    scanned_at,
+                    live_at: None,
+                    stale_at,
+                },
+            )
+            .is_none();
         if portals.iter().any(|portal| portal.destination.is_none()) {
             self.tiles.insert(
                 room,
@@ -310,20 +317,36 @@ impl Portals {
         }
         self.knowledge.set_portals(room, portals);
         self.check_at(stale_at);
-        self.progress.set(None);
+        if learnt {
+            self.learn(room);
+        }
+    }
+
+    /// Counts `room`, whose portals were not known before, at the next [`Self::progress`].
+    fn learn(&self, room: RoomCoord) {
+        let mut learnt = self.learnt.take();
+        learnt.push(room);
+        self.learnt.set(learnt);
     }
 
     /// The wanted rooms (but those `terrain` knows the server has no terrain for) whose
     /// portals are known (possibly stale), and all of them.
     pub(super) fn progress(&self, terrain: &Terrains) -> (usize, usize) {
+        let learnt = self.learnt.take();
         let Some(rect) = self.rect else {
             return (0, 0);
         };
         let absent = terrain.absent_count();
-        if let Some((seen, progress)) = self.progress.get()
+        if let Some((seen, (known, wanted))) = self.progress.get()
             && seen == absent
         {
-            return progress;
+            let known = known
+                + learnt
+                    .iter()
+                    .filter(|&&room| rect.contains(room) && !terrain.is_absent(room))
+                    .count();
+            self.progress.set(Some((absent, (known, wanted))));
+            return (known, wanted);
         }
         let progress = rect.iter().filter(|&room| !terrain.is_absent(room)).fold(
             (0, 0),
@@ -549,7 +572,13 @@ impl Portals {
             return;
         }
         let centre = focus.centre();
-        if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT {
+        if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT || self.found.is_empty() {
+            return;
+        }
+        // Planning runs after every scan: the rooms waiting are ordered only when one of them
+        // may go out.
+        if let Some(at) = budget.ready_at(Tier::Background) {
+            due.at(at);
             return;
         }
         let mut rest = self
@@ -572,16 +601,17 @@ impl Portals {
             })
             .collect::<Vec<_>>();
         rest.sort_unstable();
+        let mut flying = self
+            .fetches
+            .iter()
+            .map(|fetch| self.shape(fetch.room))
+            .collect::<Vec<_>>();
         for (_, room) in rest {
             if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT {
                 return;
             }
             let shape = self.shape(room);
-            if self
-                .fetches
-                .iter()
-                .any(|fetch| self.shape(fetch.room) == shape)
-            {
+            if flying.contains(&shape) {
                 continue;
             }
             if let Err(at) = budget.take(Tier::Background) {
@@ -589,6 +619,7 @@ impl Portals {
                 return;
             }
             self.start(map, shard, room, millis);
+            flying.push(shape);
         }
         if let Some(at) = waiting.0 {
             due.at(at);
@@ -868,20 +899,27 @@ impl Portals {
         let scanned_at = epoch_millis();
         let portals = Arc::<[Portal]>::from(portals);
         let stale_at = stale_at(room, &portals, scanned_at, Instant::now(), scanned_at);
-        self.known.insert(
-            room,
-            Known {
-                // A room whose map view shows portals though none came (a portal its objects
-                // do not list) counts as having some, so its live minimap does not ask again.
-                some: !portals.is_empty() || self.tiles.contains_key(&room),
-                inferred,
-                scanned_at,
-                live_at,
-                stale_at,
-            },
-        );
+        let some = !portals.is_empty() || self.tiles.contains_key(&room);
+        let learnt = self
+            .known
+            .insert(
+                room,
+                Known {
+                    // A room whose map view shows portals though none came (a portal its
+                    // objects do not list) counts as having some, so its live minimap does not
+                    // ask again.
+                    some,
+                    inferred,
+                    scanned_at,
+                    live_at,
+                    stale_at,
+                },
+            )
+            .is_none();
         self.check_at(stale_at);
-        self.progress.set(None);
+        if learnt {
+            self.learn(room);
+        }
         self.knowledge.set_portals(room, Arc::clone(&portals));
         events.push_back(WorldEvent::Portals(room, portals));
     }
