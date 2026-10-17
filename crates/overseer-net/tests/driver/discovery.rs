@@ -122,6 +122,13 @@ async fn assert_accessors_follow_subsystems(api: &Api, server: &Server) {
     if !api.supports(Subsystem::UsernameLookup) {
         unsupported(api.name().await.unwrap_err(), Subsystem::UsernameLookup);
     }
+    if !api.supports(Subsystem::CpuShards) {
+        let cpu = [("shard0".to_owned(), 20)].into_iter().collect();
+        unsupported(
+            api.set_cpu_shards(cpu).await.unwrap_err(),
+            Subsystem::CpuShards,
+        );
+    }
     assert_eq!(server.requests().len(), before, "unsupported sent nothing");
 }
 

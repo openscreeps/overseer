@@ -1,9 +1,10 @@
 //! Account operations whose shape differs per server: the registration checks (`exists`
 //! natively, `User Exists` from screepsmod-auth), registration and password changes through
-//! the password accounts, and the start room.
+//! the password accounts, the start room, and the CPU allocation between shards.
 
 use overseer_core::Token;
 use overseer_core::model::account::{Availability, Registration, StartRoom};
+use overseer_core::model::platform::Subsystem;
 use overseer_net::api::{AccountApi as _, PasswordAccount as _};
 use overseer_net::{Client, Error};
 
@@ -40,7 +41,9 @@ fn routes(
                 (200, r#"{"ok":1}"#.to_owned())
             }
         }
-        "/api/register/submit" | "/api/user/password" => (200, r#"{"ok":1}"#.to_owned()),
+        "/api/register/submit" | "/api/user/password" | "/api/user/cpu-shards" => {
+            (200, r#"{"ok":1}"#.to_owned())
+        }
         "/api/user/world-start-room" => (200, r#"{"ok":1,"room":["W5N5"]}"#.to_owned()),
         _ => (404, "Not Found".to_owned()),
     }
@@ -243,4 +246,37 @@ async fn community_checks_without_plugins_answer_natively() {
     let client = client(&server);
     checks(&client).await;
     assert!(client.api().await.unwrap().password_account().is_none());
+}
+
+#[tokio::test]
+async fn official_servers_replace_the_cpu_of_every_shard() {
+    let server = Server::start(routes(VERSION, None, "exists"), |_| true).await;
+    let client = Client::builder(server.official_url())
+        .token(Token::new("t"))
+        .build()
+        .unwrap();
+    let api = client.api().await.unwrap();
+    let cpu = [("shard3".to_owned(), 80), ("shard0".to_owned(), 20)]
+        .into_iter()
+        .collect();
+    api.set_cpu_shards(cpu).await.unwrap();
+    let sent = request(&server, "/api/user/cpu-shards");
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.body, r#"{"cpu":{"shard0":20,"shard3":80}}"#);
+}
+
+#[tokio::test]
+async fn other_servers_refuse_the_cpu_allocation_without_a_request() {
+    for version in [VERSION, STOCK_VERSION] {
+        let server = Server::start(routes(version, Some(AUTHMOD), "exists"), |_| true).await;
+        let api = client(&server).api().await.unwrap();
+        let before = server.requests().len();
+        let cpu = [("shard0".to_owned(), 20)].into_iter().collect();
+        let error = api.set_cpu_shards(cpu).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Unsupported(Subsystem::CpuShards)),
+            "{error:?}"
+        );
+        assert_eq!(server.requests().len(), before, "nothing was sent");
+    }
 }

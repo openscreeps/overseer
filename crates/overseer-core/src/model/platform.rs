@@ -145,6 +145,9 @@ pub enum Subsystem {
     /// A website with pages to register, recover a password and manage API tokens:
     /// screeps.com.
     AccountWebsite,
+    /// Allocating the account's CPU between shards (`POST /api/user/cpu-shards`): screeps.com
+    /// and its Season server. The profile (`GET /api/auth/me`) holds the current allocation.
+    CpuShards,
     /// Every object of a room over HTTP (`GET /api/game/room-objects`): screeps.com,
     /// `OpenScreeps`, screepsmod-admin-utils.
     RoomObjects,
@@ -165,13 +168,14 @@ pub enum Subsystem {
 
 impl Subsystem {
     /// Every subsystem, in declaration order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::PasswordSignIn,
         Self::PasswordAccounts,
         Self::ApiTokens,
         Self::RateLimitLift,
         Self::UsernameLookup,
         Self::AccountWebsite,
+        Self::CpuShards,
         Self::RoomObjects,
         Self::RoomHistory,
         Self::RoomDecorations,
@@ -189,6 +193,7 @@ impl Subsystem {
             Self::RateLimitLift => "lifting rate limits",
             Self::UsernameLookup => "the username lookup",
             Self::AccountWebsite => "an account website",
+            Self::CpuShards => "CPU allocation between shards",
             Self::RoomObjects => "room objects",
             Self::RoomHistory => "room history",
             Self::RoomDecorations => "room decorations",
@@ -227,6 +232,7 @@ impl Subsystems {
                 .with(Subsystem::RateLimitLift)
                 .with(Subsystem::UsernameLookup)
                 .with(Subsystem::AccountWebsite)
+                .with(Subsystem::CpuShards)
                 .with(Subsystem::RoomObjects)
                 .with(Subsystem::RoomHistory)
                 .with(Subsystem::RoomDecorations)
@@ -250,8 +256,8 @@ impl Subsystems {
     ///
     /// - screeps.com: everything but [`Subsystem::PasswordAccounts`] (its website registers
     ///   accounts and changes passwords).
-    /// - `OpenScreeps`: everything but [`Subsystem::ApiTokens`], [`Subsystem::RateLimitLift`]
-    ///   and [`Subsystem::AccountWebsite`].
+    /// - `OpenScreeps`: everything but [`Subsystem::ApiTokens`], [`Subsystem::RateLimitLift`],
+    ///   [`Subsystem::AccountWebsite`] and [`Subsystem::CpuShards`].
     /// - The stock community server: none; screepsmod-auth adds password sign-in, password
     ///   accounts, API tokens, lifting their rate limits and the username lookup,
     ///   screepsmod-admin-utils room objects, a room-history mod room history.
@@ -778,8 +784,9 @@ mod tests {
     #[test]
     fn subsystems_follow_the_kind_and_the_plugins() {
         use Subsystem::{
-            AccountWebsite, ApiTokens, NoviceRooms, ObjectSearch, PasswordAccounts, PasswordSignIn,
-            RateLimitLift, RoomDecorations, RoomHistory, RoomObjects, UsernameLookup,
+            AccountWebsite, ApiTokens, CpuShards, NoviceRooms, ObjectSearch, PasswordAccounts,
+            PasswordSignIn, RateLimitLift, RoomDecorations, RoomHistory, RoomObjects,
+            UsernameLookup,
         };
         let auth = Plugins {
             screepsmod_auth: true,
@@ -804,6 +811,7 @@ mod tests {
             RateLimitLift,
             UsernameLookup,
             AccountWebsite,
+            CpuShards,
             RoomObjects,
             RoomHistory,
             RoomDecorations,

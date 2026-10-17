@@ -35,6 +35,7 @@ Servers do not all have the same features. Overseer names each feature that can 
 | `RateLimitLift` | yes (web page) | no | with screepsmod-auth (one request) |
 | `UsernameLookup` | yes | yes | with screepsmod-auth |
 | `AccountWebsite` | yes | no | no |
+| `CpuShards` (CPU allocation between shards) | yes | no | no |
 | `RoomObjects` | yes | yes | with screepsmod-admin-utils |
 | `RoomHistory` | yes | yes | with a room-history mod |
 | `RoomDecorations` | yes | yes | no |

@@ -1,12 +1,16 @@
 //! Account area: the signed-in user's profile, preferences, badge, e-mail and username, world
 //! status, start room, respawn and statistics overview, and the subsystems password sign-in
 //! ([`PasswordSignIn`]), password accounts ([`PasswordAccount`]: registration and password
-//! changes), API tokens ([`ApiTokens`]), lifting their rate limits ([`RateLimitLift`]) and the
-//! account website ([`AccountWebsite`]).
+//! changes), API tokens ([`ApiTokens`]), lifting their rate limits ([`RateLimitLift`]), the
+//! account website ([`AccountWebsite`]) and the CPU allocation between shards
+//! ([`AccountApi::set_cpu_shards`]).
 
 mod api_tokens;
 mod password;
 mod rate_limit_lift;
+
+use std::collections::BTreeMap;
+use std::future::ready;
 
 use overseer_core::api::plugins::{screepsmod_admin_utils, screepsmod_auth};
 use overseer_core::api::{ApiError, Reply, community, official, openscreeps};
@@ -107,6 +111,19 @@ pub trait AccountApi {
     /// rejected badge.
     fn set_badge(&self, badge: UserBadgeInput) -> impl Future<Output = Result<(), Error>>;
 
+    /// Replaces the CPU limit of every shard with `cpu`, by shard name
+    /// (`POST /api/user/cpu-shards`; [`Subsystem::CpuShards`]). Omitted shards get 0. The
+    /// limits must total the account's CPU, and the server refuses a change within 12 hours
+    /// after the previous one ([`Profile::cpu_shards_updated`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] on a server without the CPU allocation (nothing is
+    /// sent) and the errors of [`Client::send`](crate::Client::send), for example when the
+    /// server refuses the limits.
+    fn set_cpu_shards(&self, cpu: BTreeMap<String, u64>)
+    -> impl Future<Output = Result<(), Error>>;
+
     /// Changes the account's e-mail address (`POST /api/user/email`).
     ///
     /// # Errors
@@ -200,6 +217,10 @@ impl AccountApi for Api {
 
     async fn set_badge(&self, badge: UserBadgeInput) -> Result<(), Error> {
         delegate!(self, api => api.set_badge(badge).await)
+    }
+
+    async fn set_cpu_shards(&self, cpu: BTreeMap<String, u64>) -> Result<(), Error> {
+        delegate!(self, api => api.set_cpu_shards(cpu).await)
     }
 
     async fn set_email(&self, email: &str) -> Result<(), Error> {
@@ -328,6 +349,14 @@ impl AccountApi for Official {
             room: room.room,
         }))
     }
+
+    async fn set_cpu_shards(&self, cpu: BTreeMap<String, u64>) -> Result<(), Error> {
+        let set = official::endpoints::UserCpuShardsSet {
+            body: official::types::UserCpuShardsRequest { cpu },
+        };
+        self.client.send(&set).await?;
+        Ok(())
+    }
 }
 
 impl AccountApi for OpenScreeps {
@@ -336,6 +365,13 @@ impl AccountApi for OpenScreeps {
     async fn start_room(&self, _shard: Option<&str>) -> Result<Option<StartRoom>, Error> {
         let start = openscreeps::endpoints::UserWorldStartRoom { shard: None };
         Ok(self.client.send(&start).await?.body.into())
+    }
+
+    fn set_cpu_shards(
+        &self,
+        _cpu: BTreeMap<String, u64>,
+    ) -> impl Future<Output = Result<(), Error>> {
+        ready(Err(Error::Unsupported(Subsystem::CpuShards)))
     }
 }
 
@@ -407,6 +443,13 @@ impl AccountApi for Community {
         };
         self.client.send(&set).await?;
         Ok(())
+    }
+
+    fn set_cpu_shards(
+        &self,
+        _cpu: BTreeMap<String, u64>,
+    ) -> impl Future<Output = Result<(), Error>> {
+        ready(Err(Error::Unsupported(Subsystem::CpuShards)))
     }
 
     async fn set_email(&self, email: &str) -> Result<(), Error> {

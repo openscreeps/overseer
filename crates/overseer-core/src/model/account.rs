@@ -49,6 +49,15 @@ pub struct Profile {
     pub money: f64,
     /// CPU per tick available to the account, when reported.
     pub cpu: Option<f64>,
+    /// The CPU limit of each shard, by shard name (`cpuShard`): screeps.com and its Season
+    /// server. Empty when the server does not report it. Change it with
+    /// `POST /api/user/cpu-shards`
+    /// ([`Subsystem::CpuShards`](crate::model::platform::Subsystem::CpuShards)).
+    pub cpu_shards: BTreeMap<String, f64>,
+    /// When the CPU limits of the shards changed last, in milliseconds since the Unix epoch
+    /// (`cpuShardUpdatedTime`), when reported. The server refuses a new change for 12 hours
+    /// after it.
+    pub cpu_shards_updated: Option<f64>,
     /// Lifetime control points (GCL progress), when reported.
     pub gcl: Option<f64>,
     /// Lifetime power processed (GPL progress), when reported.
@@ -72,6 +81,8 @@ macro_rules! profile_from {
                     badge: me.badge,
                     money: me.money,
                     cpu: me.cpu,
+                    cpu_shards: me.cpu_shard.unwrap_or_default(),
+                    cpu_shards_updated: me.cpu_shard_updated_time,
                     gcl: me.gcl,
                     power: me.power,
                     notify_prefs: me.notify_prefs.unwrap_or_default(),
@@ -380,7 +391,8 @@ mod tests {
 
     /// An official profile with a Steam account (`ownership` is a list of app ids there).
     const OFFICIAL: &str = r##"{"ok":1,"_id":"5a1b","username":"Alice","email":"alice@example.com",
-        "password":true,"money":1234.5,"cpu":100,"gcl":3000000,"power":5000,
+        "password":true,"money":1234.5,"cpu":100,"cpuShard":{"shard0":20,"shard3":80},
+        "cpuShardUpdatedTime":1700000000000,"gcl":3000000,"power":5000,
         "powerExperimentations":1,"badge":{"type":12,"color1":"#ff0000","color2":"#00ff00",
             "color3":"#0000ff","param":0,"flip":false},
         "notifyPrefs":{"disabled":false,"interval":60},
@@ -407,6 +419,10 @@ mod tests {
                 badge,
                 money: 1234.5,
                 cpu: Some(100.0),
+                cpu_shards: [("shard0".to_owned(), 20.0), ("shard3".to_owned(), 80.0)]
+                    .into_iter()
+                    .collect(),
+                cpu_shards_updated: Some(1_700_000_000_000.0),
                 gcl: Some(3_000_000.0),
                 power: Some(5000.0),
                 notify_prefs: UserNotifyPrefs {
@@ -430,6 +446,9 @@ mod tests {
         assert_eq!(profile.has_password, Some(false));
         assert_eq!(profile.email, None);
         assert_eq!(profile.badge, None);
+        // No CPU allocation reads as an empty one.
+        assert!(profile.cpu_shards.is_empty());
+        assert_eq!(profile.cpu_shards_updated, None);
         // No saved preferences read as the defaults.
         assert_eq!(profile.notify_prefs, UserNotifyPrefs::default());
     }

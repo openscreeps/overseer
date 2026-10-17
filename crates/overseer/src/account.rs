@@ -1,7 +1,8 @@
-//! The signed-in user's account: profile, overview statistics, world status, start room, respawn, CPU and resources, badge, e-mail, username and password, notification preferences, API tokens and power creeps.
+//! The signed-in user's account: profile, overview statistics, world status, start room, respawn, CPU and its allocation between shards, resources, badge, e-mail, username and password, notification preferences, API tokens and power creeps.
 
 mod power_creeps;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use overseer_net::api::{
@@ -22,7 +23,7 @@ use crate::{Error, Overseer, Watch};
 
 pub use power_creeps::PowerCreeps;
 
-/// The signed-in user's account: profile, overview statistics, world status, start room, respawn, CPU and resources, badge, e-mail, username and password, notification preferences, API tokens and power creeps.
+/// The signed-in user's account: profile, overview statistics, world status, start room, respawn, CPU and its allocation between shards, resources, badge, e-mail, username and password, notification preferences, API tokens and power creeps.
 ///
 /// Created by [`Overseer::account`]; cheap to clone. Every operation needs a signed-in user
 /// and fails with [`Error::Anonymous`] otherwise, and with [`Error::Closed`] after
@@ -45,7 +46,7 @@ impl Account {
     /// first call makes no request) and then served from a cache shared by every handle;
     /// [`Self::refresh`] fetches it again. The account's own changes made through this crate
     /// ([`Self::set_badge`], [`Self::set_email`], [`Self::set_username`],
-    /// [`Self::set_notify_prefs`], [`Self::respawn`],
+    /// [`Self::set_notify_prefs`], [`Self::set_cpu_shards`], [`Self::respawn`],
     /// [`PowerCreeps::start_experimentation`]) clear the cache, so the next call fetches it.
     ///
     /// # Errors
@@ -204,6 +205,25 @@ impl Account {
     /// fails or the server rejects the badge (`invalid params`).
     pub async fn set_badge(&self, badge: UserBadgeInput) -> Result<(), Error> {
         self.overseer.user_api()?.set_badge(badge).await?;
+        forget_me(&self.overseer).await;
+        Ok(())
+    }
+
+    /// Replaces the CPU limit of every shard with `cpu`, by shard name
+    /// (`POST /api/user/cpu-shards`), on servers with the CPU allocation
+    /// ([`Subsystem::CpuShards`]). Omitted shards get 0. The limits must total the account's
+    /// CPU ([`Profile::cpu`]), and the server refuses a change within 12 hours after the
+    /// previous one ([`Profile::cpu_shards_updated`]). After success the cached profile is
+    /// cleared, so the next [`Self::me`] reads the new allocation ([`Profile::cpu_shards`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`], [`Error::Closed`], [`Error::Net`] with
+    /// [`Unsupported`](overseer_net::Error::Unsupported) on a server without the CPU
+    /// allocation (nothing is sent), and [`Error::Net`] when the request fails or the server
+    /// refuses the limits.
+    pub async fn set_cpu_shards(&self, cpu: BTreeMap<String, u64>) -> Result<(), Error> {
+        self.overseer.user_api()?.set_cpu_shards(cpu).await?;
         forget_me(&self.overseer).await;
         Ok(())
     }

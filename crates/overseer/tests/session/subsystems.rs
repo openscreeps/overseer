@@ -75,6 +75,8 @@ async fn a_discovered_session_reports_its_subsystems_and_connection() {
         Subsystem::RateLimitLift,
     );
     assert_unsupported(account.rate_limit_lift(), Subsystem::RateLimitLift);
+    let cpu = [("shard0".to_owned(), 20)].into_iter().collect();
+    assert_unsupported(account.set_cpu_shards(cpu).await, Subsystem::CpuShards);
     assert_eq!(server.requests().len(), requested, "nothing was sent");
     overseer.shutdown().await;
 }
