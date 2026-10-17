@@ -59,9 +59,8 @@ impl fmt::Display for Failure {
     }
 }
 
-/// The text to show for a client error: the server's own error string when it sent one,
-/// else the error and its causes.
-pub fn message(error: &overseer::net::Error) -> String {
+/// The server's own error string of a client error, when it sent one.
+fn server_message(error: &overseer::net::Error) -> Option<&str> {
     match error {
         overseer::net::Error::Api(
             ApiError::Server(message)
@@ -69,9 +68,15 @@ pub fn message(error: &overseer::net::Error) -> String {
                 message: Some(message),
                 ..
             },
-        ) => message.clone(),
-        error => describe(error),
+        ) => Some(message),
+        _ => None,
     }
+}
+
+/// The text to show for a client error: the server's own error string when it sent one,
+/// else the error and its causes.
+pub fn message(error: &overseer::net::Error) -> String {
+    server_message(error).map_or_else(|| describe(error), str::to_owned)
 }
 
 /// [`message`] for a library error: the server's own error string when it sent one, else the
@@ -81,6 +86,18 @@ pub fn error_message(error: &overseer::Error) -> String {
         overseer::Error::Net(error) => message(error),
         error => describe(error),
     }
+}
+
+/// Whether `error` of a user lookup (`Users::find`) says that no user has the name. The
+/// server sends no status or code for it: only its own error string tells (`user not
+/// found`; community servers fail with a `TypeError: …` instead). A failure without the
+/// server's string (transport, decoding) is never an unknown user.
+pub fn is_unknown_user(error: &overseer::Error) -> bool {
+    let overseer::Error::Net(error) = error else {
+        return false;
+    };
+    server_message(error)
+        .is_some_and(|message| message.contains("not found") || message.starts_with("TypeError"))
 }
 
 /// `error` followed by each of its causes.
@@ -179,7 +196,7 @@ mod tests {
     use overseer::core::api::ApiError;
     use overseer::net::Error;
 
-    use super::{Failure, message};
+    use super::{Failure, is_unknown_user, message};
 
     #[test]
     fn classifies_failures() {
@@ -210,5 +227,23 @@ mod tests {
             "incorrect server password"
         );
         assert_eq!(Failure::Other("down".to_owned()).to_string(), "down");
+    }
+
+    #[test]
+    fn unknown_users() {
+        let server =
+            |text: &str| overseer::Error::Net(Error::Api(ApiError::Server(text.to_owned())));
+        assert!(is_unknown_user(&server("user not found")));
+        assert!(is_unknown_user(&server(
+            "TypeError: Cannot read properties of null (reading 'steam')"
+        )));
+        assert!(!is_unknown_user(&server("unauthorized")));
+        assert!(
+            !is_unknown_user(&overseer::Error::Net(Error::UnexpectedReply(
+                "user not found"
+            ))),
+            "only the server's own error string tells"
+        );
+        assert!(!is_unknown_user(&overseer::Error::Closed));
     }
 }

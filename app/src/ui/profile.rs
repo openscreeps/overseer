@@ -5,8 +5,6 @@ mod cpu_shards;
 
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::Overseer;
@@ -14,13 +12,16 @@ use overseer::model::account::{Profile, UserNotifyPrefs, UserWorldStatus};
 use overseer::model::platform::Subsystem;
 use overseer::model::socket::{UserCpu, UserCpuCpu};
 
-use crate::levels::{self, LevelProgress};
 use crate::register::{confirm_error, email_error, password_error};
 use crate::route::{Route, Shard, parse_room};
 use crate::session;
 use crate::state::AppState;
 use crate::ui::form::{Field, FormError, FormStatus};
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::player::OwnRooms;
+use crate::ui::player::summary::{
+    HeadSkeleton, LevelRows, STAT_NAME, STAT_VALUE, STATS, SummaryHead, load_badge, open_map,
+};
 use crate::ui::spawn_scoped;
 use crate::ui::style::{self, concatcp};
 use cpu_shards::CpuShards;
@@ -55,21 +56,6 @@ const DEFAULT_INTERVAL: u64 = 60;
 /// The official client's default script error interval.
 const DEFAULT_ERROR_INTERVAL: u64 = 30;
 
-/// The profile's head: badge, name and server.
-pub const HEAD: &str = "flex items-center gap-4 mb-5";
-/// The account's badge.
-pub const BADGE: &str = "flex-none size-[64px] rounded-full bg-panel-2";
-/// The badge's placeholder while it loads.
-pub const BADGE_SKELETON: &str = "flex-none size-[64px] rounded-full bg-linear-90 from-panel-2 \
-    from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] animate-shimmer \
-    motion-reduce:animate-none";
-/// The account's figures: names beside their values, stacked on phones.
-pub const STATS: &str = "grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 max-xs:grid-cols-1 \
-    max-xs:gap-x-4 max-xs:gap-y-0";
-/// The name of a figure of [`STATS`].
-pub const STAT_NAME: &str = "text-muted";
-/// The value of a figure of [`STATS`].
-pub const STAT_VALUE: &str = "flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums max-xs:mb-2";
 /// A placeholder line of [`STATS`] while the profile loads, as tall as a figure.
 const STAT_SKELETON: &str = "inline-block w-24 h-[1.1em] align-middle rounded-sm bg-linear-90 \
     from-panel-2 from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] \
@@ -122,17 +108,18 @@ pub fn Profile() -> impl IntoView {
     };
     reload(false);
     let reload = StoredValue::new_local(reload);
+    let refresh = Callback::new(move |()| reload.with_value(|reload| reload(true)));
     // Password changes through the API, where the server has password accounts (screeps.com
     // changes them on its website).
     let password_accounts = overseer.world().supports(Subsystem::PasswordAccounts);
     view! {
         <div class=style::PAGE>
             <Summary overseer=overseer.clone() me />
-            <super::player::OwnRooms overseer=overseer.clone() />
+            <OwnRooms overseer=overseer.clone() />
             <div class="grid grid-cols-[repeat(auto-fit,minmax(17rem,1fr))] items-start gap-4">
-                <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
-                <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
-                <CpuShards overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
+                <NotifyPrefs overseer=overseer.clone() me reload=refresh />
+                <Email overseer=overseer.clone() me reload=refresh />
+                <CpuShards overseer=overseer.clone() me reload=refresh />
                 {password_accounts.then(|| view! { <Password overseer me /> })}
             </div>
         </div>
@@ -147,22 +134,14 @@ fn Summary(
     me: RwSignal<Option<Result<Arc<Profile>, String>>>,
 ) -> impl IntoView {
     let state = AppState::expect();
-    let badge = RwSignal::new(None::<String>);
+    let badge = {
+        let overseer = overseer.clone();
+        load_badge(async move { overseer.account().badge_svg(false).await })
+    };
     let world_status = RwSignal::new(None::<String>);
     let start_room = RwSignal::new(None::<String>);
     let start_route = RwSignal::new(None::<Route>);
     let cpu = RwSignal::new(None::<UserCpu>);
-    {
-        let overseer = overseer.clone();
-        spawn_scoped(async move {
-            if let Ok(svg) = overseer.account().badge_svg(false).await {
-                badge.set(Some(format!(
-                    "data:image/svg+xml;base64,{}",
-                    STANDARD.encode(svg)
-                )));
-            }
-        });
-    }
     {
         let overseer = overseer.clone();
         spawn_scoped(async move {
@@ -209,11 +188,7 @@ fn Summary(
     let body = move || {
         match me.get() {
         None => view! {
-            <div class=HEAD role="status">
-                <span class=BADGE_SKELETON aria-hidden="true"></span>
-                <span class=style::SKELETON_LINE_WIDE aria-hidden="true"></span>
-                <span class="sr-only">"Loading the profile…"</span>
-            </div>
+            <HeadSkeleton label="Loading the profile…" />
             <div class=STATS aria-hidden="true">
                 {(0..7)
                     .map(|_| view! { <span class=STAT_SKELETON></span> <span class=STAT_SKELETON_WIDE></span> })
@@ -235,45 +210,15 @@ fn Summary(
                 .username
                 .clone()
                 .unwrap_or_else(|| "(no username)".to_owned());
-            let alt = format!("Badge of {username}");
-            let gcl = levels::gcl(me.gcl.unwrap_or(0.0));
-            let power = levels::power(me.power.unwrap_or(0.0));
             let cpu_limit = me
                 .cpu
                 .map_or_else(|| "unknown".to_owned(), |cpu| format!("{cpu} CPU"));
             let credits = format!("{:.3}", me.money);
             let server = state.session_server().map(|server| server.name);
             view! {
-                <div class=HEAD>
-                    {move || {
-                        badge
-                            .get()
-                            .map_or_else(
-                                || view! { <span class=BADGE_SKELETON aria-hidden="true"></span> }.into_any(),
-                                |src| {
-                                    view! {
-                                        <img class=BADGE src=src alt=alt.clone() width="64" height="64" />
-                                    }
-                                        .into_any()
-                                },
-                            )
-                    }}
-                    <div>
-                        <h1 id="profile-title" class="text-xl font-semibold leading-tight">
-                            {username}
-                        </h1>
-                        {server.map(|server| view! { <p class="mt-1 text-muted">{server}</p> })}
-                    </div>
-                </div>
+                <SummaryHead badge name=username title_id="profile-title" server />
                 <dl class=STATS>
-                    <dt class=STAT_NAME>"Global Control Level"</dt>
-                    <dd class=STAT_VALUE>
-                        <LevelBar label="GCL" level=gcl />
-                    </dd>
-                    <dt class=STAT_NAME>"Power level"</dt>
-                    <dd class=STAT_VALUE>
-                        <LevelBar label="Power level" level=power />
-                    </dd>
+                    <LevelRows gcl=me.gcl power=me.power />
                     <dt class=STAT_NAME>"CPU limit"</dt>
                     <dd class=STAT_VALUE>{cpu_limit}</dd>
                     <dt class=STAT_NAME>"CPU used"</dt>
@@ -338,53 +283,6 @@ fn pending_text(value: Option<String>) -> AnyView {
         },
         IntoAny::into_any,
     )
-}
-
-/// Opens the world of the signed-in server.
-pub fn open_map(state: AppState) {
-    if let Some(server) = state.session_server() {
-        state.open_server(&server.url);
-    }
-}
-
-/// A level with a progress bar towards the next one.
-#[component]
-pub fn LevelBar(label: &'static str, level: LevelProgress) -> impl IntoView {
-    let percent = level.fraction() * 100.0;
-    let text = format!(
-        "{} / {}",
-        format_points(level.progress),
-        format_points(level.total)
-    );
-    view! {
-        <span class="min-w-[4.5em]">{format!("Level {}", level.level)}</span>
-        <progress
-            class=style::PROGRESS
-            max="100"
-            value=format!("{percent:.1}")
-            aria-label=format!("{label} progress to level {}", level.level + 1)
-        ></progress>
-        <span class="text-muted">{text}</span>
-    }
-}
-
-/// Whole points with thousands separators.
-fn format_points(points: f64) -> String {
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "display of non-negative point counts far below u64::MAX"
-    )]
-    let whole = points.max(0.0).round() as u64;
-    let digits = whole.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
 }
 
 /// The latest run's CPU and Memory use.

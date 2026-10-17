@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use overseer::map::PortalDestination;
 use overseer::model::world::{GameRoomObject, RoomUser};
 
-use crate::ui::player::Player;
+use crate::ui::player::{Player, npc_name};
 use crate::ui::style;
 
 mod colours;
@@ -37,14 +37,10 @@ pub struct Context<'a> {
 impl Context<'_> {
     /// The name of the user `id` (the room's users, the two NPC ids, else the id).
     pub fn name(&self, id: &str) -> String {
-        if let Some(user) = self.users.get(id) {
-            return user.username.clone();
-        }
-        match id {
-            "2" => "Invader".to_owned(),
-            "3" => "Source Keeper".to_owned(),
-            _ => id.to_owned(),
-        }
+        self.users.get(id).map_or_else(
+            || npc_name(id).map_or_else(|| id.to_owned(), str::to_owned),
+            |user| user.username.clone(),
+        )
     }
 
     /// The user `id` with its [`name`](Self::name).

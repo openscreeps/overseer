@@ -1,12 +1,12 @@
 //! Players: the public profile page of a player (badge, name, levels and rooms, route
 //! [`Route::User`]), the "Find player" search ([`FindPlayer`]), the rooms list of a player
-//! ([`RoomList`], [`OwnRooms`]), and [`PlayerLink`]: a player's name as a link to the page.
+//! ([`RoomList`], [`OwnRooms`]), the summary that the page shares with the own profile
+//! ([`summary`]), and [`PlayerLink`]: a player's name as a link to the page.
 
 mod rooms;
 mod search;
+pub mod summary;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use leptos::prelude::*;
 use overseer::Overseer;
 use overseer::model::users::PublicProfile;
@@ -14,19 +14,16 @@ use overseer::model::users::PublicProfile;
 pub use rooms::{OwnRooms, RoomList};
 pub use search::FindPlayer;
 
-use crate::levels;
 use crate::route::Route;
 use crate::session;
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
-use crate::ui::profile::{
-    BADGE, BADGE_SKELETON, HEAD, LevelBar, STAT_NAME, STAT_VALUE, STATS, open_map,
-};
 use crate::ui::spawn_scoped;
 use crate::ui::style::{self, concatcp};
+use summary::{HeadSkeleton, LevelRows, STATS, SummaryHead, load_badge, open_map};
 
-/// The user ids of the game's non-player characters: Invader and Source Keeper.
-const NPC_IDS: [&str; 2] = ["2", "3"];
+/// The game's non-player characters: user id and name.
+const NPCS: [(&str, &str); 2] = [("2", "Invader"), ("3", "Source Keeper")];
 
 /// A name that links to the player's page: the text keeps its colour, the underline marks
 /// the link. A finger gets a row-high target.
@@ -49,10 +46,17 @@ pub struct Player {
     pub name: String,
 }
 
+/// The name of the non-player character with user id `id`; `None` for a player.
+pub fn npc_name(id: &str) -> Option<&'static str> {
+    NPCS.iter()
+        .find(|(npc, _)| *npc == id)
+        .map(|(_, name)| *name)
+}
+
 /// Whether user `id` named `name` has a profile page: not for the NPCs, and not for a user
 /// whose name is unknown (`name` is the id).
 fn has_page(id: &str, name: &str) -> bool {
-    !NPC_IDS.contains(&id) && !name.trim().is_empty() && name != id
+    npc_name(id).is_none() && !name.trim().is_empty() && name != id
 }
 
 /// The name of `player`: a link to the player's page ([`Route::User`]). NPCs, unknown names
@@ -97,12 +101,6 @@ enum Lookup {
     Failed(String),
 }
 
-/// Whether the server's error `message` of a profile lookup says that no such user exists
-/// (`user not found`; community servers fail with a `TypeError` instead).
-fn is_unknown_user(message: &str) -> bool {
-    message.contains("not found") || message.starts_with("TypeError")
-}
-
 /// The page of the player named `name`: the way back to the map, the search, the player's
 /// badge, name and levels, and the player's rooms.
 #[component]
@@ -126,14 +124,8 @@ pub fn PlayerPage(
             spawn_scoped(async move {
                 lookup.set(Some(match overseer.users().find(&name).await {
                     Ok(profile) => Lookup::Found(Box::new(profile)),
-                    Err(error) => {
-                        let message = session::error_message(&error);
-                        if is_unknown_user(&message) {
-                            Lookup::Unknown
-                        } else {
-                            Lookup::Failed(message)
-                        }
-                    }
+                    Err(error) if session::is_unknown_user(&error) => Lookup::Unknown,
+                    Err(error) => Lookup::Failed(session::error_message(&error)),
                 }));
             });
         }
@@ -144,11 +136,7 @@ pub fn PlayerPage(
     let body = move || match lookup.get() {
         None => view! {
             <section class=style::PANEL>
-                <div class=HEAD role="status">
-                    <span class=BADGE_SKELETON aria-hidden="true"></span>
-                    <span class=style::SKELETON_LINE_WIDE aria-hidden="true"></span>
-                    <span class="sr-only">"Loading the player…"</span>
-                </div>
+                <HeadSkeleton label="Loading the player…" />
             </section>
         }
         .into_any(),
@@ -222,48 +210,16 @@ fn Summary(overseer: Overseer, profile: PublicProfile, server: Option<String>) -
         power,
         ..
     } = profile;
-    let username = username.unwrap_or(id);
-    // `None` while it loads; `Some(None)` when the server draws none.
-    let badge = RwSignal::new(None::<Option<String>>);
-    {
-        let username = username.clone();
-        spawn_scoped(async move {
-            let svg = overseer.users().badge_svg(&username, false).await;
-            badge.set(Some(svg.ok().map(|svg| {
-                format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg))
-            })));
-        });
-    }
-    let alt = format!("Badge of {username}");
-    let gcl = levels::gcl(gcl.unwrap_or(0.0));
-    let power = levels::power(power.unwrap_or(0.0));
-    let badge = move || match badge.get() {
-        None => view! { <span class=BADGE_SKELETON aria-hidden="true"></span> }.into_any(),
-        Some(None) => view! { <span class=BADGE aria-hidden="true"></span> }.into_any(),
-        Some(Some(src)) => {
-            view! { <img class=BADGE src=src alt=alt.clone() width="64" height="64" /> }.into_any()
-        }
+    let name = username.unwrap_or(id);
+    let badge = {
+        let name = name.clone();
+        load_badge(async move { overseer.users().badge_svg(&name, false).await })
     };
     view! {
         <section class=style::PANEL aria-labelledby="player-title">
-            <div class=HEAD>
-                {badge}
-                <div class="min-w-0">
-                    <h1 id="player-title" class="text-xl font-semibold leading-tight wrap-anywhere">
-                        {username}
-                    </h1>
-                    {server.map(|server| view! { <p class="mt-1 text-muted">{server}</p> })}
-                </div>
-            </div>
+            <SummaryHead badge name title_id="player-title" server />
             <dl class=STATS>
-                <dt class=STAT_NAME>"Global Control Level"</dt>
-                <dd class=STAT_VALUE>
-                    <LevelBar label="GCL" level=gcl />
-                </dd>
-                <dt class=STAT_NAME>"Power level"</dt>
-                <dd class=STAT_VALUE>
-                    <LevelBar label="Power level" level=power />
-                </dd>
+                <LevelRows gcl power />
             </dl>
         </section>
     }
@@ -271,7 +227,7 @@ fn Summary(overseer: Overseer, profile: PublicProfile, server: Option<String>) -
 
 #[cfg(test)]
 mod tests {
-    use super::{has_page, is_unknown_user};
+    use super::has_page;
 
     #[test]
     fn npcs_and_unknown_names_have_no_page() {
@@ -280,15 +236,5 @@ mod tests {
         assert!(!has_page("3", "Source Keeper"));
         assert!(!has_page("5a1b", "5a1b"), "the room does not know the name");
         assert!(!has_page("5a1b", " "));
-    }
-
-    #[test]
-    fn unknown_users() {
-        assert!(is_unknown_user("user not found"));
-        assert!(is_unknown_user(
-            "TypeError: Cannot read properties of null (reading '_id')"
-        ));
-        assert!(!is_unknown_user("HTTP transport failed"));
-        assert!(!is_unknown_user("unauthorized"));
     }
 }

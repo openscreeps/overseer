@@ -120,6 +120,12 @@ fn blocker_text(blocker: &Blocker) -> Option<String> {
     }
 }
 
+/// The text of the field of `shard` among the field texts `values`, by shard: an absent entry
+/// reads as 0.
+fn field_text(values: &BTreeMap<String, String>, shard: &str) -> String {
+    values.get(shard).cloned().unwrap_or_else(|| "0".to_owned())
+}
+
 /// `at` (milliseconds since the Unix epoch) as the browser's local date and time.
 fn local_time(at: f64) -> String {
     String::from(
@@ -175,10 +181,7 @@ pub fn CpuShards(
             values.with(|values| {
                 shards
                     .iter()
-                    .map(|shard| {
-                        let text = values.get(shard).cloned().unwrap_or_else(|| "0".to_owned());
-                        (shard.clone(), text)
-                    })
+                    .map(|shard| (shard.clone(), field_text(values, shard)))
                     .collect::<Vec<_>>()
             })
         })
@@ -278,14 +281,7 @@ fn ShardField(shard: String, values: RwSignal<BTreeMap<String, String>>) -> impl
     let id = format!("cpu-shard-{shard}");
     let value = {
         let shard = shard.clone();
-        move || {
-            values.with(|values| {
-                values
-                    .get(&shard)
-                    .cloned()
-                    .unwrap_or_else(|| "0".to_owned())
-            })
-        }
+        move || values.with(|values| field_text(values, &shard))
     };
     let invalid = {
         let value = value.clone();
@@ -319,7 +315,7 @@ fn ShardField(shard: String, values: RwSignal<BTreeMap<String, String>>) -> impl
 
 #[cfg(test)]
 mod tests {
-    use super::{Blocker, COOLDOWN_MS, allocation, next_change, total};
+    use super::{Blocker, COOLDOWN_MS, allocation, field_text, next_change, total};
 
     /// The fields of `pairs` (shard, text).
     fn fields(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -331,6 +327,15 @@ mod tests {
 
     /// One hour, in milliseconds.
     const HOUR: f64 = 60.0 * 60.0 * 1000.0;
+
+    #[test]
+    fn a_shard_without_a_value_reads_as_zero() {
+        let values = [("shard0".to_owned(), "20".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(field_text(&values, "shard0"), "20");
+        assert_eq!(field_text(&values, "shard1"), "0");
+    }
 
     #[test]
     fn totals_read_blank_fields_as_zero_and_name_a_wrong_field() {
