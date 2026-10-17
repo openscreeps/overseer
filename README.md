@@ -150,4 +150,6 @@ so `cargo xtask` cannot rebuild it.
 On `openscreeps`, every UI test runs once with the app served by a static server (`direct`).
 The tests tagged `@transport` (sign-in, session, socket) also run with the app served by
 `overseer-proxy` (`proxy`). The `community` and `official` runs serve the app through the proxy
-for every test. A test that fails is not retried: find its cause.
+for every test. A test that fails is not retried: find its cause. The tests tagged `@alone`
+measure how fast the page responds: they run after all other tests, with the machine to
+themselves (Playwright project `alone`).

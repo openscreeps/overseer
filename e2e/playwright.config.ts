@@ -18,6 +18,10 @@
 // Each project first runs its cache setup (`<project>-cache`, `tests/cache.setup.ts`): the
 // app's world cache loaded once and copied into every test context (the fixtures' `cache`).
 //
+// The `@alone` tests measure how fast the page responds. They run in the `alone` project once
+// every other project is done, with the machine to themselves (served as the first project
+// serves the app). `--project alone --no-deps` runs them without the rest.
+//
 // `@screens` tests (reference screenshots) run only when `OVERSEER_E2E_SCREENS` names their set
 // (`cargo xtask e2e --screens`).
 //
@@ -65,32 +69,50 @@ const proxyServer: NonNullable<PlaywrightTestConfig['webServer']> = {
 // and copied into every test context (the fixtures' `cache` option). The official run's
 // directory stays, so its cache seeds the next official run.
 const cacheFile = (project: string) => resolve(output, `cache-${project}.json`);
-/**
- * A project serving the app in `mode` at `port`, after its cache setup; only the tests that
- * `grep` matches, when given.
- */
-function served(mode: Mode, port: number, grep?: RegExp) {
-  const use = { mode, baseURL: `http://127.0.0.1:${port}/`, cacheFile: cacheFile(mode) };
-  return [
-    {
-      name: `${mode}-cache`,
-      testMatch: /cache\.setup\.ts$/,
-      use: { ...use, cache: 'previous' as const },
-    },
-    { name: mode, dependencies: [`${mode}-cache`], use, grep },
-  ];
-}
-const directProjects = served('direct', directPort);
-// The reference screenshots (`--screens`) come from the `proxy` project: all of them.
-const proxyProjects = served(
-  'proxy',
-  proxyPort,
-  proxyOnly || process.env.OVERSEER_E2E_SCREENS ? undefined : /@transport/,
-);
 const excluded = [
   ...(official ? ['@openscreeps'] : []),
   ...(process.env.OVERSEER_E2E_SCREENS ? [] : ['@screens']),
 ];
+/** The tests that a project leaves out: the excluded ones, and `extra`. */
+const leftOut = (...extra: string[]) => {
+  const tags = [...excluded, ...extra];
+  return tags.length > 0 ? new RegExp(tags.join('|')) : undefined;
+};
+/**
+ * A project serving the app in `mode` at `port`, after its cache setup; only the tests that
+ * `grep` matches, when given, and never the `@alone` ones.
+ */
+function served(mode: Mode, port: number, grep?: RegExp) {
+  const use = { mode, baseURL: `http://127.0.0.1:${port}/`, cacheFile: cacheFile(mode) };
+  return {
+    use,
+    projects: [
+      {
+        name: `${mode}-cache`,
+        testMatch: /cache\.setup\.ts$/,
+        use: { ...use, cache: 'previous' as const },
+      },
+      { name: mode, dependencies: [`${mode}-cache`], use, grep, grepInvert: leftOut('@alone') },
+    ],
+  };
+}
+const direct = served('direct', directPort);
+// The reference screenshots (`--screens`) come from the `proxy` project: all of them.
+const proxied = served(
+  'proxy',
+  proxyPort,
+  proxyOnly || process.env.OVERSEER_E2E_SCREENS ? undefined : /@transport/,
+);
+const main = proxyOnly ? [proxied] : [direct, proxied];
+// The `@alone` tests measure how the page responds: they run once every other test is done,
+// with the machine to themselves, served as the first project serves the app.
+const alone = {
+  name: 'alone',
+  dependencies: main.map(({ projects }) => projects[1].name),
+  use: main[0].use,
+  grep: /@alone/,
+  grepInvert: leftOut(),
+};
 
 export default defineConfig<{ mode: Mode; cache: Cache; cacheFile: string | undefined }>({
   testDir: './tests',
@@ -102,7 +124,7 @@ export default defineConfig<{ mode: Mode; cache: Cache; cacheFile: string | unde
   workers: official ? 1 : ci || slow ? 2 : undefined,
   timeout: 90_000,
   expect: { timeout: 15_000 },
-  grepInvert: excluded.length > 0 ? new RegExp(excluded.join('|')) : undefined,
+  grepInvert: leftOut(),
   reporter: [['list'], ['html', { open: 'never', outputFolder: resolve(output, 'playwright-report') }]],
   use: {
     ...devices['Desktop Chrome'],
@@ -111,6 +133,6 @@ export default defineConfig<{ mode: Mode; cache: Cache; cacheFile: string | unde
     video: 'off',
     launchOptions: slow ? { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] } : {},
   },
-  projects: proxyOnly ? proxyProjects : [...directProjects, ...proxyProjects],
+  projects: [...main.flatMap(({ projects }) => projects), alone],
   webServer: proxyOnly ? [proxyServer] : [directServer, proxyServer],
 });

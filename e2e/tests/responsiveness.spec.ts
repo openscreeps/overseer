@@ -3,20 +3,23 @@
 // second) must never hold input or frames for long.
 //
 // The disposable world is small (11 × 11 rooms), so the first test makes it look like `shard0`:
-// the page is told the world is 182 × 182 rooms, rooms the server does not have get a real
-// room's terrain and a made-up overview (some owned), and their `roomMap2` scans are answered by
-// the test after 0.3 to 0.7 s, as screeps.com answers them; the real world's rooms stay real. On
-// the official target the second test loads the real `shard0` (cold: a fresh browser profile).
+// the page talks to a stand-in for the server (`support/stand-in.ts`) that says the world is
+// 182 × 182 rooms, gives rooms the server does not have a real room's terrain and a made-up
+// overview (some owned), and answers their `roomMap2` scans after 0.3 to 0.7 s, as screeps.com
+// answers them; the real world's rooms stay real. The stand-in runs in the test process: unlike
+// `page.route` and `page.routeWebSocket`, it adds no work to the page that is measured. On the
+// official target the second test loads the real `shard0` (cold: a fresh browser profile).
 //
 // While the world loads behind a room-level view, the test measures what a user would feel: how
 // long a task posted to the page's main thread every 250 ms waits before it runs (it waits behind
 // whatever the main thread is doing), measured in the page, and the main thread's long tasks
 // (over 50 ms, `PerformanceObserver`). Measured in the page: a `page.evaluate` round trip also
-// waits for the test's own process, which answers the made-up scans meanwhile and, recording a
-// trace, logs each answer.
+// waits for the test's own process. The tests are tagged `@alone`: they run after every other
+// test, with the machine to themselves (`playwright.config.ts`).
 
 import type { Page } from '@playwright/test';
-import { api, currentTarget, expect, test, type Server } from './fixtures';
+import { api, currentTarget, expect, signIn, slug, test, type Server } from './fixtures';
+import { startStandIn, type Answer, type StandIn } from './support/stand-in';
 
 /** How many times slower the pages run (`OVERSEER_E2E_SLOW`), as the fixtures apply it. */
 const SLOWDOWN = Math.max(1, Number(process.env.OVERSEER_E2E_SLOW ?? 1) || 1);
@@ -118,101 +121,102 @@ async function realRooms(server: Server): Promise<Set<string>> {
   return new Set(body.rooms.map(({ room }) => room));
 }
 
-/**
- * Makes the page see the disposable world as a 182 × 182 shard (see the file's comment).
- * Returns how many made-up rooms were scanned so far.
- */
-async function fakeShard(page: Page, server: Server): Promise<() => number> {
+/** The made-up shard: a stand-in for the server, and how many made-up rooms it scanned. */
+interface Shard {
+  standIn: StandIn;
+  scanned: () => number;
+}
+
+/** `answer` with `value` as its JSON body. */
+function withJson(answer: Answer, value: unknown): Answer {
+  return { ...answer, body: Buffer.from(JSON.stringify(value)) };
+}
+
+/** A JSON answer of the stand-in itself. */
+function json(value: unknown): Answer {
+  return withJson({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.alloc(0) }, value);
+}
+
+/** Makes `server` look like a 182 × 182 shard (see the file's comment), through a stand-in. */
+async function fakeShard(server: Server): Promise<Shard> {
   const real = await realRooms(server);
   let terrains: string[] = [];
   let scanned = 0;
   const isReal = (name: string) => real.has(name) || !coords(name);
-
-  await page.route(
-    (url) => url.pathname.endsWith('/api/game/world-size'),
-    (route) => route.fulfill({ json: { ok: 1, width: SIDE, height: SIDE } }),
-  );
-  await page.route(
-    (url) => url.pathname.endsWith('/api/game/rooms'),
-    async (route) => {
-      const { rooms } = route.request().postDataJSON() as { rooms: string[] };
-      const response = await route.fetch();
-      const body = (await response.json()) as { rooms: { room: string; terrain: string }[] };
-      if (terrains.length === 0) terrains = body.rooms.map((room) => room.terrain);
-      const known = new Set(body.rooms.map((room) => room.room));
-      const made = rooms
-        .filter((room) => !known.has(room) && !isReal(room) && terrains.length > 0)
-        .map((room) => ({
-          _id: room,
-          room,
-          type: 'terrain',
-          terrain: terrains[hash(room) % terrains.length],
-        }));
-      await route.fulfill({ json: { ...body, rooms: [...body.rooms, ...made] } });
-    },
-  );
-  await page.route(
-    (url) => url.pathname.endsWith('/api/game/map-stats'),
-    async (route) => {
-      const response = await route.fetch();
-      const body = (await response.json()) as {
-        stats: Record<string, unknown>;
-        users: Record<string, unknown>;
-      };
-      const { rooms } = route.request().postDataJSON() as { rooms: string[] };
-      for (const room of rooms) {
-        if (isReal(room) || room in body.stats) continue;
-        const value = hash(room);
-        const stat: Record<string, unknown> = {
-          status: 'normal',
-          minerals0: { type: 'H', density: 1 + (value % 4) },
-        };
-        if (value % 13 === 0) stat.own = { user: `e2e-user-${value % 40}`, level: 1 + (value % 8) };
-        body.stats[room] = stat;
+  const waiting = new Map<string, NodeJS.Timeout>();
+  const standIn = await startStandIn(server.url, {
+    http: async (request, forward) => {
+      const [path = '', query = ''] = request.path.split('?');
+      if (path === 'api/game/world-size') return json({ ok: 1, width: SIDE, height: SIDE });
+      if (path === 'api/game/room-objects') {
+        const room = new URLSearchParams(query).get('room') ?? '';
+        return isReal(room) ? undefined : json({ ok: 1, objects: [], users: {} });
       }
-      await route.fulfill({ json: { ...body, users: { ...USERS, ...body.users } } });
+      if (path === 'api/game/rooms') {
+        const { rooms } = JSON.parse(request.body.toString()) as { rooms: string[] };
+        const answer = await forward();
+        const body = JSON.parse(answer.body.toString()) as { rooms: { room: string; terrain: string }[] };
+        if (terrains.length === 0) terrains = body.rooms.map((room) => room.terrain);
+        const known = new Set(body.rooms.map((room) => room.room));
+        const made = rooms
+          .filter((room) => !known.has(room) && !isReal(room) && terrains.length > 0)
+          .map((room) => ({
+            _id: room,
+            room,
+            type: 'terrain',
+            terrain: terrains[hash(room) % terrains.length],
+          }));
+        return withJson(answer, { ...body, rooms: [...body.rooms, ...made] });
+      }
+      if (path === 'api/game/map-stats') {
+        const { rooms } = JSON.parse(request.body.toString()) as { rooms: string[] };
+        const answer = await forward();
+        const body = JSON.parse(answer.body.toString()) as {
+          stats: Record<string, unknown>;
+          users: Record<string, unknown>;
+        };
+        for (const room of rooms) {
+          if (isReal(room) || room in body.stats) continue;
+          const value = hash(room);
+          const stat: Record<string, unknown> = {
+            status: 'normal',
+            minerals0: { type: 'H', density: 1 + (value % 4) },
+          };
+          if (value % 13 === 0) stat.own = { user: `e2e-user-${value % 40}`, level: 1 + (value % 8) };
+          body.stats[room] = stat;
+        }
+        return withJson(answer, { ...body, users: { ...USERS, ...body.users } });
+      }
+      return undefined;
     },
-  );
-  await page.route(
-    (url) => url.pathname.endsWith('/api/game/room-objects'),
-    async (route) => {
-      const room = new URL(route.request().url()).searchParams.get('room') ?? '';
-      if (isReal(room)) return route.fallback();
-      return route.fulfill({ json: { ok: 1, objects: [], users: {} } });
-    },
-  );
-  await page.routeWebSocket(/\/socket\/websocket/, (ws) => {
-    const server = ws.connectToServer();
-    const waiting = new Map<string, NodeJS.Timeout>();
-    ws.onMessage((message) => {
-      const text = String(message);
-      const subscribe = /^subscribe roomMap2:(?:[^/]+\/)?([WE]\d+[NS]\d+)$/.exec(text);
-      if (subscribe && !isReal(subscribe[1])) {
+    socket: (message, send) => {
+      const subscribe = /^subscribe roomMap2:(?:[^/]+\/)?([WE]\d+[NS]\d+)$/.exec(message);
+      if (subscribe?.[1] && !isReal(subscribe[1])) {
         const room = subscribe[1];
-        const channel = text.slice('subscribe '.length);
+        const channel = message.slice('subscribe '.length);
         const answer = setTimeout(() => {
           waiting.delete(channel);
           scanned += 1;
-          ws.send(JSON.stringify([channel, roomMap(room)]));
+          send(JSON.stringify([channel, roomMap(room)]));
         }, 300 + Math.random() * 400);
         waiting.set(channel, answer);
-        return;
+        return true;
       }
-      const unsubscribe = /^unsubscribe roomMap2:(?:[^/]+\/)?([WE]\d+[NS]\d+)$/.exec(text);
-      if (unsubscribe && !isReal(unsubscribe[1])) {
-        const channel = text.slice('unsubscribe '.length);
+      const unsubscribe = /^unsubscribe roomMap2:(?:[^/]+\/)?([WE]\d+[NS]\d+)$/.exec(message);
+      if (unsubscribe?.[1] && !isReal(unsubscribe[1])) {
+        const channel = message.slice('unsubscribe '.length);
         clearTimeout(waiting.get(channel));
         waiting.delete(channel);
-        return;
+        return true;
       }
-      server.send(message);
-    });
-    ws.onClose(() => {
+      return false;
+    },
+    closed: () => {
       for (const answer of waiting.values()) clearTimeout(answer);
       waiting.clear();
-    });
+    },
   });
-  return () => scanned;
+  return { standIn, scanned: () => scanned };
 }
 
 /** What the main thread did while the world loaded. */
@@ -291,21 +295,32 @@ async function openRoom(page: Page, server: Server, room: string, shard: string 
 }
 
 test.describe('responsiveness', () => {
-  test('a whole shard loading in the background never holds the page', { tag: '@openscreeps' }, async ({
-    signedInPage: page,
-    server,
-    home,
-  }) => {
-    test.setTimeout(240_000);
-    await recordLongTasks(page);
-    const scanned = await fakeShard(page, server);
-    await openRoom(page, server, home.room, home.shard);
-    await expect.poll(scanned, { timeout: 60_000 * SLOWDOWN }).toBeGreaterThanOrEqual(WARM_UP);
-    const result = await measure(page, () => scanned() < WARM_UP + MEASURED);
-    expectResponsive(result);
+  test.describe(() => {
+    // The run's warm cache is the real server's world; the stand-in is another server.
+    test.use({ cache: 'cold' });
+
+    test('a whole shard loading in the background never holds the page', { tag: ['@openscreeps', '@alone'] }, async ({
+      page,
+      server,
+      player,
+    }) => {
+      test.setTimeout(240_000);
+      const shard = await fakeShard(server);
+      try {
+        const standIn: Server = { ...server, url: shard.standIn.url, slug: slug(shard.standIn.url) };
+        await signIn(page, standIn, player);
+        await recordLongTasks(page);
+        await openRoom(page, standIn, player.room, null);
+        await expect.poll(shard.scanned, { timeout: 60_000 * SLOWDOWN }).toBeGreaterThanOrEqual(WARM_UP);
+        const result = await measure(page, () => shard.scanned() < WARM_UP + MEASURED);
+        expectResponsive(result);
+      } finally {
+        await shard.standIn.close();
+      }
+    });
   });
 
-  test('screeps.com’s shard loading in the background never holds the page', async ({
+  test('screeps.com’s shard loading in the background never holds the page', { tag: '@alone' }, async ({
     signedInPage: page,
     server,
     home,
