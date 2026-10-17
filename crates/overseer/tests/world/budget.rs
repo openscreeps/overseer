@@ -315,7 +315,15 @@ async fn the_budget_counts_every_request_of_the_window_and_leaves_room_by_priori
 
 #[tokio::test]
 async fn servers_without_rate_limits_have_no_budget() {
-    let (server, overseer, mut world, mut socket) = busy_world(false).await;
+    // A 40 × 40 world: enough candidate rooms to go past any share of the budget, small
+    // enough that scanning every room stays quick on a busy runner.
+    let (server, overseer, mut world, mut socket) = busy_world_of(Fake {
+        size: 40,
+        limited: false,
+        objects: Arc::default(),
+        refuse: Arc::default(),
+    })
+    .await;
     tokio::time::pause();
     assert!(!overseer.client().has_rate_limits());
     world.set_interest(&Interest {
@@ -323,6 +331,7 @@ async fn servers_without_rate_limits_have_no_budget() {
         ..Interest::default()
     });
     let wanted = candidates(&world).len();
+    assert!(wanted > Priority::Viewed.budget(), "{wanted} candidates");
     // The clock never moves.
     drive(&mut world, &mut socket, |_, _| {
         room_objects(&server).len() == wanted
