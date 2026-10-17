@@ -138,7 +138,9 @@ pub trait WorldApi {
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`]: a chunk that is not kept yields an HTTP 404
-    /// [`ApiError::Status`](overseer_core::api::ApiError::Status); [`Error::Unsupported`] on
+    /// [`ApiError::Status`](overseer_core::api::ApiError::Status), or HTTP 500 without a
+    /// message on a community server with a room-history mod (backend-local sends the mod's
+    /// error, an `Error` that serialises to `{}`, with HTTP 500); [`Error::Unsupported`] on
     /// servers without room history (the stock community server answers every chunk with HTTP
     /// 500 `not implemented`), and [`Error::UnexpectedReply`] for a chunk whose ticks are not
     /// numbers or a sharded server listing no shard.

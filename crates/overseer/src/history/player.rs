@@ -6,6 +6,7 @@ use std::sync::Arc;
 use overseer_net::api::WorldApi as _;
 use overseer_net::core::api::ApiError;
 use overseer_net::core::socket::RoomState;
+use overseer_net::model::platform::ServerKind;
 use overseer_net::model::world::Terrain;
 use overseer_net::{HistoryReplay, RoomHistory};
 
@@ -19,9 +20,10 @@ pub const CACHED_CHUNKS: usize = 4;
 pub enum Seek {
     /// The player is at the requested tick.
     Moved,
-    /// The server keeps no history for the requested tick (HTTP 404): the room was not active
-    /// then, the chunk expired, or it is not written yet (the most recent ticks). The player
-    /// did not move.
+    /// The server keeps no history for the requested tick: the room was not active then, the
+    /// chunk expired, or it is not written yet (the most recent ticks). The server answers
+    /// HTTP 404. A community server with a room-history mod answers HTTP 500 `{}`: its
+    /// backend sends the mod's error for a missing chunk with HTTP 500. The player did not move.
     NotKept,
 }
 
@@ -142,7 +144,7 @@ impl HistoryPlayer {
     /// # Errors
     ///
     /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
-    /// [`Error::Net`] when a request fails (other than with HTTP 404, which is
+    /// [`Error::Net`] when a request fails (other than with the replies of
     /// [`Seek::NotKept`]) or the chunk does not decode, with
     /// [`Unsupported`](overseer_net::Error::Unsupported) on a server without room history
     /// ([`Subsystem::RoomHistory`](overseer_net::model::platform::Subsystem::RoomHistory),
@@ -222,11 +224,24 @@ impl HistoryPlayer {
                 Ok(Some(chunk))
             }
             Err(overseer_net::Error::Api(ApiError::Status { status, .. }))
-                if status.as_u16() == 404 =>
+                if not_kept(status.as_u16(), self.overseer.world().connection().kind) =>
             {
                 Ok(None)
             }
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// Whether a chunk request that failed with HTTP `status` on a server of `kind` means that the
+/// server keeps no such chunk ([`Seek::NotKept`]).
+///
+/// Every server answers HTTP 404 for a chunk that it does not keep. A community server answers
+/// HTTP 500 `{}` instead: backend-local sends the error of its history provider with HTTP 500
+/// (`lib/game/server.js`), and a room-history mod (for example screepsmod-history 1.6.1)
+/// gives an `Error` for a missing chunk, which serialises to `{}`. Overseer requests chunks
+/// from a community server only when it runs such a mod: the stock provider's HTTP 500
+/// `not implemented` makes the client refuse without a request.
+fn not_kept(status: u16, kind: ServerKind) -> bool {
+    status == 404 || (status == 500 && kind == ServerKind::Community)
 }

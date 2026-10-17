@@ -1,9 +1,11 @@
 //! History playback over fixture chunks: seeking, stepping, chunk caching and missing chunks.
 
-use overseer::{Error, HistoryPlayer, Seek};
+use overseer::core::api::ApiError;
+use overseer::model::platform::{Plugins, ServerKind};
+use overseer::{Error, HistoryPlayer, Seek, net};
 
 use crate::server::{Request, Server};
-use crate::{connect, query, soon, terrain_document};
+use crate::{connect, connect_as, query, soon, terrain_document};
 
 /// A marker object (typed as `Other`) of `room`.
 fn marker(id: &str, hits: u64) -> String {
@@ -129,4 +131,46 @@ async fn chunks_that_are_not_kept_leave_the_player_in_place() {
     // A missing chunk is asked for again: it may be written later.
     player.seek(19).await.unwrap();
     assert_eq!(chunk_requests(&server), ["0", "20", "0", "0"]);
+}
+
+/// [`routes`], but a missing chunk is HTTP 500 `{}`: what backend-local sends for the `Error`
+/// that a room-history mod (screepsmod-history) gives for a chunk it does not hold.
+fn mod_routes(request: &Request) -> (u16, String) {
+    match routes(request) {
+        (404, _) if request.path == "/room-history" => (500, "{}".to_owned()),
+        reply => reply,
+    }
+}
+
+#[tokio::test]
+async fn a_community_room_history_mods_http_500_is_not_kept() {
+    let community = Plugins {
+        room_history: true,
+        ..Plugins::NONE
+    };
+    let (server, overseer, _websocket) =
+        connect_as(Some((ServerKind::Community, community)), mod_routes).await;
+    let mut player = overseer.history().player("W1N1", None).unwrap();
+    assert_eq!(soon(player.seek(5)).await.unwrap(), Seek::NotKept);
+    assert_eq!(player.tick(), None);
+    player.seek(20).await.unwrap();
+    assert_eq!(player.step_back().await.unwrap(), Seek::NotKept);
+    assert_eq!((player.tick(), room(&player)), (Some(20), (9, false)));
+    assert_eq!(chunk_requests(&server), ["0", "20", "0"]);
+}
+
+#[tokio::test]
+async fn an_http_500_for_a_chunk_is_an_error_on_other_servers() {
+    let (_server, overseer, _websocket) = connect(mod_routes).await;
+    let mut player = overseer.history().player("W1N1", None).unwrap();
+    let error = soon(player.seek(5)).await.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Net(net::Error::Api(ApiError::Status { status, message: None }))
+                if status.as_u16() == 500
+        ),
+        "{error:?}"
+    );
+    assert_eq!(player.tick(), None);
 }

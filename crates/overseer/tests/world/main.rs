@@ -15,6 +15,7 @@ mod world_map;
 use std::time::Duration;
 
 use overseer::core::Token;
+use overseer::model::platform::{Plugins, ServerKind};
 use overseer::{Auth, Overseer, ServerProfile};
 
 use server::{Request, Response, Server, Ws};
@@ -50,6 +51,15 @@ fn query<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
 async fn connect<R: Into<Response>>(
     routes: impl Fn(&Request) -> R + Send + Sync + 'static,
 ) -> (Server, Overseer, Ws) {
+    connect_as(None, routes).await
+}
+
+/// As [`connect`], with the server's contract and plugins forced to `forced` when given (else
+/// discovered from [`VERSION`]).
+async fn connect_as<R: Into<Response>>(
+    forced: Option<(ServerKind, Plugins)>,
+    routes: impl Fn(&Request) -> R + Send + Sync + 'static,
+) -> (Server, Overseer, Ws) {
     let mut server = Server::start(
         move |request: &Request| match request.path.as_str() {
             "/api/version" => (200, VERSION.to_owned()).into(),
@@ -64,8 +74,8 @@ async fn connect<R: Into<Response>>(
         auth: Auth::Token(Token::new("t1")),
         server_password: None,
         default_shard: None,
-        server_kind: None,
-        plugins: None,
+        server_kind: forced.map(|(kind, _)| kind),
+        plugins: forced.map(|(_, plugins)| plugins),
     };
     let overseer = Overseer::connect(profile).await.unwrap();
     let mut websocket = server.socket().await;
