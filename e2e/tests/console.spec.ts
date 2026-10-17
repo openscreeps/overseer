@@ -37,7 +37,7 @@ async function run(page: Page, expression: string) {
   await expect(input).toHaveValue('');
 }
 
-test.describe('console', () => {
+test.describe('console', { tag: '@transport' }, () => {
   test('offers the shard to run on only on sharded servers, and edits multi-line input', async ({
     signedInPage: page,
     home,

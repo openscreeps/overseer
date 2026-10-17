@@ -32,7 +32,7 @@ async function expectSignedIn(page: Page, server: Server, account: Account) {
   await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/`));
 }
 
-test.describe('sign-in', { tag: '@openscreeps' }, () => {
+test.describe('sign-in', { tag: ['@openscreeps', '@transport'] }, () => {
   test('signs in with the username and lands on the world', async ({ page, server, account }) => {
     await submit(page, server, account.username, account.password);
     await expectSignedIn(page, server, account);
@@ -78,7 +78,7 @@ test.describe('sign-in', { tag: '@openscreeps' }, () => {
   });
 });
 
-test.describe('server password', { tag: '@openscreeps' }, () => {
+test.describe('server password', { tag: ['@openscreeps', '@transport'] }, () => {
   test('is asked for when the server wants one, then kept for the next visits', async ({
     page,
     server,

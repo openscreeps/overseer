@@ -135,3 +135,18 @@ cd e2e && npm ci && npx playwright install chromium
 
 Add `--rust-only` or `--ui-only` to run one of the two suites. Put Playwright arguments after
 `--`. On Windows, `--desktop` runs the tests of the desktop app.
+
+Each run writes its files to its own directory below `target/e2e/`: the web app bundle, the
+proxy binary, the logs, and the Playwright results and report. A run that passes removes its
+directory. A run that fails keeps it and prints its path. Runs share only the build in
+`target/`, so you can run the `openscreeps` and `community` targets at the same time. The
+`official` and `--desktop` runs keep one directory each, and only one run of each goes at a
+time.
+
+On Windows, do not change `xtask/` while a run goes on: Windows locks the running `xtask.exe`,
+so `cargo xtask` cannot rebuild it.
+
+On `openscreeps`, every UI test runs once with the app served by a static server (`direct`).
+The tests tagged `@transport` (sign-in, session, socket) also run with the app served by
+`overseer-proxy` (`proxy`). The `community` and `official` runs serve the app through the proxy
+for every test. A test that fails is not retried: find its cause.

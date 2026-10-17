@@ -309,9 +309,12 @@ mod tests {
         let identifier = identifier(root).unwrap();
         assert_ne!(identifier, APP_IDENTIFIER);
 
-        let config = test_config(root, &root.join("target/e2e/dist")).unwrap();
+        let config = test_config(root, &root.join("target/e2e/desktop/dist")).unwrap();
         assert_eq!(config["identifier"], identifier.as_str());
-        assert_eq!(config["build"]["frontendDist"], "../../target/e2e/dist");
+        assert_eq!(
+            config["build"]["frontendDist"],
+            "../../target/e2e/desktop/dist"
+        );
         let windows = config["app"]["windows"].as_array().unwrap();
         let main = windows
             .iter()

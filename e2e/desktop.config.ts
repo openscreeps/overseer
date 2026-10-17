@@ -10,6 +10,7 @@
 // One worker: the test app keeps its profile, window state and keychain entries per identifier,
 // so one instance runs at a time.
 
+import { resolve } from 'node:path';
 import { defineConfig } from '@playwright/test';
 import { currentTarget, type Target } from './tests/fixtures/api';
 
@@ -20,9 +21,12 @@ const excluded: Record<Target, RegExp | undefined> = {
   community: undefined,
 };
 
+// The run directory of `cargo xtask e2e --desktop`: the results and report go there.
+const output = process.env.OVERSEER_E2E_OUTPUT ?? resolve(__dirname, '../target/e2e/desktop');
+
 export default defineConfig({
   testDir: './desktop',
-  outputDir: './test-results/desktop',
+  outputDir: resolve(output, 'test-results'),
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
@@ -30,5 +34,5 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 15_000 },
   grepInvert: excluded[currentTarget()],
-  reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report/desktop' }]],
+  reporter: [['list'], ['html', { open: 'never', outputFolder: resolve(output, 'playwright-report') }]],
 });

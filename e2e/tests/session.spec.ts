@@ -22,7 +22,7 @@ declare global {
   }
 }
 
-test.describe('session', () => {
+test.describe('session', { tag: '@transport' }, () => {
   test('resumes after a reload', async ({ signedInPage: page, user, server }) => {
     const account = page.getByRole('button', { name: `Account: ${user.username}` });
     const status = page.getByRole('contentinfo', { name: 'Status' });

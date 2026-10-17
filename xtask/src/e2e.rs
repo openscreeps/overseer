@@ -7,10 +7,10 @@
 //! 1. Prepares what the selected suites need before any world exists: the server image
 //!    (`openscreeps`, see [`world`]; `community`, see [`community`]) or the API token
 //!    (`official`; see [`official`]); the web app (`trunk build --release` of `app/` into
-//!    `target/e2e/dist/`, its own bundle: `app/dist/` is the development build `trunk serve`
-//!    rewrites on every change; skipped with `--no-build`), the `overseer-proxy` binary (copied
-//!    to `target/e2e/`) and the live test targets; installs the Playwright project (`npm ci` in
-//!    `e2e/` when needed, `npx playwright install chromium`).
+//!    `dist/` of the run directory, its own bundle: `app/dist/` is the development build
+//!    `trunk serve` rewrites on every change; skipped with `--no-build`), the `overseer-proxy`
+//!    binary (copied to the run directory) and the live test targets; installs the Playwright
+//!    project (`npm ci` in `e2e/` when needed, `npx playwright install chromium`).
 //! 2. `openscreeps` and `community`: for each suite, starts a fresh world on a free loopback
 //!    port with fast ticks and waits until `GET /api/version` answers. An `openscreeps` world is
 //!    created in a new Docker volume (`init --username e2e`); a `community` world lives in its
@@ -23,7 +23,7 @@
 //!    with the target's environment (see [`common_environment`], [`world_environment`],
 //!    [`community_environment`] and [`official_environment`]). Each Playwright project first
 //!    loads the server's world once into the app's cache and saves it
-//!    (`target/e2e/cache-<target>-<project>.json`); its tests start from a copy (see
+//!    (`cache-<project>.json` in the run directory); its tests start from a copy (see
 //!    `e2e/tests/cache.setup.ts`). On `community`, Playwright runs the `proxy` project only
 //!    (community servers send no CORS headers). On `official`, Playwright runs the
 //!    `proxy` project only, starts that setup from the previous official run's cache, leaves out
@@ -32,21 +32,35 @@
 //!    `e2e/playwright.config.ts` and `e2e/tests/fixtures`); the summary counts the requests the
 //!    proxy forwarded to screeps.com per endpoint.
 //! 4. Always removes the world's container (and volume): on success, on failure, on panic and
-//!    on Ctrl-C. The servers' output is kept in `target/e2e/server-live.log` and
-//!    `target/e2e/server-ui.log` (`server-community-live.log` and `server-community-ui.log` on
-//!    `community`, with the server processes' logs in the directories of the same names), the
-//!    test proxy's in `target/e2e/proxy.log` (`proxy-official.log` on `official`,
-//!    `proxy-community.log` on `community`).
+//!    on Ctrl-C. The servers' output goes to `server-live.log` and `server-ui.log` in the run
+//!    directory (on `community` also the server processes' logs, in the directories of the
+//!    same names), the test proxy's to `proxy.log`.
 //!
 //! `--rust-only` and `--ui-only` select one suite. `--screens[=<set>]` captures the reference
 //! screenshots (the `@screens` tests, `proxy` project, `openscreeps` only) into
 //! `e2e/references/<set>/` (default set `current`). `--desktop` (Windows only, opt-in, not in
 //! CI) runs the desktop suite instead: the Tauri shell's test build driven over its
 //! `WebView2`'s remote debugging protocol (`e2e/desktop.config.ts`, specs in `e2e/desktop/`), on a
-//! fresh world (`openscreeps` or `community`; server log `server-desktop.log` or
-//! `server-community-desktop.log`) or, with `--target official`, read-only against
-//! screeps.com; see [`desktop`]. The exit code is non-zero when any step fails; a summary of
-//! every step closes the run.
+//! fresh world (`openscreeps` or `community`; server log `server-desktop.log`) or, with
+//! `--target official`, read-only against screeps.com; see [`desktop`]. The exit code is
+//! non-zero when any step fails; a summary of every step closes the run.
+//!
+//! # Run directory
+//!
+//! Each run writes its files to its own directory below `<target>/e2e/` ([`RunDir`]): the web
+//! app, the proxy binary, the world caches, the results (`test-results/`) and report
+//! (`playwright-report/`) of Playwright, and the logs. Runs at the same time share only the
+//! build in Cargo's target directory.
+//!
+//! - `openscreeps` and `community`: a fresh directory for each run (`<target>-<nonce>`). A run
+//!   that passes removes it. A run that fails keeps it and names it in the summary.
+//! - `official` (`official/`) and `--desktop` (`desktop/`): one directory that stays. Each
+//!   official run starts from the cache of the previous one, and all of them share the
+//!   rate limits of one account. The desktop test app has one state for each machine. While
+//!   one run of these kinds goes on, a second run of the same kind fails at once.
+//!
+//! On Windows the running `xtask.exe` is locked. Do not change `xtask/` while a run goes on:
+//! the next `cargo xtask` cannot rebuild it.
 //!
 //! `OVERSEER_E2E_SLOW=<factor>` (e.g. `4`) runs the UI tests the way the CI runner does on a
 //! fast machine: software WebGL (`SwiftShader`), pages whose CPU runs `<factor>` times slower
@@ -260,10 +274,12 @@ impl Summary {
 /// [--screens[=<set>]] [--no-build] [-- <playwright args>]`.
 pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     let options = Options::parse(args)?;
+    let run = RunDir::open(&target_dir(root), &options)?;
     install_interrupt_handler()?;
     let mut summary = Summary::default();
     let guard = TeardownOnDrop;
-    let result = suites(root, &options, &mut summary);
+    let result = suites(root, &options, &run.path, &mut summary);
+    // The teardown saves the servers' output to the run directory.
     drop(guard);
     if INTERRUPTED.load(Ordering::SeqCst) {
         // The interrupt handler exits the process once the teardown is complete.
@@ -271,12 +287,79 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
             std::thread::park();
         }
     }
+    run.close(result.is_err() || summary.failed(), &mut summary);
     summary.print(result.is_err());
     result?;
     if summary.failed() {
         return Err("end-to-end tests failed".into());
     }
     Ok(())
+}
+
+/// The directory of one run (see the module docs).
+struct RunDir {
+    path: PathBuf,
+    /// Whether the directory stays after the run (`official`, `--desktop`).
+    stays: bool,
+    /// The lock of a directory that stays, held until the run ends.
+    _lock: Option<fs::File>,
+}
+
+impl RunDir {
+    /// Creates the run's directory below `<target>/e2e/`: a fresh one on a disposable world,
+    /// else the one of the run's kind, locked. Fails when another run holds that lock.
+    fn open(target: &Path, options: &Options) -> Result<Self, Error> {
+        let e2e = target.join("e2e");
+        let stays = match (options.desktop, options.target) {
+            (true, _) => Some("desktop"),
+            (false, Target::Official) => Some("official"),
+            (false, Target::OpenScreeps | Target::Community) => None,
+        };
+        let Some(name) = stays else {
+            let path = e2e.join(format!("{}-{}", options.target.name(), nonce()));
+            fs::create_dir_all(&path)?;
+            return Ok(Self {
+                path,
+                stays: false,
+                _lock: None,
+            });
+        };
+        let path = e2e.join(name);
+        fs::create_dir_all(&path)?;
+        let lock = fs::File::create(path.join(".lock"))?;
+        match lock.try_lock() {
+            Ok(()) => Ok(Self {
+                path,
+                stays: true,
+                _lock: Some(lock),
+            }),
+            Err(fs::TryLockError::WouldBlock) => Err(format!(
+                "another run uses {}: run them one after the other",
+                path.display()
+            )
+            .into()),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    /// Removes a fresh directory after a run that passed (or wrote nothing). Names a directory
+    /// that stays in the summary.
+    fn close(self, failed: bool, summary: &mut Summary) {
+        if !self.stays {
+            let removed = if failed {
+                // Only when empty: a run that failed before its first step.
+                fs::remove_dir(&self.path)
+            } else {
+                fs::remove_dir_all(&self.path)
+            };
+            if removed.is_ok() {
+                return;
+            }
+        }
+        summary
+            .notes
+            .push(format!("results, traces and logs: {}", self.path.display()));
+    }
 }
 
 /// Runs [`world::teardown`], [`community::teardown`] and [`desktop::teardown`] when dropped,
@@ -295,7 +378,8 @@ impl Drop for TeardownOnDrop {
 struct Prepared {
     root: PathBuf,
     e2e: PathBuf,
-    logs: PathBuf,
+    /// The run directory ([`RunDir`]).
+    run: PathBuf,
     dist: PathBuf,
     proxy: PathBuf,
     /// The desktop test app (`--desktop`).
@@ -303,16 +387,15 @@ struct Prepared {
 }
 
 /// Every step; a failed preparation step skips the rest.
-fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), Error> {
+fn suites(root: &Path, options: &Options, run: &Path, summary: &mut Summary) -> Result<(), Error> {
     let target = target_dir(root);
-    let logs = target.join("e2e");
     let prepared = Prepared {
         root: root.to_owned(),
         e2e: root.join("e2e"),
-        dist: logs.join("dist"),
-        proxy: logs.join(format!("overseer-proxy{}", std::env::consts::EXE_SUFFIX)),
-        desktop: logs.join("desktop").join(desktop::EXECUTABLE),
-        logs,
+        run: run.to_owned(),
+        dist: run.join("dist"),
+        proxy: run.join(format!("overseer-proxy{}", std::env::consts::EXE_SUFFIX)),
+        desktop: run.join(desktop::EXECUTABLE),
     };
     if options.desktop {
         if !cfg!(windows) {
@@ -427,14 +510,6 @@ enum World {
 }
 
 impl Worlds<'_> {
-    /// The server log of the suite `suite` (`live`, `ui`, `desktop`).
-    fn log(self, suite: &str) -> String {
-        match self {
-            Self::OpenScreeps { .. } => format!("server-{suite}.log"),
-            Self::Community { .. } => format!("server-community-{suite}.log"),
-        }
-    }
-
     /// Starts a fresh world, its output saved to `<logs>/<log>`.
     fn start(self, logs: &Path, log: &str) -> Result<World, Error> {
         Ok(match self {
@@ -471,7 +546,7 @@ fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summ
                 worlds,
                 summary,
                 "Playwright desktop",
-                &worlds.log("desktop"),
+                "server-desktop.log",
                 || playwright(prepared, options),
             );
         });
@@ -484,7 +559,7 @@ fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summ
             worlds,
             summary,
             "live Rust tests",
-            &worlds.log("live"),
+            "server-live.log",
             || {
                 let mut test = cargo(&prepared.root);
                 test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"]);
@@ -501,7 +576,7 @@ fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summ
             worlds,
             summary,
             "Playwright",
-            &worlds.log("ui"),
+            "server-ui.log",
             || {
                 let mut playwright = playwright(prepared, options);
                 if let Some(set) = &options.screens {
@@ -527,7 +602,7 @@ fn on_world(
 ) {
     let mut started = None;
     summary.step(&format!("{name}: disposable world"), || {
-        started = Some(worlds.start(&prepared.logs, log)?);
+        started = Some(worlds.start(&prepared.run, log)?);
         Ok(())
     });
     if let Some(started) = started {
@@ -567,7 +642,7 @@ fn official_suites(prepared: &Prepared, options: &Options, token: &str, summary:
         summary.skip("live Rust tests (read-only)", "--ui-only");
     }
     if options.ui {
-        let log = prepared.logs.join("proxy-official.log");
+        let log = prepared.run.join("proxy.log");
         summary.step("Playwright (read-only)", || {
             let mut playwright = playwright(prepared, options);
             common_environment(&mut playwright, prepared)?;
@@ -631,15 +706,14 @@ fn playwright(prepared: &Prepared, options: &Options) -> Command {
     playwright
 }
 
-/// Sets what both targets' tests read: `OVERSEER_E2E_DIST` (the built web app),
-/// `OVERSEER_E2E_PROXY` (the `overseer-proxy` binary) and two free ports for the Playwright
-/// web servers (`OVERSEER_E2E_DIRECT_PORT`, `OVERSEER_E2E_PROXY_PORT`).
+/// Sets what both targets' tests read: `OVERSEER_E2E_OUTPUT` (the run directory: the built web
+/// app, the `overseer-proxy` binary, the results) and two free ports for the Playwright web
+/// servers (`OVERSEER_E2E_DIRECT_PORT`, `OVERSEER_E2E_PROXY_PORT`).
 fn common_environment(command: &mut Command, prepared: &Prepared) -> Result<(), Error> {
     let direct = TcpListener::bind("127.0.0.1:0")?;
     let proxied = TcpListener::bind("127.0.0.1:0")?;
     command
-        .env("OVERSEER_E2E_DIST", &prepared.dist)
-        .env("OVERSEER_E2E_PROXY", &prepared.proxy)
+        .env("OVERSEER_E2E_OUTPUT", &prepared.run)
         .env(
             "OVERSEER_E2E_DIRECT_PORT",
             direct.local_addr()?.port().to_string(),
@@ -718,7 +792,7 @@ fn build_app(root: &Path, dist: &Path) -> Result<(), Error> {
     )
 }
 
-/// Builds the `overseer-proxy` binary and copies it to `copy` (in `target/e2e/`): the tests
+/// Builds the `overseer-proxy` binary and copies it to `copy` (in the run directory): the tests
 /// run the copy, so a running test proxy never blocks rebuilding the original (Windows locks
 /// running executables).
 fn build_proxy(root: &Path, target: &Path, copy: &Path) -> Result<(), Error> {

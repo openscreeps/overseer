@@ -4,7 +4,8 @@
 # Trunk's bundle and Tauri's generated schemas
 /app/dist
 /app/src-tauri/gen
-# Playwright (e2e/): dependencies, reports and failure traces
+# Playwright (e2e/): dependencies, and the output of runs from before `cargo xtask e2e` wrote
+# it to its run directory below target/
 /e2e/node_modules
 /e2e/playwright-report
 /e2e/test-results

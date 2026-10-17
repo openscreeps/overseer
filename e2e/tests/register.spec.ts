@@ -88,7 +88,7 @@ test.describe('registration tabs', () => {
 });
 
 // Each field's accessible description holds its error, its live check status and its help.
-test.describe('registration', { tag: '@openscreeps' }, () => {
+test.describe('registration', { tag: ['@openscreeps', '@transport'] }, () => {
   test('checks availability while typing', async ({ page, server, account }) => {
     const form = await openRegister(page, server);
     const username = form.getByLabel('Username', { exact: true });
