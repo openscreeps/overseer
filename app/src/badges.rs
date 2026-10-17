@@ -66,7 +66,7 @@ impl Hasher for Fnv1a {
     }
 }
 
-/// A badge the map needs.
+/// A badge the viewers need.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Want {
     /// The player's id (the viewer's badge key).
@@ -75,6 +75,17 @@ pub struct Want {
     pub username: String,
     /// The badge's parameters hash ([`badge_hash`]).
     pub hash: u64,
+}
+
+impl Want {
+    /// The badge `badge` of the player `user` named `username`.
+    fn of(user: &str, username: &str, badge: &UserBadge) -> Self {
+        Self {
+            user: user.to_owned(),
+            username: username.to_owned(),
+            hash: badge_hash(badge),
+        }
+    }
 }
 
 /// The badges of the owners and reservers of `rooms` (with their overviews) in `view`,
@@ -116,11 +127,7 @@ pub fn wanted<'a>(
         .into_iter()
         .filter(|(_, id, _, _)| seen.insert(*id))
         .take(MAX_WANTED)
-        .map(|(_, id, username, badge)| Want {
-            user: id.to_owned(),
-            username: username.to_owned(),
-            hash: badge_hash(badge),
-        })
+        .map(|(_, id, username, badge)| Want::of(id, username, badge))
         .collect()
 }
 
@@ -130,13 +137,7 @@ pub fn wanted<'a>(
 pub fn room_wants(users: &BTreeMap<String, RoomUser>) -> Vec<Want> {
     users
         .values()
-        .filter_map(|user| {
-            Some(Want {
-                user: user.id.clone(),
-                username: user.username.clone(),
-                hash: badge_hash(user.badge.as_ref()?),
-            })
-        })
+        .filter_map(|user| Some(Want::of(&user.id, &user.username, user.badge.as_ref()?)))
         .collect()
 }
 

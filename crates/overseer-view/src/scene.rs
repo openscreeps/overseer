@@ -252,7 +252,8 @@ impl Scene {
             let tile = (x, y);
             let look = Look::of(object);
             let gauges = Gauges::of(object, snapshot.game_time);
-            let (from, start, duration, born) = match previous.get(object.id()) {
+            let old = previous.get(object.id()).copied();
+            let (from, start, duration, born) = match old {
                 // Unmoved: keep any movement in progress; a creep leaving its spawn fades
                 // in.
                 Some(old) if old.tile == tile => {
@@ -272,14 +273,8 @@ impl Scene {
                 None if same_room => (tile_vec(tile), f64::NEG_INFINITY, 0.0, now),
                 None => (tile_vec(tile), f64::NEG_INFINITY, 0.0, f64::NEG_INFINITY),
             };
-            let (heading_from, heading, turned) = headings(
-                previous.get(object.id()).copied(),
-                object,
-                look.glyph,
-                tile,
-                now,
-                self.features.motion,
-            );
+            let (heading_from, heading, turned) =
+                headings(old, object, look.glyph, tile, now, self.features.motion);
             let grid = match (look.glyph, look.join) {
                 (_, Join::None) => None,
                 (Glyph::Road, _) => Some(0),

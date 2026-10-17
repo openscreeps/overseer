@@ -475,15 +475,19 @@ fn capacity(capacity: &GameRoomObjectStoreCapacityResource) -> u64 {
     capacity.values().flatten().sum()
 }
 
+/// The resources of a store that it holds some of, with their amounts.
+fn amounts(store: &GameRoomObjectStore) -> impl Iterator<Item = (&String, u64)> {
+    store
+        .iter()
+        .filter_map(|(kind, amount)| Some((kind, u64::try_from((*amount)?).ok()?)))
+        .filter(|(_, amount)| *amount > 0)
+}
+
 /// How full a store of `capacity` is (`capacity` 0: full when anything is in it) and the
 /// colour of its largest resource; `None` when nothing is stored.
 fn store(store: &GameRoomObjectStore, capacity: u64) -> Option<(f32, u32)> {
-    let amounts = store
-        .iter()
-        .filter_map(|(kind, amount)| Some((kind, u64::try_from((*amount)?).ok()?)))
-        .filter(|(_, amount)| *amount > 0);
     let (total, largest) =
-        amounts.fold((0_u64, None::<(&String, u64)>), |(total, largest), item| {
+        amounts(store).fold((0_u64, None::<(&String, u64)>), |(total, largest), item| {
             let largest = match largest {
                 Some(current) if current.1 >= item.1 => Some(current),
                 _ => Some(item),
@@ -505,11 +509,8 @@ const LAB_MINERAL_CAPACITY: u64 = 3000;
 /// How full a lab is of the one mineral or compound it holds (not energy), and its colour;
 /// `None` when it holds none.
 fn lab_mineral(store: &GameRoomObjectStore) -> Option<(f32, u32)> {
-    store
-        .iter()
+    amounts(store)
         .filter(|(kind, _)| *kind != "energy")
-        .filter_map(|(kind, amount)| Some((kind, u64::try_from((*amount)?).ok()?)))
-        .filter(|(_, amount)| *amount > 0)
         .max_by_key(|(_, amount)| *amount)
         .map(|(kind, amount)| {
             (
