@@ -48,16 +48,23 @@ declare global {
   }
 }
 
-/** Records the page's long tasks in `window.e2eLongTasks` from its first script on. */
+/**
+ * Records the page's long tasks in `window.e2eLongTasks`, from now on (also the earlier ones the
+ * browser buffered) and in every document the page loads later. The page has already loaded
+ * the app (`signedInPage`), and a route change only changes the hash: an init script alone
+ * would never run.
+ */
 async function recordLongTasks(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+  const record = () => {
     window.e2eLongTasks = [];
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
         window.e2eLongTasks?.push([entry.startTime, entry.duration]);
       }
     }).observe({ type: 'longtask', buffered: true });
-  });
+  };
+  await page.addInitScript(record);
+  await page.evaluate(record);
 }
 
 /** `[x, y]` of a room name such as `W3N2` (`W0` is x = -1, `N0` is y = -1). */
@@ -264,6 +271,8 @@ function expectResponsive(result: Measurement): void {
   const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
   const max = sorted.at(-1) ?? 0;
   const summary = JSON.stringify({ ...result, delays: undefined, p95, max, samples: sorted.length });
+  // In the report also when it passes, to follow the numbers from run to run.
+  test.info().annotations.push({ type: 'responsiveness', description: summary });
   expect(sorted.length, summary).toBeGreaterThan(10);
   expect(max, `longest wait: ${summary}`).toBeLessThanOrEqual(MAX_DELAY_MS);
   expect(p95, `95th percentile wait: ${summary}`).toBeLessThanOrEqual(P95_DELAY_MS);
