@@ -131,6 +131,9 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     await expect(await stat(profile, 'CPU limit')).toHaveText('37 CPU');
     await expect(await stat(profile, 'Credits')).toHaveText('1234.500');
     await expect(await stat(profile, 'World status')).toHaveText('Not in the world (place a spawn)');
+    // Only screeps.com allocates CPU between shards: no such section here.
+    await expect(page.getByRole('region', { name: 'Notifications' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'CPU per shard' })).toHaveCount(0);
   });
 
   test("shows the account's badge", async ({ page, server, account }) => {

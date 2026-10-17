@@ -1,5 +1,7 @@
 //! The signed-in account: badge, levels, CPU, credits, world status and start room; edits of
-//! the notification preferences, e-mail and password; sign-out.
+//! the notification preferences, e-mail, password and the CPU of each shard; sign-out.
+
+mod cpu_shards;
 
 use std::sync::Arc;
 
@@ -21,6 +23,7 @@ use crate::ui::form::{Field, FormError, FormStatus};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
 use crate::ui::style::{self, concatcp};
+use cpu_shards::CpuShards;
 
 /// Choices of the notification interval, in minutes (as the official client offers them).
 const INTERVALS: [(u64, &str); 9] = [
@@ -129,6 +132,7 @@ pub fn Profile() -> impl IntoView {
             <div class="grid grid-cols-[repeat(auto-fit,minmax(17rem,1fr))] items-start gap-4">
                 <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
                 <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
+                <CpuShards overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
                 {password_accounts.then(|| view! { <Password overseer me /> })}
             </div>
         </div>
