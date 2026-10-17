@@ -15,12 +15,15 @@ export const drawer = (page: Page) => page.getByRole('complementary', { name: 'D
 export const roomInfo = (page: Page, room: string) =>
   page.getByRole('region', { name: new RegExp(`^${room}(?!\\d)`) });
 
+/** A drawer tab. */
+export type TabName = 'Room' | 'Objects' | 'Console' | 'Memory';
+
 /** The drawer tab `name` (its name ends with a count on Objects and Console). */
-export const tab = (page: Page, name: 'Room' | 'Objects' | 'Console') =>
+export const tab = (page: Page, name: TabName) =>
   page.getByRole('tab', { name: new RegExp(`^${name}(\\s*[\\d+]+)?$`) });
 
 /** Selects the drawer tab `name`. */
-export async function selectTab(page: Page, name: 'Room' | 'Objects' | 'Console') {
+export async function selectTab(page: Page, name: TabName) {
   await tab(page, name).click();
   await expect(tab(page, name)).toHaveAttribute('aria-selected', 'true');
 }

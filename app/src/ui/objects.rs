@@ -594,7 +594,7 @@ fn ObjectRow(
         <li>
             <button
                 type="button"
-                class="flex items-center justify-start gap-2 w-full min-h-[1.9rem] \
+                class="flex items-center justify-start gap-2 w-full min-h-row \
                     pl-[calc(1.5rem+1.15em)] pr-3 font-normal leading-tight whitespace-nowrap \
                     text-fg bg-transparent cursor-pointer transition-colors \
                     duration-(--duration-fast) ease-standard hover:bg-hover \

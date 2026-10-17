@@ -26,7 +26,7 @@ console, windows match within a pixel or two).
 | `06-map-world` | The world map zoomed out as far as it goes (Escape), drawer open. |
 | `07-map-sectors` | The world map wheeled in to the "Rooms" level (a sector of rooms). |
 | `08-map-room-tooltip` | The player's room framed whole by the room search, the hovered room's tooltip. |
-| `09-drawer-room` | The drawer's Room tab: the live room control and the room's facts. |
+| `09-drawer-room` | The drawer's Room tab: the live room control and the room's facts (`small/`: the bottom sheet with the facts only; the map over it shows the room). |
 | `10-drawer-objects-inspector` | The Objects tab with the spawn selected in the list and the inspector. |
 | `11-drawer-console` | The Console tab with the bot's output. |
 | `12-account-menu` | The account menu open. |

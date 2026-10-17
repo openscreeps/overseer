@@ -1,44 +1,49 @@
-//! The right drawer of the world screen: resizable (drag or arrow keys on its edge, width
-//! saved), collapsible (its button or the top bar's), with three tabs (the last one saved):
+//! The drawer of the world screen, with four tabs (the last one saved):
 //!
 //! - Room: the room in focus as a room control (viewer) and its facts, "Pop out room", and
 //!   "Go to" through its portals (to the destination room, on its shard);
 //! - Objects: the room's objects and the inspector, selection shared with the map;
-//! - Console: the account's console, "Pop out console".
+//! - Console: the account's console, "Pop out console";
+//! - Memory: the account's `Memory` and segments ([`MemoryPanel`]).
+//!
+//! On a wide window the drawer is at the right of the map: drag its left edge (or use the
+//! arrow keys on it) to resize it; the width is saved and clamped again when the window
+//! shrinks. Below the `sm` breakpoint ([`SHEET_LAYOUT`]) it is a bottom sheet under the map:
+//! drag its grab handle (or use the arrow keys on it) to give it one of its snap heights,
+//! saved too. The sheet's Room tab shows the facts only: the map over it already shows the
+//! room, so no second room viewer is made. The drawer collapses with its button or the top
+//! bar's ([`resize`] holds both handles).
 //!
 //! The drawer follows the room and the console while collapsed, so nothing is missed.
+
+mod resize;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::map::PortalDestination;
-use web_sys::{KeyboardEvent, PointerEvent};
+use web_sys::KeyboardEvent;
 
+use self::resize::{DrawerSize, Resizer, SheetHandle};
 use crate::portals::GoTo;
 use crate::profiles::Server;
 use crate::route::{Route, Shard, WindowView};
-use crate::saved::{DRAWER_WIDTH, DrawerTab};
+use crate::saved::DrawerTab;
 use crate::state::AppState;
 use crate::ui::console::{ConsolePanel, ConsoleState};
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::media::{SHEET_LAYOUT, media_query};
+use crate::ui::memory::{MemoryPanel, MemoryState};
 use crate::ui::objects::{ObjectsPanel, Selection};
 use crate::ui::room_panel::{RoomData, RoomInfo, RoomPreview};
 use crate::ui::style::{self, concatcp};
 use crate::ui::world::MapState;
 
-/// Narrowest drawer, in CSS pixels.
-const MIN_WIDTH: u16 = 280;
-/// Widest drawer, in CSS pixels (the map keeps [`MAP_MIN_WIDTH`] besides).
-const MAX_WIDTH: u16 = 960;
-/// Narrowest map next to the drawer, in CSS pixels.
-const MAP_MIN_WIDTH: f64 = 320.0;
-/// Arrow-key resize step, in CSS pixels.
-const KEY_STEP: u16 = 16;
-
 /// The tabs, in order: tab, name, id suffix, icon.
-const TABS: [(DrawerTab, &str, &str, IconKind); 3] = [
+const TABS: [(DrawerTab, &str, &str, IconKind); 4] = [
     (DrawerTab::Room, "Room", "room", IconKind::Room),
     (DrawerTab::Objects, "Objects", "objects", IconKind::List),
     (DrawerTab::Console, "Console", "console", IconKind::Terminal),
+    (DrawerTab::Memory, "Memory", "memory", IconKind::Memory),
 ];
 
 /// The collapse button in the drawer's head: quiet, small, lined up with the tabs.
@@ -47,53 +52,31 @@ const COLLAPSE_BUTTON: &str = concatcp!(
     " relative mb-1 ",
     style::TIP_END
 );
-/// A tab, underlined in the accent while selected; the tabs share the width on phones.
-const TAB: &str = "inline-flex items-center justify-center gap-2 min-h-control px-3 -mb-px \
-    font-medium leading-tight whitespace-nowrap text-muted bg-transparent border-b-2 \
+/// A tab, underlined in the accent while selected; the tabs share the width on phones. In a
+/// drawer narrower than 34rem (container queries on [`DRAWER`]) the tabs drop their icons and
+/// share the width, so that the labels stay whole at the default width. In a drawer narrower
+/// than 25rem (a phone) the tabs show their icons and counts only; the label stays the tab's
+/// accessible name ([`TAB_LABEL`]).
+const TAB: &str = "inline-flex items-center justify-center gap-2 min-w-0 min-h-control px-3 \
+    -mb-px font-medium leading-tight whitespace-nowrap text-muted bg-transparent border-b-2 \
     border-transparent cursor-pointer transition-colors duration-(--duration-fast) ease-standard \
-    hover:text-fg hover:bg-hover aria-selected:text-fg aria-selected:border-accent max-sm:flex-1 \
-    max-sm:px-2";
+    hover:text-fg hover:bg-hover aria-selected:text-fg aria-selected:border-accent max-sm:flex-auto \
+    @max-[34rem]:flex-auto @max-[34rem]:gap-1.5 @max-[34rem]:px-2 \
+    @min-[25rem]:@max-[34rem]:[&>svg]:hidden";
+/// A tab's label: cut when it does not fit; read by assistive technology only in the
+/// narrowest drawer.
+const TAB_LABEL: &str = "truncate @max-[25rem]:sr-only";
 /// A tab's count pill (`style::COUNT`, narrower).
-const TAB_COUNT: &str = "inline-flex items-center justify-center min-w-[1.3rem] px-2 text-xs \
+const TAB_COUNT: &str = "inline-flex items-center justify-center min-w-[1.3rem] px-1.5 text-xs \
     font-semibold tabular-nums leading-[1.4] text-muted bg-panel-3 rounded-full";
-/// The resize edge: a line in the accent and a grip (`group-*`) while hovered, dragged or
-/// focused; hidden on phones, where the drawer sits under the map.
-const RESIZER: &str = concatcp!(
-    "group absolute inset-y-0 -left-[4px] z-5 w-[8px] cursor-col-resize touch-none \
-    focus-visible:outline-none before:absolute before:inset-y-0 before:left-[3px] \
-    before:w-[2px] before:bg-transparent before:transition-colors \
-    before:duration-(--duration-fast) before:ease-standard hover:before:bg-accent \
-    active:before:bg-accent focus-visible:before:bg-accent max-sm:hidden ",
-    style::TIP_LEFT
-);
-
-/// The widest drawer the window allows.
-fn max_width() -> u16 {
-    let window = web_sys::window()
-        .and_then(|window| window.inner_width().ok())
-        .and_then(|width| width.as_f64())
-        .unwrap_or(f64::from(MAX_WIDTH) + MAP_MIN_WIDTH);
-    let room = (window - MAP_MIN_WIDTH).clamp(f64::from(MIN_WIDTH), f64::from(MAX_WIDTH));
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clamped to the u16 range of MIN_WIDTH..=MAX_WIDTH"
-    )]
-    let room = room as u16;
-    room
-}
-
-/// `width` within what the window allows.
-fn clamp_width(width: f64) -> u16 {
-    let max = max_width();
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clamped to the u16 range of MIN_WIDTH..=max"
-    )]
-    let width = width.round().clamp(f64::from(MIN_WIDTH), f64::from(max)) as u16;
-    width
-}
+/// The drawer: at the right of the map, `--drawer-width` wide; under the map as a bottom sheet
+/// on phones, `--drawer-height` high. The sheet keeps its handle and tabs, and the map keeps
+/// at least 11rem (room for the map controls).
+const DRAWER: &str = "@container relative flex flex-none flex-col w-(--drawer-width) min-w-[280px] \
+    max-w-[calc(100%-320px)] min-h-0 bg-panel border-l border-edge animate-drawer-in \
+    max-sm:w-auto max-sm:max-w-none max-sm:min-w-0 max-sm:h-(--drawer-height) \
+    max-sm:min-h-[min(7rem,50%)] max-sm:max-h-[calc(100%-11rem)] max-sm:border-t \
+    max-sm:border-l-0 max-sm:animate-none";
 
 /// The drawer (collapsed when closed in the settings).
 #[component]
@@ -111,11 +94,12 @@ pub fn Drawer(server: Server) -> impl IntoView {
             state.update_saved(|saved| saved.settings.drawer_tab = next);
         }
     };
-    let width = RwSignal::new(clamp_width(f64::from(
-        state
-            .saved
-            .with_untracked(|saved| saved.settings.drawer_width),
-    )));
+    let DrawerSize {
+        width,
+        limit,
+        height,
+    } = DrawerSize::new(state);
+    let sheet = media_query(SHEET_LAYOUT);
     let user = server.user.as_ref().map(|user| user.id.clone());
 
     // The room in focus and the selection, shared with the map.
@@ -150,22 +134,10 @@ pub fn Drawer(server: Server) -> impl IntoView {
         }
     });
 
-    // The console runs while the world is shown.
-    let console = state
-        .session
-        .with_untracked(|session| {
-            session
-                .as_ref()
-                .filter(|session| session.server == server.url)
-                .map(|session| session.overseer.clone())
-        })
-        .map(|overseer| {
-            let shard = map
-                .shard
-                .get_untracked()
-                .and_then(|shard| shard.name().map(str::to_owned));
-            ConsoleState::start(&overseer, &server.url, shard)
-        });
+    // The console runs while the world is shown; the Memory tab keeps its tree.
+    let tools = account_tools(state, map, &server);
+    let console = tools.map(|(console, _)| console);
+    let memory = tools.map(|(_, memory)| memory);
     if let Some(console) = console {
         Effect::new(move |_| {
             let shown = open() && tab.get() == DrawerTab::Console;
@@ -176,36 +148,16 @@ pub fn Drawer(server: Server) -> impl IntoView {
         });
     }
 
-    let url = server.url.clone();
-    let name = server.name.clone();
-    let pop_out_room = Callback::new(move |()| {
-        let (Some(room), Some(shard)) = (map.room.get_untracked(), map.shard.get_untracked())
-        else {
-            return;
-        };
-        let title = match shard.name() {
-            Some(shard) => format!("{room} · {shard} · {name} — Overseer"),
-            None => format!("{room} · {name} — Overseer"),
-        };
-        open_window(state, &url, shard, WindowView::Room(room), title);
-    });
-    let url = server.url.clone();
-    let name = server.name.clone();
-    let pop_out_console = Callback::new(move |()| {
-        let Some(shard) = map.shard.get_untracked() else {
-            return;
-        };
-        let title = match shard.name() {
-            Some(shard) => format!("Console · {shard} · {name} — Overseer"),
-            None => format!("Console · {name} — Overseer"),
-        };
-        open_window(state, &url, shard, WindowView::Console, title);
-    });
+    let (pop_out_room, pop_out_console) = pop_outs(state, map, &server);
 
     let user = StoredValue::new(user);
     let panel = move || match tab.get() {
         DrawerTab::Room => {
+            // The sheet sits under the map, which already shows the room: no second viewer.
             let preview = move || {
+                if sheet.get() {
+                    return None;
+                }
                 map.feed.get().map(|feed| {
                     view! {
                         <RoomPreview feed room=map.room tile=map.tile user=user.get_value() data />
@@ -253,6 +205,12 @@ pub fn Drawer(server: Server) -> impl IntoView {
                 view! { <p class=style::EMPTY_STATE>"Sign in to use the console."</p> }.into_any()
             }
         },
+        DrawerTab::Memory => match memory {
+            Some(memory) => view! { <MemoryPanel state=memory /> }.into_any(),
+            None => {
+                view! { <p class=style::EMPTY_STATE>"Sign in to see your Memory."</p> }.into_any()
+            }
+        },
     };
     let objects = Signal::derive(move || {
         snapshot.with(|snapshot| snapshot.as_ref().map(|snapshot| snapshot.objects.len()))
@@ -270,11 +228,23 @@ pub fn Drawer(server: Server) -> impl IntoView {
         <Show when=open>
             <aside
                 id="drawer"
-                class="relative flex flex-none flex-col w-[var(--drawer-width,24rem)] min-w-[280px] max-w-[calc(100%-320px)] min-h-0 bg-panel border-l border-edge animate-drawer-in max-sm:w-auto max-sm:max-w-none max-sm:h-1/2 max-sm:min-w-0 max-sm:border-t max-sm:border-l-0 max-sm:animate-none"
+                class=DRAWER
                 aria-label="Drawer"
-                style=move || format!("--drawer-width: {}px", width.get())
+                style=move || {
+                    format!(
+                        "--drawer-width: {}px; --drawer-height: {:.2}%",
+                        width.get(),
+                        height.get(),
+                    )
+                }
             >
-                <Resizer width />
+                {move || {
+                    if sheet.get() {
+                        view! { <SheetHandle height /> }.into_any()
+                    } else {
+                        view! { <Resizer width limit=limit.into() /> }.into_any()
+                    }
+                }}
                 <div class="flex flex-none items-end gap-2 px-2 pt-1 border-b border-edge">
                     <div class="flex flex-1 min-w-0" role="tablist" aria-label="Drawer">
                         <TabList tab select objects unread />
@@ -292,7 +262,7 @@ pub fn Drawer(server: Server) -> impl IntoView {
                 </div>
                 <div
                     id="drawer-panel"
-                    class="flex flex-col flex-1 min-h-0 overflow-auto"
+                    class="flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
                     role="tabpanel"
                     aria-labelledby=labelled_by
                 >
@@ -313,7 +283,7 @@ fn TabList(
     unread: Signal<usize>,
 ) -> impl IntoView {
     let badge = move |which: DrawerTab| match which {
-        DrawerTab::Room => None,
+        DrawerTab::Room | DrawerTab::Memory => None,
         DrawerTab::Objects => objects.get(),
         DrawerTab::Console => Some(unread.get()).filter(|unread| *unread > 0),
     };
@@ -359,12 +329,66 @@ fn TabList(
                     on:keydown=keydown
                 >
                     <Icon kind=icon />
-                    <span>{label}</span>
+                    <span class=TAB_LABEL>{label}</span>
                     {count}
                 </button>
             }
         })
         .collect_view()
+}
+
+/// The console and the Memory tab of the session on `server`, on the shard shown; `None` while
+/// signed out.
+fn account_tools(
+    state: AppState,
+    map: MapState,
+    server: &Server,
+) -> Option<(ConsoleState, MemoryState)> {
+    let overseer = state.session.with_untracked(|session| {
+        session
+            .as_ref()
+            .filter(|session| session.server == server.url)
+            .map(|session| session.overseer.clone())
+    })?;
+    let shard = map
+        .shard
+        .get_untracked()
+        .and_then(|shard| shard.name().map(str::to_owned));
+    Some((
+        ConsoleState::start(&overseer, &server.url, shard.clone()),
+        MemoryState::new(&overseer, shard),
+    ))
+}
+
+/// "Pop out room" and "Pop out console" of `server`: the room in focus or the console of the
+/// shard shown, each in a window of its own.
+fn pop_outs(state: AppState, map: MapState, server: &Server) -> (Callback<()>, Callback<()>) {
+    let url = server.url.clone();
+    let name = server.name.clone();
+    let room = Callback::new(move |()| {
+        let (Some(room), Some(shard)) = (map.room.get_untracked(), map.shard.get_untracked())
+        else {
+            return;
+        };
+        let title = match shard.name() {
+            Some(shard) => format!("{room} · {shard} · {name} — Overseer"),
+            None => format!("{room} · {name} — Overseer"),
+        };
+        open_window(state, &url, shard, WindowView::Room(room), title);
+    });
+    let url = server.url.clone();
+    let name = server.name.clone();
+    let console = Callback::new(move |()| {
+        let Some(shard) = map.shard.get_untracked() else {
+            return;
+        };
+        let title = match shard.name() {
+            Some(shard) => format!("Console · {shard} · {name} — Overseer"),
+            None => format!("Console · {name} — Overseer"),
+        };
+        open_window(state, &url, shard, WindowView::Console, title);
+    });
+    (room, console)
 }
 
 /// Opens `view` of the server with base URL `url` in a window titled `title`.
@@ -401,86 +425,4 @@ fn focus(id: &str) {
             let _ = element.focus();
         }
     });
-}
-
-/// The drawer's left edge: drag it (or use the arrow keys on it) to resize the drawer;
-/// double-click restores the default width. The width is saved when the drag ends.
-#[component]
-fn Resizer(width: RwSignal<u16>) -> impl IntoView {
-    let state = AppState::expect();
-    // The pointer's x and the width when the drag began.
-    let drag = StoredValue::new(None::<(f64, u16)>);
-    let save = move || {
-        let width = width.get_untracked();
-        state.update_saved(|saved| saved.settings.drawer_width = width);
-    };
-    let down = move |event: PointerEvent| {
-        if event.button() != 0 {
-            return;
-        }
-        event.prevent_default();
-        if let Some(target) = event
-            .target()
-            .and_then(|target| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(target).ok())
-        {
-            let _ = target.set_pointer_capture(event.pointer_id());
-        }
-        drag.set_value(Some((f64::from(event.client_x()), width.get_untracked())));
-    };
-    let moved = move |event: PointerEvent| {
-        if let Some((x, start)) = drag.get_value() {
-            width.set(clamp_width(
-                f64::from(start) + x - f64::from(event.client_x()),
-            ));
-        }
-    };
-    let up = move |_: PointerEvent| {
-        if drag.get_value().is_some() {
-            drag.set_value(None);
-            save();
-        }
-    };
-    let keydown = move |event: KeyboardEvent| {
-        let current = width.get_untracked();
-        let next = match event.key().as_str() {
-            "ArrowLeft" => current.saturating_add(KEY_STEP),
-            "ArrowRight" => current.saturating_sub(KEY_STEP),
-            "Home" => MIN_WIDTH,
-            "End" => MAX_WIDTH,
-            _ => return,
-        };
-        event.prevent_default();
-        width.set(clamp_width(f64::from(next)));
-        save();
-    };
-    view! {
-        <div
-            class=RESIZER
-            role="separator"
-            tabindex="0"
-            aria-orientation="vertical"
-            aria-label="Resize drawer"
-            aria-controls="drawer"
-            aria-valuemin=MIN_WIDTH
-            aria-valuemax=max_width()
-            aria-valuenow=move || width.get()
-            data-tip="Drag to resize · double-click to reset"
-            on:pointerdown=down
-            on:pointermove=moved
-            on:pointerup=up
-            on:pointercancel=up
-            on:keydown=keydown
-            on:dblclick=move |_| {
-                width.set(clamp_width(f64::from(DRAWER_WIDTH)));
-                save();
-            }
-        >
-            <span
-                class="absolute top-1/2 -left-[4px] flex items-center justify-center w-[16px] h-8 text-muted bg-panel-2 border border-edge rounded-sm -translate-y-1/2 opacity-0 pointer-events-none transition-opacity duration-(--duration-fast) ease-standard group-hover:opacity-100 group-active:opacity-100 group-focus-visible:opacity-100"
-                aria-hidden="true"
-            >
-                <Icon kind=IconKind::Grip />
-            </span>
-        </div>
-    }
 }

@@ -132,7 +132,8 @@ impl Toasts {
 pub fn ToastRegion() -> impl IntoView {
     let toasts = Toasts::expect();
     view! {
-        <div class="fixed right-4 bottom-[calc(var(--spacing-statusbar)+1rem)] z-60 flex flex-col \
+        <div class="fixed right-[calc(1rem+var(--spacing-safe-r))] \
+            bottom-[calc(var(--spacing-statusbar)+var(--spacing-safe-b)+1rem)] z-60 flex flex-col \
             items-end gap-2 pointer-events-none">
             <For each=move || toasts.list.get() key=|toast| toast.id let:toast>
                 {
@@ -160,7 +161,7 @@ pub fn ToastRegion() -> impl IntoView {
                     view! {
                         <div class=class role=role>
                             <Icon kind=icon class=icon_class />
-                            <span class="flex-1 min-w-0">{toast.text}</span>
+                            <span class="flex-1 min-w-0 wrap-break-word">{toast.text}</span>
                             {action}
                             <button
                                 type="button"

@@ -27,8 +27,10 @@ pub enum IconKind {
     TopDown,
     /// Perspective (3D) view.
     Perspective,
-    /// A menu's caret.
+    /// A menu's caret; the next command of the console's history.
     ChevronDown,
+    /// The previous command of the console's history.
+    ChevronUp,
     /// Back.
     ArrowLeft,
     /// A server.
@@ -67,6 +69,8 @@ pub enum IconKind {
     Send,
     /// A drag handle.
     Grip,
+    /// Memory (braces).
+    Memory,
 }
 
 impl IconKind {
@@ -91,6 +95,7 @@ impl IconKind {
                 "M12 2.5 3.5 7v10l8.5 4.5 8.5-4.5V7zM3.5 7l8.5 4.5L20.5 7M12 11.5v10"
             }
             Self::ChevronDown => "m6 9 6 6 6-6",
+            Self::ChevronUp => "m18 15-6-6-6 6",
             Self::ArrowLeft => "M19 12H5M12 19l-7-7 7-7",
             Self::Server => "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
             Self::User => "M12 12a4 4 0 1 0 0-8a4 4 0 1 0 0 8zM4 21a8 8 0 0 1 16 0",
@@ -114,6 +119,9 @@ impl IconKind {
             Self::Filter => "M22 3H2l8 9.46V19l4 2v-8.54z",
             Self::Send => "M22 2 11 13M22 2l-7 20-4-9-9-4z",
             Self::Grip => "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01",
+            Self::Memory => {
+                "M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"
+            }
         }
     }
 }

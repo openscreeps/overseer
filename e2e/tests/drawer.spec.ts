@@ -1,6 +1,7 @@
-// The right drawer itself: its tabs (keyboard, counts), its width (drag, keys, double-click,
-// limits), collapsing it (its button, the top bar's), what survives a reload, and what it says
-// while no room is in focus. The tabs' content has its own specs (room, objects, console).
+// The drawer itself: its tabs (keyboard, counts), its width (drag, keys, double-click, limits),
+// its height as a bottom sheet on a phone (drag, keys, snap heights), collapsing it (its button,
+// the top bar's), what survives a reload, and what it says while no room is in focus. The tabs'
+// content has its own specs (room, objects, console, memory).
 
 import { expect, test } from './fixtures';
 import { drawer, openRoom, selectTab, tab } from './support/room';
@@ -21,10 +22,11 @@ test.describe('drawer', () => {
     for (const [key, name] of [
       ['ArrowRight', 'Objects'],
       ['ArrowRight', 'Console'],
+      ['ArrowRight', 'Memory'],
       ['ArrowRight', 'Room'],
-      ['ArrowLeft', 'Console'],
+      ['ArrowLeft', 'Memory'],
       ['Home', 'Room'],
-      ['End', 'Console'],
+      ['End', 'Memory'],
     ] as const) {
       await page.keyboard.press(key);
       const selected = tab(page, name);
@@ -33,7 +35,7 @@ test.describe('drawer', () => {
       await expect(page.getByRole('tabpanel')).toHaveAccessibleName(new RegExp(`^${name}`));
     }
     // Only the selected tab is in the tab order.
-    await expect(page.getByRole('tab', { selected: false })).toHaveCount(2);
+    await expect(page.getByRole('tab', { selected: false })).toHaveCount(3);
     for (const other of await page.getByRole('tab', { selected: false }).all()) {
       await expect(other).toHaveAttribute('tabindex', '-1');
     }
@@ -165,4 +167,48 @@ test.describe('drawer', () => {
       await expect(console).toHaveAccessibleName(/^Console\s*\d+$/, { timeout: 30_000 });
     },
   );
+
+  test.describe('on a phone', () => {
+    test.use({ viewport: { width: 390, height: 844 } });
+
+    test('is a bottom sheet: snap heights by drag and keys, kept across a reload', async ({
+      signedInPage: page,
+      home,
+    }) => {
+      await openRoom(page, home.path, home.room);
+      // The map over the sheet shows the room: the Room tab has no second viewer.
+      await expect(page.getByTestId('room-control')).toHaveCount(0);
+      const handle = page.getByRole('separator', { name: 'Resize drawer' });
+      const height = async () => (await drawer(page).boundingBox())?.height ?? 0;
+      await expect(handle).toHaveAttribute('aria-orientation', 'horizontal');
+      await expect(handle).toHaveAttribute('aria-valuenow', '50');
+      const half = await height();
+
+      // A drag up ends on the nearest snap height above.
+      const box = await handle.boundingBox();
+      if (!box) throw new Error('the handle has no box');
+      const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x, y - 250, { steps: 6 });
+      await page.mouse.up();
+      await expect(handle).toHaveAttribute('aria-valuenow', '85');
+      expect(await height()).toBeGreaterThan(half + 100);
+
+      // The keys: ↓ and ↑ go to the next snap height, Home and End to the ends.
+      await handle.focus();
+      await page.keyboard.press('ArrowDown');
+      await expect(handle).toHaveAttribute('aria-valuenow', '50');
+      await page.keyboard.press('Home');
+      await expect(handle).toHaveAttribute('aria-valuenow', '30');
+      expect(await height()).toBeLessThan(half);
+      await page.keyboard.press('ArrowUp');
+      await page.keyboard.press('End');
+      await expect(handle).toHaveAttribute('aria-valuenow', '85');
+
+      await page.reload();
+      await expect(handle).toHaveAttribute('aria-valuenow', '85', { timeout: 30_000 });
+      expect(await height()).toBeGreaterThan(half + 100);
+    });
+  });
 });

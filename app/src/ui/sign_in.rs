@@ -30,7 +30,7 @@ pub(super) const CARD_FORM: &str = "flex flex-col gap-3";
 /// The submit button of a [`CARD_FORM`]: as wide as the card.
 pub(super) const CARD_SUBMIT: &str = concatcp!(style::BUTTON_PRIMARY, " self-stretch mt-2");
 /// A card's head text under its title (the server's address).
-pub(super) const CARD_LEAD: &str = "text-sm text-muted";
+pub(super) const CARD_LEAD: &str = "text-sm text-muted wrap-anywhere";
 /// A link button on a line of its own in a field, centred as wide as the field.
 const FIELD_LINK: &str = concatcp!(style::LINK_BUTTON, " justify-center");
 

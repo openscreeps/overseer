@@ -127,8 +127,8 @@ pub const PANEL_NARROW: &str =
 /// A [`PANEL_NARROW`] raised as a card.
 pub const CARD: &str = "mt-6 p-6 bg-panel border border-edge rounded-lg shadow-card w-full max-w-md \
     self-center";
-/// A card's head: icon, title and lead.
-pub const CARD_HEAD: &str = "flex items-center gap-3 mb-5";
+/// A card's head: icon, title and lead (the text shrinks; a long one wraps).
+pub const CARD_HEAD: &str = "flex items-center gap-3 mb-5 [&>div]:min-w-0";
 /// A card's title.
 pub const CARD_TITLE: &str = "text-lg font-semibold leading-tight";
 
@@ -219,7 +219,9 @@ pub const METER_BAR_PROGRESS: &str = concatcp!(
 
 /// What every tooltip shares: `data-tip` holds the text (the accessible name stays in
 /// `aria-label`). It shows after a short pause on hover, at once on keyboard focus, never while
-/// the element's menu is open. Use a placed set: [`TIP`], [`TIP_END`], [`TIP_LEFT`], [`TIP_TOP`].
+/// the element's menu is open. Use a placed set: [`TIP`], [`TIP_END`], [`TIP_LEFT`],
+/// [`TIP_TOP_END`]. Put an element at the right edge of a panel on an `_END` set: a centred
+/// tooltip sticks out of the panel and makes it scroll sideways, also while hidden.
 /// The element must be positioned: add `relative` unless it is `absolute` or `fixed` already.
 const TIP_BASE: &str = "after:content-[attr(data-tip)] after:absolute after:z-20 \
     after:w-max after:max-w-72 after:px-2 after:py-1 after:text-xs after:font-medium \
@@ -248,9 +250,9 @@ pub const TIP_LEFT: &str = concatcp!(
     " after:top-1/2 after:right-[calc(100%+0.5rem)] after:translate-x-[2px] \
     after:-translate-y-1/2 hover:after:translate-x-0 focus-visible:after:translate-x-0"
 );
-/// A tooltip above the element, centred.
-pub const TIP_TOP: &str = concatcp!(
+/// A tooltip above the element, aligned to its right edge.
+pub const TIP_TOP_END: &str = concatcp!(
     TIP_BASE,
-    " after:bottom-[calc(100%+0.5rem)] after:left-1/2 after:-translate-x-1/2 \
-    after:translate-y-[2px] hover:after:translate-y-0 focus-visible:after:translate-y-0"
+    " after:bottom-[calc(100%+0.5rem)] after:right-0 after:translate-y-[2px] \
+    hover:after:translate-y-0 focus-visible:after:translate-y-0"
 );

@@ -192,7 +192,8 @@ for (const [viewport, size] of Object.entries(VIEWPORTS)) {
           .getByRole('status')
           .filter({ hasText: 'Live' }),
       ).toBeVisible({ timeout: 30_000 });
-      await drawn(page.getByTestId('room-control'));
+      // The bottom sheet (narrower than 641 px) has no room viewer: the map shows the room.
+      if (size.width >= 641) await drawn(page.getByTestId('room-control'));
       await shoot(page, viewport, '09-drawer-room');
 
       await page.getByRole('tab', { name: /Objects/ }).click();

@@ -3,7 +3,11 @@
 //!
 //! The world canvas fills the window under the top bar; the server list, sign-in, register
 //! and profile pages show over the same backdrop. A popped-out window shows a room control or
-//! the console alone.
+//! the console alone. The shell is as tall as the visible window (`h-dvh` on `<body>`: a
+//! phone's browser bars and on-screen keyboard shrink it) and keeps the safe-area insets
+//! (`app/tailwind.css`). The layout follows the window's width (phone, tablet, desktop) and
+//! the pointer (a finger gets larger controls), mostly in CSS; [`media`] gives the layout as
+//! a signal where it changes what is built.
 
 mod console;
 mod drawer;
@@ -11,6 +15,8 @@ mod form;
 mod hover;
 mod icon;
 mod inspector;
+mod media;
+mod memory;
 mod objects;
 mod player;
 mod profile;

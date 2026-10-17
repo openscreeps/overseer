@@ -6,6 +6,15 @@
  *
  * Class strings must stay literal in the Rust sources (Tailwind scans `src/` for them): never build
  * a class name with `format!`.
+ *
+ * Touch: on a coarse pointer (a finger) the control and row tokens grow to finger size (see the
+ * `pointer: coarse` block below), so every component that uses them follows. Do not set a control
+ * size in pixels in a component: use the tokens.
+ *
+ * Safe areas (a notch, rounded corners, a home indicator; `viewport-fit=cover` in index.html):
+ * `<body>` keeps the left and right insets, the top bar the top inset, the status bar the bottom
+ * inset. Elements between them need no inset. A `fixed` element adds the insets of the edges it
+ * touches (`--spacing-safe-*`).
  */
 
 @import "tailwindcss" source(none);
@@ -88,11 +97,19 @@
   --leading-tight: 1.2;
   --leading-normal: 1.45;
 
-  /* Control and bar heights (`h-control`, `min-h-control-sm`, `w-control`, …). */
+  /* Control, list row and bar heights (`h-control`, `min-h-control-sm`, `min-h-row`, …). A coarse
+     pointer makes them larger (the `pointer: coarse` block below). */
   --spacing-control: 2.1333rem;
   --spacing-control-sm: 1.7333rem;
+  --spacing-row: 1.9rem;
   --spacing-topbar: 3.2rem;
   --spacing-statusbar: 1.8667rem;
+
+  /* Safe-area insets (`pt-safe-t`, `pb-safe-b`, …): 0 on a plain rectangular screen. */
+  --spacing-safe-t: env(safe-area-inset-top, 0px);
+  --spacing-safe-r: env(safe-area-inset-right, 0px);
+  --spacing-safe-b: env(safe-area-inset-bottom, 0px);
+  --spacing-safe-l: env(safe-area-inset-left, 0px);
 
   /* Radii. */
   --radius-*: initial;
@@ -107,7 +124,8 @@
   --shadow-lg: 0 8px 24px rgb(0 0 0 / 45%);
   --shadow-card: 0 12px 32px rgb(0 0 0 / 35%);
 
-  /* Breakpoints, used as `max-*:` (narrower than): phone, phone/tablet, narrow, compact. */
+  /* Breakpoints, used as `max-*:` (narrower than): phone, phone/tablet, narrow, compact. Below `sm`
+     the drawer is a bottom sheet (`app/src/ui/media.rs` asks the same query). */
   --breakpoint-*: initial;
   --breakpoint-xs: 521px;
   --breakpoint-sm: 641px;
@@ -189,6 +207,22 @@
   --duration-slow: 260ms;
 }
 
+/*
+ * Finger-size tokens on a coarse pointer: controls 44 px, small controls and list rows 40 px, the
+ * top bar as tall as its controls need. A fine pointer (a mouse) keeps the dense sizes above.
+ */
+@layer theme {
+  @media (pointer: coarse) {
+    :root,
+    :host {
+      --spacing-control: 2.9333rem;
+      --spacing-control-sm: 2.6667rem;
+      --spacing-row: 2.6667rem;
+      --spacing-topbar: 3.4667rem;
+    }
+  }
+}
+
 @layer base {
   /* Every scroll container, also those the browser makes (a `<select>`'s list): no class can
      reach them all. */
@@ -206,5 +240,18 @@
   :focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+}
+
+/*
+ * Text fields on a coarse pointer: at least 16 px, so a phone browser does not zoom the page when
+ * a field gets the focus. Outside the layers on purpose: it wins over the `text-*` utilities of
+ * the fields.
+ */
+@media (pointer: coarse) {
+  input:not([type="checkbox"], [type="radio"], [type="range"]),
+  select,
+  textarea {
+    font-size: max(1rem, 16px);
   }
 }

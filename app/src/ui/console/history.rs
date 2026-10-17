@@ -108,6 +108,11 @@ impl CommandHistory {
         history
     }
 
+    /// The commands, oldest first.
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
     /// Records a sent command and ends navigation.
     pub fn record(&mut self, command: &str) {
         push_unique(&mut self.entries, command);

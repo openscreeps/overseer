@@ -1,16 +1,20 @@
 //! The console of the signed-in account: the live output of its code (`Console::feed`, after
 //! what `Console::history` kept) coloured by kind, with timestamps, auto-scroll that pauses
 //! while the user reads older lines ("Paused · n new"), filters by kind and text, and clear;
-//! and an input for expressions with a command history (↑/↓, remembered per server across
-//! restarts, [`history`]), multi-line with Shift+Enter, and a shard selector on sharded
-//! servers.
+//! and an input for expressions with a command history (↑/↓, and buttons for a finger;
+//! remembered per server across restarts, [`history`]), suggestions for names as the user types
+//! ([`complete`], [`suggest`]; Tab accepts), multi-line with Shift+Enter, and a shard selector
+//! on sharded servers.
 //!
 //! Console output is HTML; only a safe subset is rendered ([`markup`]), always as text nodes.
 //! The drawer's Console tab and the console window (`#/<server>/<shard>/console/window`)
 //! both show [`ConsolePanel`] over a [`ConsoleState`].
 
+mod complete;
 mod history;
 mod markup;
+mod names;
+mod suggest;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +29,11 @@ use web_sys::KeyboardEvent;
 
 use self::history::{CommandHistory, SavedCommands};
 use self::markup::Piece;
+use self::names::GameNames;
+use self::suggest::{Completer, SuggestionList};
 use crate::platform;
 use crate::ui::icon::{Icon, IconKind};
+use crate::ui::media::{COARSE_POINTER, media_query};
 use crate::ui::objects::{FILTER_ICON, FILTER_INPUT};
 use crate::ui::spawn_scoped;
 use crate::ui::style;
@@ -45,8 +52,12 @@ const KINDS: [(ConsoleKind, &str, &str); 4] = [
     (ConsoleKind::Command, "Commands", "command"),
 ];
 
-/// A quiet small icon button of the console's bar, its tooltip below.
-const BAR_BUTTON: &str = concatcp!(style::ICON_BUTTON_GHOST_SM, " relative ", style::TIP);
+/// A quiet small icon button of the console's bar (at its right end), its tooltip below and
+/// right-aligned: a centred one would stick out of the drawer.
+const BAR_BUTTON: &str = concatcp!(style::ICON_BUTTON_GHOST_SM, " relative ", style::TIP_END);
+/// A history button next to the input: for a finger only (a mouse and a keyboard use ↑/↓).
+const HISTORY_BUTTON: &str =
+    concatcp!(style::ICON_BUTTON_GHOST_SM, " self-end pointer-fine:hidden");
 
 /// The classes of a line of kind `kind` and of its text.
 const fn line_classes(kind: ConsoleKind) -> (&'static str, &'static str) {
@@ -121,6 +132,8 @@ pub struct ConsoleState {
     pub shown: RwSignal<bool>,
     /// Lines that arrived while it was not on screen.
     pub unread: RwSignal<usize>,
+    /// The names of the user's game that the input completes.
+    names: GameNames,
 }
 
 impl ConsoleState {
@@ -142,6 +155,7 @@ impl ConsoleState {
             error: RwSignal::new(None),
             shown: RwSignal::new(true),
             unread: RwSignal::new(0),
+            names: GameNames::new(overseer),
         };
         match console.feed() {
             Ok(mut feed) => {
@@ -562,11 +576,15 @@ fn LineView(line: Arc<Line>) -> impl IntoView {
 }
 
 /// The expression input: Enter runs, Shift+Enter adds a line, ↑/↓ on the first/last line go
-/// through the history.
+/// through the history while no suggestion list shows ([`suggest`]: Tab accepts). A finger
+/// gets buttons for the history too (no arrow keys on a phone's keyboard).
 #[component]
 fn ConsoleInput(state: ConsoleState) -> impl IntoView {
     let text = RwSignal::new(String::new());
+    // A finger has buttons for the history, and a phone has little room for the hint.
+    let coarse = media_query(COARSE_POINTER);
     let input = NodeRef::<Textarea>::new();
+    let completer = Completer::new(text, input, state.history, state.names, state.shard);
     let rows = move || text.with(|text| text.lines().count().clamp(1, INPUT_ROWS));
     let send = move || {
         let expression = text.get_untracked();
@@ -577,6 +595,7 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
         state.run(expression);
     };
     let set = move |value: String| {
+        completer.close();
         text.set(value);
         // The caret goes to the end once the value is in.
         set_timeout(
@@ -589,8 +608,24 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
             Duration::ZERO,
         );
     };
+    // The previous or next command of the history into the input; whether there was one.
+    let previous = move || {
+        let value = text.get_untracked();
+        let previous = state
+            .history
+            .try_update_value(|history| history.previous(&value))
+            .flatten();
+        previous.map(set).is_some()
+    };
+    let next = move || {
+        let next = state
+            .history
+            .try_update_value(CommandHistory::next)
+            .flatten();
+        next.map(set).is_some()
+    };
     let keydown = move |event: KeyboardEvent| {
-        if event.is_composing() {
+        if event.is_composing() || completer.keydown(&event) {
             return;
         }
         let Some(element) = input.get_untracked() else {
@@ -623,26 +658,10 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
                 event.prevent_default();
                 send();
             }
-            "ArrowUp" if !before && !event.shift_key() => {
-                if let Some(previous) = state
-                    .history
-                    .try_update_value(|history| history.previous(&value))
-                    .flatten()
-                {
-                    event.prevent_default();
-                    set(previous);
-                }
-            }
-            "ArrowDown" if !after && !event.shift_key() => {
-                if let Some(next) = state
-                    .history
-                    .try_update_value(CommandHistory::next)
-                    .flatten()
-                {
-                    event.prevent_default();
-                    set(next);
-                }
-            }
+            // The guards move through the history: the key is the input's only when they
+            // find nothing.
+            "ArrowUp" if !before && !event.shift_key() && previous() => event.prevent_default(),
+            "ArrowDown" if !after && !event.shift_key() && next() => event.prevent_default(),
             _ => {}
         }
     };
@@ -660,10 +679,10 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
                 .collect_view();
             view! {
                 <select
-                    class="min-h-control-sm px-3 text-sm text-fg bg-sunken border border-edge \
-                        rounded-md transition-[border-color] duration-(--duration-fast) \
-                        ease-standard hover:border-edge-strong focus-visible:outline-offset-0 \
-                        focus-visible:border-focus"
+                    class="min-h-control-sm min-w-0 max-w-32 px-3 text-sm text-fg bg-sunken \
+                        border border-edge rounded-md transition-[border-color] \
+                        duration-(--duration-fast) ease-standard hover:border-edge-strong \
+                        focus-visible:outline-offset-0 focus-visible:border-focus"
                     aria-label="Shard"
                     on:change=move |event| state.shard.set(Some(event_target_value(&event)))
                 >
@@ -674,12 +693,14 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
     };
     view! {
         <form
-            class="flex flex-row items-end gap-2 flex-none px-3 py-2 bg-panel border-t border-edge"
+            class="relative flex flex-row items-end gap-2 flex-none px-3 py-2 bg-panel border-t \
+                border-edge"
             on:submit=move |event| {
                 event.prevent_default();
                 send();
             }
         >
+            <SuggestionList completer />
             {shards}
             <span class="self-center font-mono text-accent" aria-hidden="true">"›"</span>
             <textarea
@@ -692,17 +713,50 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
                 spellcheck="false"
                 autocomplete="off"
                 aria-label="Console expression"
-                placeholder="Expression (Enter runs, ↑ history)"
+                aria-autocomplete="list"
+                aria-controls=completer.list_id()
+                aria-activedescendant=move || completer.active_id()
+                placeholder=move || {
+                    if coarse.get() { "Expression" } else { "Expression (Enter runs, ↑ history)" }
+                }
                 prop:value=move || text.get()
                 on:input=move |event| {
                     text.set(event_target_value(&event));
                     state.history.update_value(CommandHistory::reset);
+                    completer.typed();
                 }
+                on:compositionstart=move |_| completer.compose(true)
+                on:compositionend=move |_| completer.compose(false)
+                on:blur=move |_| completer.close()
+                on:click=move |_| completer.close()
                 on:keydown=keydown
             ></textarea>
+            // `pointerdown` keeps the focus in the input: a phone's keyboard stays open.
+            <button
+                type="button"
+                class=HISTORY_BUTTON
+                aria-label="Previous command"
+                on:pointerdown=|event: web_sys::PointerEvent| event.prevent_default()
+                on:click=move |_| {
+                    previous();
+                }
+            >
+                <Icon kind=IconKind::ChevronUp />
+            </button>
+            <button
+                type="button"
+                class=HISTORY_BUTTON
+                aria-label="Next command"
+                on:pointerdown=|event: web_sys::PointerEvent| event.prevent_default()
+                on:click=move |_| {
+                    next();
+                }
+            >
+                <Icon kind=IconKind::ChevronDown />
+            </button>
             <button
                 type="submit"
-                class=concatcp!(style::ICON_BUTTON_SM, " relative self-end ", style::TIP_TOP)
+                class=concatcp!(style::ICON_BUTTON_SM, " relative self-end ", style::TIP_TOP_END)
                 aria-label="Run"
                 data-tip="Run (Enter)"
             >

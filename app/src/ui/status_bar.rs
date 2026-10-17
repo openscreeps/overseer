@@ -5,6 +5,11 @@
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
 //! fixed minimum width with tabular digits (the tick's sized for the server's shard names and a
 //! 9-digit tick), so values arriving or changing never shift their neighbours.
+//!
+//! A narrow window drops whole items, lowest priority first: the platform and the frame time,
+//! then (on phones) the hovered room, the graphics backend and the fixed widths. The
+//! connection, the tick and the zoom level always stay. The hovered room never shows for a
+//! finger (no hover). The bar keeps the bottom safe-area inset under its items.
 
 use leptos::prelude::*;
 use overseer::ConnectionStatus;
@@ -248,18 +253,25 @@ pub fn StatusBar() -> impl IntoView {
     };
     view! {
         <footer
-            class="flex flex-none items-center gap-5 max-md:gap-3 h-statusbar px-3 overflow-hidden \
-                whitespace-nowrap text-sm tabular-nums text-muted bg-panel border-t border-edge"
+            class="flex flex-none items-center gap-5 max-md:gap-3 \
+                h-[calc(var(--spacing-statusbar)+var(--spacing-safe-b))] px-3 pb-safe-b \
+                overflow-hidden whitespace-nowrap text-sm tabular-nums text-muted bg-panel \
+                border-t border-edge"
             aria-label="Status"
         >
             <span
-                class="inline-flex flex-none items-center gap-2 min-w-[9.5em]"
+                class="inline-flex flex-none items-center gap-2 min-w-[9.5em] max-sm:min-w-0"
                 title=connection_title
             >
                 <span class=move || status_class(state.status.get()) aria-hidden="true"></span>
                 {move || connection_text(state.status.get())}
             </span>
-            {item(place, "inline-flex flex-none items-center gap-2", "Game tick", Some(place_width))}
+            {item(
+                place,
+                "inline-flex flex-none items-center gap-2 max-sm:min-w-0!",
+                "Game tick",
+                Some(place_width),
+            )}
             {item(
                 level,
                 "inline-flex flex-none items-center gap-2 min-w-[4.5em] text-fg",
@@ -268,7 +280,8 @@ pub fn StatusBar() -> impl IntoView {
             )}
             {item(
                 hover,
-                "inline-flex flex-none items-center gap-2 min-w-[6.5em] text-fg",
+                "inline-flex flex-none items-center gap-2 min-w-[6.5em] text-fg max-sm:hidden \
+                    pointer-coarse:hidden",
                 "Room under the pointer",
                 None,
             )}
@@ -277,13 +290,13 @@ pub fn StatusBar() -> impl IntoView {
             <span class="inline-flex items-center gap-5 max-md:gap-3 ml-auto">
                 {item(
                     frame,
-                    "inline-flex flex-none items-center gap-2 min-w-[7.5em]",
+                    "inline-flex flex-none items-center gap-2 min-w-[7.5em] max-md:hidden",
                     "CPU time of the last frame",
                     None,
                 )}
                 {item(
                     backend,
-                    "inline-flex flex-none items-center gap-2 max-xs:hidden",
+                    "inline-flex flex-none items-center gap-2 max-sm:hidden",
                     "Graphics backend",
                     None,
                 )}

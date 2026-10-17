@@ -30,6 +30,10 @@ pub struct Settings {
     /// The drawer's width in CSS pixels (clamped to the window when shown).
     #[serde(deserialize_with = "lenient_width")]
     pub drawer_width: u16,
+    /// The drawer's height as a bottom sheet (phone layout), in percent of the world screen
+    /// (clamped to the sheet's limits when shown).
+    #[serde(deserialize_with = "lenient_height")]
+    pub drawer_height: u8,
     /// The drawer's tab.
     #[serde(deserialize_with = "lenient")]
     pub drawer_tab: DrawerTab,
@@ -40,6 +44,7 @@ impl Default for Settings {
         Self {
             drawer: true,
             drawer_width: DRAWER_WIDTH,
+            drawer_height: DRAWER_HEIGHT,
             drawer_tab: DrawerTab::Room,
         }
     }
@@ -47,6 +52,8 @@ impl Default for Settings {
 
 /// The drawer's default width in CSS pixels.
 pub const DRAWER_WIDTH: u16 = 384;
+/// The bottom sheet's default height, in percent of the world screen.
+pub const DRAWER_HEIGHT: u8 = 50;
 
 /// A tab of the drawer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +66,8 @@ pub enum DrawerTab {
     Objects,
     /// The account's console.
     Console,
+    /// The signed-in user's Memory and segments.
+    Memory,
 }
 
 /// A tab that does not decode is the default one, leaving the other settings.
@@ -75,6 +84,12 @@ where
 fn lenient_width<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
     let value = Value::deserialize(deserializer)?;
     Ok(u16::deserialize(value).unwrap_or(DRAWER_WIDTH))
+}
+
+/// A height that does not decode is [`DRAWER_HEIGHT`], leaving the other settings.
+fn lenient_height<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(u8::deserialize(value).unwrap_or(DRAWER_HEIGHT))
 }
 
 /// How long known world bounds are trusted before the world is measured again, in
@@ -286,7 +301,7 @@ mod tests {
 
     use overseer::map::RoomRect;
 
-    use super::{Bounds, DRAWER_WIDTH, DrawerTab, Place, Saved, Settings};
+    use super::{Bounds, DRAWER_HEIGHT, DRAWER_WIDTH, DrawerTab, Place, Saved, Settings};
     use crate::route::Route;
 
     fn camera() -> CameraState {
@@ -307,6 +322,7 @@ mod tests {
             settings: Settings {
                 drawer: false,
                 drawer_width: 512,
+                drawer_height: 85,
                 drawer_tab: DrawerTab::Console,
             },
             ..Saved::default()
@@ -345,6 +361,7 @@ mod tests {
         let settings = Saved::default().settings;
         assert!(settings.drawer);
         assert_eq!(settings.drawer_width, DRAWER_WIDTH);
+        assert_eq!(settings.drawer_height, DRAWER_HEIGHT);
         assert_eq!(settings.drawer_tab, DrawerTab::Room);
     }
 
@@ -354,7 +371,13 @@ mod tests {
             "version": 9,
             "future": true,
             "route": "#/not a route",
-            "settings": {"drawer": false, "unknown": 1, "drawer_width": -5, "drawer_tab": "maps"},
+            "settings": {
+                "drawer": false,
+                "unknown": 1,
+                "drawer_width": -5,
+                "drawer_height": 300,
+                "drawer_tab": "maps"
+            },
             "places": {
                 "http://a/": {
                     "shard": "shard1",
@@ -378,12 +401,14 @@ mod tests {
             "kept next to settings that do not decode"
         );
         assert_eq!(saved.settings.drawer_width, DRAWER_WIDTH);
+        assert_eq!(saved.settings.drawer_height, DRAWER_HEIGHT);
         assert_eq!(saved.settings.drawer_tab, DrawerTab::Room);
         let tab = Saved::parse(Some(
-            r#"{"settings": {"drawer_tab": "objects", "drawer_width": 300}}"#,
+            r#"{"settings": {"drawer_tab": "objects", "drawer_width": 300, "drawer_height": 30}}"#,
         ));
         assert_eq!(tab.settings.drawer_tab, DrawerTab::Objects);
         assert_eq!(tab.settings.drawer_width, 300);
+        assert_eq!(tab.settings.drawer_height, 30);
         let place = &saved.places["http://a/"];
         assert_eq!(place.shard.as_deref(), Some("shard1"));
         assert_eq!(place.mode, ViewMode::TopDown);

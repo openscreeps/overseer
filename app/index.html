@@ -5,13 +5,17 @@
 >
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#1f2229" />
     <title>Overseer</title>
     <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <link data-trunk rel="copy-file" href="icon.svg" />
     <link data-trunk rel="tailwind-css" href="tailwind.css" />
     <link data-trunk rel="rust" data-bin="overseer-app" data-wasm-opt="z" />
   </head>
-  <body class="flex flex-col h-full min-h-screen m-0 overflow-hidden"></body>
+  <body class="flex flex-col h-dvh m-0 pr-safe-r pl-safe-l overflow-hidden"></body>
 </html>

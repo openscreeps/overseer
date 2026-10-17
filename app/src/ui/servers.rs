@@ -140,7 +140,7 @@ fn ServerItem(server: Server) -> impl IntoView {
                 <Icon kind=icon class="inline flex-none size-[1.3rem]" />
             </span>
             <div class="flex flex-col flex-1 gap-[0.1rem] min-w-0">
-                <strong class="inline-flex items-center gap-2 text-lg">
+                <strong class="inline-flex items-center gap-2 min-w-0 text-lg wrap-anywhere">
                     {server.name}
                     <span class=dot aria-hidden="true"></span>
                 </strong>
@@ -244,7 +244,7 @@ fn AddServer(
     view! {
         <dialog
             id="add-server"
-            class="m-auto w-[min(28rem,calc(100vw-2rem))] max-h-[calc(100vh-3rem)] p-5 text-fg bg-panel border border-edge rounded-lg shadow-lg open:animate-dialog-in backdrop:bg-scrim backdrop:animate-fade-in"
+            class="m-auto w-[min(28rem,calc(100vw-2rem))] max-h-[calc(100dvh-3rem)] overflow-y-auto overscroll-contain p-5 max-xs:p-4 text-fg bg-panel border border-edge rounded-lg shadow-lg open:animate-dialog-in backdrop:bg-scrim backdrop:animate-fade-in"
             node_ref=dialog
             aria-labelledby="add-title"
             on:close=move |_| reset()

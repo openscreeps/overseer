@@ -678,7 +678,7 @@ pub fn RateLimitsPanel() -> impl IntoView {
         ui.open.get().then(|| {
             view! {
                 <section
-                    class="fixed top-[calc(var(--spacing-topbar)+0.5rem)] right-3 z-40 w-[min(34rem,calc(100vw-1.5rem))] max-h-[calc(100vh-var(--spacing-topbar)-var(--spacing-statusbar)-2rem)] overflow-auto p-5 bg-panel-2 border border-edge rounded-lg shadow-lg origin-top-right animate-pop-in"
+                    class="fixed top-[calc(var(--spacing-topbar)+var(--spacing-safe-t)+0.5rem)] right-[calc(0.75rem+var(--spacing-safe-r))] z-40 w-[min(34rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] max-h-[calc(100dvh-var(--spacing-topbar)-var(--spacing-safe-t)-var(--spacing-statusbar)-var(--spacing-safe-b)-2rem)] overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-edge rounded-lg shadow-lg origin-top-right animate-pop-in"
                     role="dialog"
                     aria-labelledby="rate-limits-title"
                     on:keydown=keydown
@@ -766,7 +766,7 @@ pub fn LiftPrompt() -> impl IntoView {
         let text = move || warning.text(ui.now.get());
         Some(view! {
             <section
-                class="fixed bottom-[calc(var(--spacing-statusbar)+1rem)] right-3 z-61 w-[min(26rem,calc(100vw-1.5rem))] max-h-[calc(100vh-var(--spacing-topbar)-var(--spacing-statusbar)-2rem)] overflow-auto p-5 bg-panel-2 border border-l-3 border-edge border-l-warn rounded-lg shadow-lg origin-bottom-right animate-pop-in"
+                class="fixed bottom-[calc(var(--spacing-statusbar)+var(--spacing-safe-b)+1rem)] right-[calc(0.75rem+var(--spacing-safe-r))] z-61 w-[min(26rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] max-h-[calc(100dvh-var(--spacing-topbar)-var(--spacing-safe-t)-var(--spacing-statusbar)-var(--spacing-safe-b)-2rem)] overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-l-3 border-edge border-l-warn rounded-lg shadow-lg origin-bottom-right animate-pop-in"
                 role="dialog"
                 aria-labelledby="lift-prompt-title"
                 aria-describedby="lift-prompt-text"

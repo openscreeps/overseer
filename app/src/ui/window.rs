@@ -19,9 +19,9 @@ use crate::ui::world::{MapState, Phase, open_world};
 
 /// A window's screen: its head over its content.
 const SCREEN: &str = "relative flex flex-col flex-1 min-h-0";
-/// A window's head: its title and controls.
-const HEAD: &str = "flex flex-none items-center justify-between gap-4 h-11 px-3 bg-panel \
-    border-b border-edge";
+/// A window's head: its title and controls (as tall as its controls need, at least 11 steps).
+const HEAD: &str = "flex flex-none items-center justify-between gap-4 min-h-11 px-3 py-1 \
+    bg-panel border-b border-edge";
 /// A window's title.
 const TITLE: &str = "text-base font-semibold leading-tight";
 
