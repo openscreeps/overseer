@@ -18,7 +18,7 @@ const ALLOWED: &str = "http://allowed.example";
 const DENIED: &str = "http://denied.example";
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn the_socket_is_relayed_both_ways() {
     let proxy = support::start(None, &[]).await;
     let server = support::via(&proxy);
@@ -99,7 +99,7 @@ async fn open(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn socket_upgrades_follow_the_origin_policy() {
     let proxy = support::start(None, &[ALLOWED]).await;
     // An allowed page reaches the server, which greets with its clock.

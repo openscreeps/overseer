@@ -288,7 +288,7 @@ async fn sharded_history_reads_the_gzip_encoded_static_chunk_files() {
         |_| true,
     )
     .await;
-    let client = Client::builder(server.url()).build().unwrap();
+    let client = Client::builder(server.official_url()).build().unwrap();
     let history = client.room_history(None, "W1N1", 150).await.unwrap();
     assert_eq!((history.room(), history.base()), ("W1N1", 100));
     let states: Vec<_> = history.replay().collect();

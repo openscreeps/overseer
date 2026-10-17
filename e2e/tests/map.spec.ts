@@ -4,14 +4,17 @@
 // status bar counts what is still loading; a portal room lists where its portals lead and "Go
 // to" takes the map there.
 //
-// Untagged tests only read, around the signed-in account's `home` room. The harness's 11 × 11
-// world (W5N5 to E5S5) has no portals of its own (its sector centre W5N5 has none): the portal
-// test links W5N5 with the crossroads W0N0 through the server's admin API, once per world (both
-// are rooms the map scans for portals); the status test closes the highway room W0S4 (no player
-// can start there), which puts it outside the world's borders.
+// Untagged tests only read, around the signed-in account's `home` room. The harness's worlds
+// (OpenScreeps: 11 × 11 rooms W5N5 to E5S5; community: W10N10 to W0N0) have no portals of their
+// own (the sector centre W5N5 has none): the portal test links W5N5 with the crossroads W0N0,
+// rooms of both worlds, once per world (both are rooms the map scans for portals); the status
+// test closes the highway room W0N4 of both worlds (no player can start there), which puts it
+// outside the world's borders. Both act as the server's administrator: the admin API on
+// `openscreeps`, the CLI on `community`.
 
 import type { Page } from '@playwright/test';
-import { adminOf, api, expect, Session, test, type Server } from './fixtures';
+import { api, cli, expect, Session, test, type Server } from './fixtures';
+import { admin } from './support/accounts';
 import {
   breadcrumb,
   hovered,
@@ -34,20 +37,8 @@ declare global {
 const PORTAL_ROOM = 'W5N5';
 const PORTAL_TARGET = 'W0N0';
 
-/** The room the status test closes (`room-close`: out of borders). */
-const CLOSED_ROOM = 'W0S4';
-
-/** Calls the server's admin API (`POST /admin`) with `body`; returns whether it succeeded. */
-async function admin(server: Server, body: Record<string, unknown>): Promise<Response> {
-  return fetch(new URL('admin', server.url), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${adminOf(server).token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-}
+/** The room the status test closes (out of borders). */
+const CLOSED_ROOM = 'W0N4';
 
 /** Whether `room` has portals leading to `target` (`GET /api/game/room-objects`). */
 async function hasPortals(server: Server, room: string, target: string): Promise<boolean> {
@@ -60,27 +51,75 @@ async function hasPortals(server: Server, room: string, target: string): Promise
 }
 
 /**
- * Links {@link PORTAL_ROOM} and {@link PORTAL_TARGET} with a portal pair (`portal-create`)
- * unless they already are: the projects share the world.
+ * A CLI command of the community server linking rooms `from` and `to` as OpenScreeps'
+ * `portal-create` does: in each room, around an indestructible wall in the first free 5 × 5
+ * area of plain ground, eight permanent portals (no `decayTime` or `unstableDate`), each leading
+ * to the matching tile of the other room's cluster; both rooms join the active rooms, so that
+ * the engine draws the portals into the rooms' map views.
+ */
+function portalCommand(from: string, to: string): string {
+  return `(async () => {
+    const spots = [];
+    for (const room of ${JSON.stringify([from, to])}) {
+      const { terrain } = await storage.db['rooms.terrain'].findOne({ room });
+      const objects = await storage.db['rooms.objects'].find({ room });
+      let spot;
+      for (let x = 8; x <= 41 && !spot; x++) {
+        for (let y = 8; y <= 41 && !spot; y++) {
+          let free = !objects.some((o) => Math.abs(o.x - x) <= 2 && Math.abs(o.y - y) <= 2);
+          for (let dx = -2; dx <= 2 && free; dx++) {
+            for (let dy = -2; dy <= 2 && free; dy++) free = terrain[(y + dy) * 50 + x + dx] === '0';
+          }
+          if (free) spot = { room, x, y };
+        }
+      }
+      if (!spot) throw new Error('no free area for a portal in ' + room);
+      spots.push(spot);
+    }
+    for (const [at, to] of [[spots[0], spots[1]], [spots[1], spots[0]]]) {
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const tile = { room: at.room, x: at.x + dx, y: at.y + dy };
+          await storage.db['rooms.objects'].insert(
+            dx || dy
+              ? { type: 'portal', ...tile, destination: { room: to.room, x: to.x + dx, y: to.y + dy } }
+              : { type: 'constructedWall', ...tile },
+          );
+        }
+      }
+      await storage.env.sadd(storage.env.keys.ACTIVE_ROOMS, at.room);
+    }
+    return 'linked';
+  })()`;
+}
+
+/**
+ * Links {@link PORTAL_ROOM} and {@link PORTAL_TARGET} with a portal pair unless they already
+ * are (the projects share the world): `portal-create` of the admin API on `openscreeps`,
+ * {@link portalCommand} in the CLI on `community`.
  */
 async function ensurePortals(server: Server): Promise<void> {
   if (await hasPortals(server, PORTAL_ROOM, PORTAL_TARGET)) return;
-  const reply = await admin(server, {
-    action: 'portal-create',
-    from: PORTAL_ROOM,
-    to: PORTAL_TARGET,
-  });
-  // A concurrent project may have linked them meanwhile (then there is no room for more).
-  if (!reply.ok && !(await hasPortals(server, PORTAL_ROOM, PORTAL_TARGET))) {
-    throw new Error(`portal-create: HTTP ${reply.status} ${await reply.text()}`);
+  if (!server.admin) {
+    await cli(server, portalCommand(PORTAL_ROOM, PORTAL_TARGET));
+    return;
+  }
+  try {
+    await admin(server, { action: 'portal-create', from: PORTAL_ROOM, to: PORTAL_TARGET });
+  } catch (error) {
+    // A concurrent project may have linked them meanwhile (then there is no room for more).
+    if (!(await hasPortals(server, PORTAL_ROOM, PORTAL_TARGET))) throw error;
   }
 }
 
-/** Closes {@link CLOSED_ROOM} (`room-close`) unless it is closed already. */
+/**
+ * Closes {@link CLOSED_ROOM} unless it is closed already: its status turns from `normal` to
+ * `out of borders`, once (`room-close` of the admin API on `openscreeps`, `map.closeRoom` in the
+ * CLI on `community`; both idempotent).
+ */
 async function ensureClosed(server: Server): Promise<void> {
-  // Idempotent: the room's status turns from `normal` to `out of borders`, once.
-  const reply = await admin(server, { action: 'room-close', room: CLOSED_ROOM });
-  if (!reply.ok) throw new Error(`room-close: HTTP ${reply.status} ${await reply.text()}`);
+  if (server.admin) await admin(server, { action: 'room-close', room: CLOSED_ROOM });
+  else await cli(server, `map.closeRoom(${JSON.stringify(CLOSED_ROOM)})`);
 }
 
 /** Moves the mouse to the middle of tile `(x, y)` of `room` (its top centre and the next's). */
@@ -204,20 +243,27 @@ test.describe('map', () => {
     await expect(page.getByRole('tooltip')).not.toContainText(/\d+,\d+/);
   });
 
-  test('says in the tooltip that a room is outside the world @openscreeps', async ({
-    signedInPage: page,
-    server,
-    home,
-  }) => {
-    await ensureClosed(server);
-    // Zoomed out over the whole (small) world, where every room's overview loads.
-    await openRoom(page, home.path);
-    await worldMap(page).focus();
-    for (let i = 0; i < 12; i++) await page.keyboard.press('Escape');
-    await hoverTile(page, CLOSED_ROOM, 25, 25);
-    await expect(page.getByRole('tooltip')).toContainText(CLOSED_ROOM);
-    await expect(page.getByRole('tooltip')).toContainText('Outside the world', {
-      timeout: 30_000,
+  test.describe(() => {
+    // The run's warm cache holds the room's overview from before it closed, and a viewed room's
+    // cached overview is asked again only when it was requested more than a minute before
+    // (`STATS_VIEWED_FRESH`): a cold world asks the server.
+    test.use({ cache: 'cold' });
+
+    test('says in the tooltip that a room is outside the world @openscreeps', async ({
+      signedInPage: page,
+      server,
+      home,
+    }) => {
+      await ensureClosed(server);
+      // Zoomed out over the whole (small) world, where every room's overview loads.
+      await openRoom(page, home.path);
+      await worldMap(page).focus();
+      for (let i = 0; i < 12; i++) await page.keyboard.press('Escape');
+      await hoverTile(page, CLOSED_ROOM, 25, 25);
+      await expect(page.getByRole('tooltip')).toContainText(CLOSED_ROOM);
+      await expect(page.getByRole('tooltip')).toContainText('Outside the world', {
+        timeout: 30_000,
+      });
     });
   });
 

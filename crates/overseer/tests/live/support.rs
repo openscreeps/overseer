@@ -1,16 +1,29 @@
-//! What every live test needs: the server from the environment, fresh accounts and players.
+//! What every live test needs: the server from the environment, fresh accounts and players, and
+//! the server's administration (admin API or CLI) where a test sets the world up.
 //!
 //! `cargo xtask e2e` starts a disposable world of `openscreeps/server` and sets
 //! `OVERSEER_E2E_TARGET=openscreeps`, `OVERSEER_LIVE_URL` (the server base URL),
-//! `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a player without a spawn). Tests register
-//! their own accounts so that none depends on another's state.
+//! `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a player without a spawn) and
+//! `OVERSEER_LIVE_ADMIN_TOKEN` (its admin API, see [`admin_api`]). Tests register their own
+//! accounts so that none depends on another's state.
+//!
+//! `cargo xtask e2e --target community` runs them against a disposable community world instead
+//! (the Screeps server with screepsmod-auth and screepsmod-admin-utils, which lists the shard
+//! name `shard0` although it serves a single world), with `OVERSEER_E2E_TARGET=community`, the
+//! same server and player variables and `OVERSEER_LIVE_CLI_URL` (the server's CLI, see [`cli`])
+//! instead of the admin API. Where the two servers legitimately differ, tests assert each one's
+//! behaviour ([`community`]).
 //!
 //! `cargo xtask e2e --target official` runs only the `read_only` tests against screeps.com, with
 //! `OVERSEER_E2E_TARGET=official`, `OVERSEER_LIVE_URL` and `OVERSEER_LIVE_TOKEN` (an API token of
-//! an account that owns rooms); [`reader`] is that account on either target.
+//! an account that owns rooms); [`reader`] is that account on every target.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::OnceCell;
 
 use overseer::core::{ServerUrl, Token};
 use overseer::net::Client;
@@ -66,6 +79,90 @@ pub fn admin() -> Account {
 /// where [`reader`] owns rooms.
 pub fn official() -> bool {
     std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "official")
+}
+
+/// Whether the tests run against a community server (`OVERSEER_E2E_TARGET=community`): the
+/// Screeps server (`@screeps/backend` 3.3.0) with screepsmod-auth 2.10.1 and
+/// screepsmod-admin-utils 1.37.1, administered through [`cli`].
+pub fn community() -> bool {
+    std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "community")
+}
+
+/// Sends `body` to `path` on the server at `address` (`host:port`) as `POST` over HTTP/1.0 (so
+/// the reply is never chunked) with the extra header lines `headers`; returns the status line
+/// and the body.
+async fn post(address: &str, path: &str, headers: &str, body: &str) -> (String, String) {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("the server accepts connections");
+    let request = format!(
+        "POST {path} HTTP/1.0\r\nHost: {address}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("the request is sent");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .await
+        .expect("the response arrives");
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+    let status = head.lines().next().unwrap_or_default().to_owned();
+    (status, body.to_owned())
+}
+
+/// Whether the status line `status` is a success (HTTP 2xx).
+fn succeeded(status: &str) -> bool {
+    status
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|code| code.starts_with('2'))
+}
+
+/// Runs `action` (a JSON object) on the admin API of `openscreeps/server` (`POST /admin` with
+/// `OVERSEER_LIVE_ADMIN_TOKEN`) and returns the response body.
+///
+/// # Panics
+///
+/// When the token is not set or the admin API refuses the action.
+pub async fn admin_api(action: &str) -> String {
+    let token = std::env::var("OVERSEER_LIVE_ADMIN_TOKEN")
+        .expect("OVERSEER_LIVE_ADMIN_TOKEN is not set: run `cargo xtask e2e`");
+    let url = url().join("admin").expect("the admin URL");
+    let host = url.host_str().expect("a host");
+    let port = url.port_or_known_default().expect("a port");
+    let headers = format!("Authorization: Bearer {token}\r\nContent-Type: application/json\r\n");
+    let (status, body) = post(&format!("{host}:{port}"), url.path(), &headers, action).await;
+    assert!(
+        succeeded(&status),
+        "the admin API refused {action}: {status}\n{body}"
+    );
+    body
+}
+
+/// Runs `command` (JavaScript) in the community server's CLI (`OVERSEER_LIVE_CLI_URL`, the
+/// community counterpart of the admin API) and returns its result as the CLI prints it: strings
+/// as they are, other values through `util.inspect`, promises once settled.
+///
+/// # Panics
+///
+/// When the variable is not set or the command fails (the CLI then prints `Error: …`).
+pub async fn cli(command: &str) -> String {
+    let cli = std::env::var("OVERSEER_LIVE_CLI_URL")
+        .expect("OVERSEER_LIVE_CLI_URL is not set: run `cargo xtask e2e --target community`");
+    let (address, path) = cli
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .expect("OVERSEER_LIVE_CLI_URL is http://<host>:<port>/<path>");
+    let (status, body) = post(address, &format!("/{path}"), "", command).await;
+    let result = body.trim_end().to_owned();
+    assert!(
+        succeeded(&status) && !result.starts_with("Error: "),
+        "the CLI failed to run {command}: {status}\n{result}"
+    );
+    result
 }
 
 /// The profile of the `read_only` tests' account: the API token `OVERSEER_LIVE_TOKEN` when it
@@ -278,8 +375,24 @@ pub async fn world(client: &Client) -> GameMapStatsResponse {
         .expect("map stats")
 }
 
+/// The CLI command that makes sure a community world has a stronghold and prints its room: an
+/// existing one, else one spawned in `W4N4` (a keeper room of the default world's sector around
+/// `W5N5`, the kind of room the backend's `genStrongholds` picks).
+const ENSURE_STRONGHOLD: &str = "storage.db['rooms.objects']
+    .findOne({type: 'invaderCore', level: {$gt: 0}})
+    .then(core => core ? core.room : strongholds.spawn('W4N4').then(() => 'W4N4'))";
+
 /// The room of the world's stronghold: the one an invader core (user `2`) owns.
+///
+/// An `openscreeps/server` world is created with one. A community world gets its first from the
+/// backend's `genStrongholds` cron job only some time after it starts (`@screeps/backend` 3.3.0
+/// `lib/cronjobs.js`, `lib/strongholds.js`), so on `community` the first call makes sure of one
+/// through the [`cli`] ([`ENSURE_STRONGHOLD`]) and every call names that one.
 pub async fn stronghold(client: &Client) -> String {
+    static ENSURED: OnceCell<String> = OnceCell::const_new();
+    if community() {
+        return ENSURED.get_or_init(|| cli(ENSURE_STRONGHOLD)).await.clone();
+    }
     world(client)
         .await
         .stats

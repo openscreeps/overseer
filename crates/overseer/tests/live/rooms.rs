@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use overseer::core::api::Tile;
 use overseer::core::api::types::{GameBuildableStructureType, GameRoomObject};
-use overseer::{FlagColor, RoomSnapshot, StatInterval, Watch};
+use overseer::core::api::{ApiError, Tile};
+use overseer::{Error, FlagColor, RoomSnapshot, StatInterval, Watch, net};
 use tokio::time::timeout;
 
 use crate::support::{self, PATIENCE};
@@ -90,7 +90,7 @@ fn assert_players_room(snapshot: &RoomSnapshot, player: &support::Player, user: 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn watching_a_players_room_yields_typed_snapshots_that_advance() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -147,7 +147,7 @@ async fn watching_a_players_room_yields_typed_snapshots_that_advance() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_information_describes_the_players_room() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -206,15 +206,25 @@ async fn room_information_describes_the_players_room() {
         );
     }
 
-    let decorations = rooms
-        .decorations(&player.room, None)
-        .await
-        .expect("room decorations decode");
-    assert!(decorations.is_empty(), "{decorations:?}");
+    let decorations = rooms.decorations(&player.room, None).await;
+    if support::community() {
+        // The community server has no decorations: `@screeps/backend` 3.3.0 routes no
+        // `/api/game/room-decorations` (`lib/game/api/game.js`), so the request is HTTP 404.
+        assert!(
+            matches!(
+                &decorations,
+                Err(Error::Net(net::Error::Api(ApiError::Status { status, .. }))) if status.as_u16() == 404
+            ),
+            "{decorations:?}"
+        );
+    } else {
+        let decorations = decorations.expect("room decorations decode");
+        assert!(decorations.is_empty(), "{decorations:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn flags_are_created_recoloured_and_removed() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -295,7 +305,7 @@ async fn flags_are_created_recoloured_and_removed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn construction_sites_are_placed_and_removed() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -345,7 +355,7 @@ async fn construction_sites_are_placed_and_removed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn rooms_of_other_users_and_npcs_are_watched() {
     let player = support::player().await;
     let owner = player.account.connect().await;
@@ -388,7 +398,7 @@ async fn rooms_of_other_users_and_npcs_are_watched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn watching_more_rooms_than_the_limit_reports_the_refusal() {
     let overseer = support::register().await.connect().await;
     let rooms = overseer.rooms();

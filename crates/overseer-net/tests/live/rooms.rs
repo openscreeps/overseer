@@ -25,7 +25,7 @@ async fn eventually<T, F: Future<Output = Option<T>>>(mut check: impl FnMut() ->
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_objects_and_terrain_decode() {
     let player = support::player().await;
     let client = player.account.client();
@@ -122,8 +122,16 @@ async fn room_objects_and_terrain_decode() {
     assert!(tiles.contains(&Tile::Plain));
 }
 
+/// A history chunk of the player's room decodes and replays tick by tick; a chunk that is not
+/// kept is HTTP 404.
+///
+/// The community server keeps no room history: `@screeps/backend` 3.3.0 answers every
+/// `/room-history` request with HTTP 500 `not implemented` unless a mod replaces its
+/// `onGetRoomHistory` (`lib/game/server.js`,
+/// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L34-L36>),
+/// and the world under test runs none: there the client reports that refusal.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_history_replays_the_room() {
     let player = support::player().await;
     let client = player.account.client();
@@ -134,6 +142,17 @@ async fn room_history_replays_the_room() {
     let placed = support::game_time(&client).await;
     let base = placed - placed % size + size;
     support::wait_for_tick(&client, base + 4).await;
+    if support::community() {
+        let refused = client.room_history(None, &player.room, base + 1).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Api(ApiError::Status { status, .. })) if status.as_u16() == 500
+            ),
+            "{refused:?}"
+        );
+        return;
+    }
     let history = client
         .room_history(None, &player.room, base + 1)
         .await
@@ -193,7 +212,7 @@ async fn memory(client: &Client, path: &str) -> MemoryValue {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn memory_and_console_requests_reach_the_runtime() {
     let player = support::player().await;
     let client = player.account.client();
@@ -218,6 +237,18 @@ async fn memory_and_console_requests_reach_the_runtime() {
     };
     assert!(all.get("ticks").is_some_and(Value::is_number));
 
+    // The community server writes `live.value` as `Memory['live']['value'] = …`, which sets
+    // nothing while `Memory.live` is missing (`@screeps/backend` 3.3.0 `lib/game/api/user.js`,
+    // `POST /memory`): the parent comes first, as both servers then agree.
+    client
+        .set_memory(None, "live", json!({}))
+        .await
+        .expect("the write is queued");
+    eventually(|| {
+        let client = client.clone();
+        async move { (memory(&client, "live").await == MemoryValue::Json(json!({}))).then_some(()) }
+    })
+    .await;
     let value = json!({ "flag": true, "list": [1, "two"] });
     client
         .set_memory(None, "live.value", value.clone())

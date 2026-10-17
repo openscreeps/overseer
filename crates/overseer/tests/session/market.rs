@@ -1,9 +1,10 @@
 //! The market: request shapes on a sharded server.
 
+use overseer::core::ServerUrl;
 use overseer::core::api::types::MarketOrderType;
 
 use crate::server::{Request, Server};
-use crate::{connect, routes};
+use crate::{connect_as, routes};
 
 /// `GET /api/version` of a sharded server (default shard `shard0`).
 const SHARDED_VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":100,"shards":["shard0","shard3"],"renderer":{"resources":{},"metadata":{}}}}"#;
@@ -40,7 +41,9 @@ fn market_routes(request: &Request) -> (u16, String) {
 #[tokio::test]
 async fn market_requests_name_the_default_or_given_shard() {
     let mut server = Server::start(market_routes, |_| true).await;
-    let (overseer, _websocket) = connect(&mut server).await;
+    // A stand-in for screeps.com: market requests name shards.
+    let url = ServerUrl::proxied(server.url().base().as_str(), &ServerUrl::official()).unwrap();
+    let (overseer, _websocket) = connect_as(&mut server, url).await;
     let market = overseer.market();
 
     let index = market.orders_index(None).await.unwrap();

@@ -1,0 +1,39 @@
+# screeps-launcher configuration of the `community` e2e target's world (see
+# xtask/src/e2e/community.rs): the stock community private server with the two mods nearly every
+# community server runs. No Steam key: the harness passes a placeholder STEAM_KEY, which the
+# launcher requires and the backend only uses for Steam sign-in (not under test).
+version: 4.3.0
+mods:
+  - screepsmod-auth
+  - screepsmod-admin-utils
+# The mods are pinned like the server, so a run tests the same server until these change.
+extraPackages:
+  screepsmod-auth: 2.10.1
+  screepsmod-admin-utils: 1.37.1
+# The transitive dependency pins the launcher's README recommends (the launcher adds its own
+# default pins, such as psl 1.10.0, to these).
+pinnedPackages:
+  ssri: 8.0.1
+  cacache: 15.3.0
+  passport-steam: 1.0.17
+  minipass-fetch: 2.1.2
+  express-rate-limit: 6.7.0
+# The launcher starts one processor per CPU and a runner thread per CPU but one. Four of each
+# (the cores of a CI runner) keep ticks short while the live tests run dozens of players at once,
+# and a many-core machine's memory free.
+processors: 4
+runnerThreads: 4
+# The backend's CLI listens on every interface of the container, so the harness can publish it
+# to the tests (the launcher's default is 127.0.0.1, the container's own loopback).
+env:
+  backend:
+    CLI_HOST: 0.0.0.0
+# Read by screepsmod-admin-utils.
+serverConfig:
+  # Milliseconds per tick: fast enough that creeps visibly move within a test.
+  tickRate: 200
+  socketUpdateRate: 200
+  # Makes `/api/version` list `shards: ["shard0"]`, as community servers do. That listed shard
+  # is what once broke Overseer on community servers: this world proves that Overseer treats
+  # them as single-world servers (shardless socket channels) end to end.
+  shardName: shard0

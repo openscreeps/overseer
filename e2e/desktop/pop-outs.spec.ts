@@ -92,7 +92,7 @@ test.describe('pop-outs', () => {
     await expect(console_.getByRole('heading', { level: 1 })).toContainText('Console');
     const output = console_.getByRole('log', { name: 'Console output' });
     await expect(output).toBeVisible();
-    if (target === 'openscreeps') {
+    if (target !== 'official') {
       // The player's bot logs every tick.
       await expect(output).toContainText(/tick \d+/, { timeout: 30_000 });
     }

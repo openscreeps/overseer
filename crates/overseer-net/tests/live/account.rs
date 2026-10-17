@@ -29,7 +29,7 @@ async fn submit(body: RegisterSubmitRequest) -> Result<(), Error> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn credentials_sign_in_and_discover_the_user() {
     let account = support::register().await;
     let client = account.client();
@@ -64,7 +64,7 @@ async fn credentials_sign_in_and_discover_the_user() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn wrong_passwords_and_unknown_users_are_unauthorized() {
     let account = support::register().await;
     let wrong = Account {
@@ -97,8 +97,14 @@ async fn wrong_passwords_and_unknown_users_are_unauthorized() {
     assert!(is_unauthorized(&result), "{result:?}");
 }
 
+/// Registration checks tell free names and e-mails from taken ones with the server's messages.
+///
+/// `openscreeps/server` compares case-insensitively and refuses empty input. A community server
+/// answers through screepsmod-auth 2.10.1, which looks the exact string up and validates
+/// nothing (`lib/register.js`, <https://unpkg.com/screepsmod-auth@2.10.1/lib/register.js>): a
+/// taken value is `User Exists`, another case of it is free.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn registration_checks_tell_available_from_taken() {
     let account = support::register().await;
     let client = support::anonymous();
@@ -117,6 +123,25 @@ async fn registration_checks_tell_available_from_taken() {
         .send(&email(&free.email))
         .await
         .expect("a free e-mail is available");
+    if support::community() {
+        assert_eq!(
+            server_error(client.send(&username(&account.username)).await),
+            "User Exists"
+        );
+        assert_eq!(
+            server_error(client.send(&email(&account.email)).await),
+            "User Exists"
+        );
+        client
+            .send(&username(&account.username.to_uppercase()))
+            .await
+            .expect("usernames compare case-sensitively");
+        client
+            .send(&email(&account.email.to_uppercase()))
+            .await
+            .expect("e-mails compare case-sensitively");
+        return;
+    }
     assert_eq!(
         server_error(client.send(&username(&account.username)).await),
         "exists"
@@ -145,8 +170,14 @@ async fn registration_checks_tell_available_from_taken() {
     assert_eq!(server_error(client.send(&email("")).await), "invalid email");
 }
 
+/// Registrations the server refuses come back with its message and create nothing.
+///
+/// `openscreeps/server` validates every field and compares names case-insensitively. A community
+/// server registers through screepsmod-auth 2.10.1, which validates nothing and only refuses a
+/// username or e-mail that is taken exactly, answering with the error's stack trace
+/// (`lib/register.js`, <https://unpkg.com/screepsmod-auth@2.10.1/lib/register.js>).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn registration_rejects_invalid_accounts_with_the_server_messages() {
     let taken = support::register().await;
     let fresh = support::new_account();
@@ -155,35 +186,54 @@ async fn registration_rejects_invalid_accounts_with_the_server_messages() {
         change(&mut body);
         body
     };
-    let cases: [(&str, RegisterSubmitRequest); 7] = [
-        (
-            "username already exists",
-            request(&|body| body.username = taken.username.to_uppercase()),
-        ),
-        (
-            "email already exists",
-            request(&|body| body.email = taken.email.to_uppercase()),
-        ),
-        (
-            "invalid username",
-            request(&|body| "ab".clone_into(&mut body.username)),
-        ),
-        (
-            "invalid username",
-            request(&|body| body.username = format!("{} x", fresh.username)),
-        ),
-        (
-            "password must be 8-1024 characters long",
-            request(&|body| "short".clone_into(&mut body.password)),
-        ),
-        ("invalid email", request(&|body| body.email.clear())),
-        (
-            "invalid email",
-            request(&|body| "not-an-email".clone_into(&mut body.email)),
-        ),
-    ];
+    let cases: Vec<(&str, RegisterSubmitRequest)> = if support::community() {
+        vec![
+            (
+                "Error: User already exists",
+                request(&|body| body.username.clone_from(&taken.username)),
+            ),
+            (
+                "Error: User already exists",
+                request(&|body| body.email.clone_from(&taken.email)),
+            ),
+        ]
+    } else {
+        vec![
+            (
+                "username already exists",
+                request(&|body| body.username = taken.username.to_uppercase()),
+            ),
+            (
+                "email already exists",
+                request(&|body| body.email = taken.email.to_uppercase()),
+            ),
+            (
+                "invalid username",
+                request(&|body| "ab".clone_into(&mut body.username)),
+            ),
+            (
+                "invalid username",
+                request(&|body| body.username = format!("{} x", fresh.username)),
+            ),
+            (
+                "password must be 8-1024 characters long",
+                request(&|body| "short".clone_into(&mut body.password)),
+            ),
+            ("invalid email", request(&|body| body.email.clear())),
+            (
+                "invalid email",
+                request(&|body| "not-an-email".clone_into(&mut body.email)),
+            ),
+        ]
+    };
     for (message, body) in cases {
-        assert_eq!(server_error(submit(body).await), message);
+        let error = server_error(submit(body).await);
+        if support::community() {
+            // screepsmod-auth's message goes on with the stack trace, one frame per line.
+            assert_eq!(error.lines().next(), Some(message), "{error}");
+        } else {
+            assert_eq!(error, message);
+        }
     }
     // None of the rejected attempts created the account; the valid one does.
     support::anonymous()
@@ -204,7 +254,7 @@ async fn registration_rejects_invalid_accounts_with_the_server_messages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn session_tokens_rotate_on_every_authenticated_reply() {
     let account = support::register().await;
     let client = account.client();
@@ -227,22 +277,34 @@ async fn session_tokens_rotate_on_every_authenticated_reply() {
     client.send(&endpoints::AuthMe).await.expect("auth/me");
     let second = client.token().expect("a token");
     assert_ne!(second, first, "every authenticated reply rotates the token");
-    assert_eq!(second.as_str().len(), 64);
+    assert_eq!(second.as_str().len(), support::token_length());
+    assert!(second.as_str().bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(updates.has_changed().expect("the client is alive"));
     assert_eq!(updates.borrow_and_update().as_ref(), Some(&second));
     // Clones share the token.
     assert_eq!(client.clone().token(), Some(second.clone()));
 
-    // An anonymous endpoint neither uses nor rotates it.
+    // The client sends the held token with every request, as the official web client does, and
+    // adopts a token from any reply. OpenScreeps rotates it only on authenticated endpoints, so
+    // an anonymous one leaves it alone; screepsmod-auth rotates it on every request carrying a
+    // valid token, whatever the endpoint (its `X-Token` middleware, `lib/backend.js` L219-L245
+    // at 9195e87), so the client takes the new one.
     client
         .send(&endpoints::PlatformVersion)
         .await
         .expect("version");
-    assert_eq!(client.token(), Some(second.clone()));
-    assert!(!updates.has_changed().expect("the client is alive"));
+    let current = client.token().expect("a token");
+    if support::community() {
+        assert_ne!(current, second, "screepsmod-auth rotates on every request");
+        assert!(updates.has_changed().expect("the client is alive"));
+        assert_eq!(updates.borrow_and_update().as_ref(), Some(&current));
+    } else {
+        assert_eq!(current, second);
+        assert!(!updates.has_changed().expect("the client is alive"));
+    }
 
-    // The rotated token authenticates another client of the same account.
-    let other = support::with_token(second);
+    // The current token authenticates another client of the same account.
+    let other = support::with_token(current);
     let me = other.send(&endpoints::AuthMe).await.expect("auth/me").body;
     assert_eq!(Some(me.id), user);
     assert!(other.rotates_tokens());

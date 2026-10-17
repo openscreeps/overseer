@@ -213,14 +213,13 @@ impl Client {
         lock(&self.inner.budget).count(Instant::now())
     }
 
-    /// Whether the server limits request rates: it lists shards (screeps.com and its season,
-    /// whose server-wide limit of 120 requests per minute per token sends no headers), or a
-    /// response carried `X-RateLimit-*` headers or was refused with HTTP 429.
+    /// Whether the server limits request rates: it is official ([`ServerUrl::is_official`]:
+    /// screeps.com and its season, whose server-wide limit of 120 requests per minute per token
+    /// sends no headers), or a response carried `X-RateLimit-*` headers or was refused with
+    /// HTTP 429.
     #[must_use]
     pub fn has_rate_limits(&self) -> bool {
-        lock(&self.inner.world)
-            .as_ref()
-            .is_some_and(World::is_sharded)
+        self.inner.server.is_official()
             || self.rate_limited_count() > 0
             || !self.rate_limits().is_empty()
     }
@@ -292,7 +291,11 @@ impl Client {
         } else {
             None
         };
-        let mut world = World::new(version, me.as_ref().map(|me| me.id.clone()));
+        let mut world = World::new(
+            &self.inner.server,
+            version,
+            me.as_ref().map(|me| me.id.clone()),
+        );
         if let Some(shard) = &self.inner.default_shard {
             world.set_shard(shard.clone());
         }

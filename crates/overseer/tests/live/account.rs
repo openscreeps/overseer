@@ -43,7 +43,7 @@ fn is_unauthorized(error: &Error) -> bool {
 /// A fresh account: its profile, no world presence yet, the server's default start room, an
 /// empty badge and the default notification preferences.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn fresh_account_profile() {
     let account = support::register().await;
     let overseer = account.connect().await;
@@ -104,7 +104,7 @@ async fn fresh_account_profile() {
 /// A player: plays in the room of its spawn, which is its start room and in its overview, and
 /// its runs report CPU.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn player_profile() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -150,7 +150,7 @@ async fn player_profile() {
 
 /// A new badge is stored, read back in the profile and rendered by `badge-svg`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn badge_round_trip() {
     let account = support::register().await;
     let overseer = account.connect().await;
@@ -202,7 +202,7 @@ async fn badge_round_trip() {
 
 /// Notification preferences are saved, read back, and fields left out keep their value.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn notify_prefs_round_trip() {
     let account = support::register().await;
     let overseer = account.connect().await;
@@ -253,7 +253,7 @@ async fn notify_prefs_round_trip() {
 /// The e-mail address changes (stored lower-cased): the profile shows it and it signs in, the
 /// old one no longer does; invalid and taken addresses are refused with the server's text.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn email_change_round_trip() {
     let account = support::register().await;
     let other = support::register().await;
@@ -296,38 +296,31 @@ async fn email_change_round_trip() {
     assert_eq!(server_error(&taken), "email already exists");
 }
 
-/// The password changes: a new session signs in with the new password, the old one fails; a
-/// wrong current password is refused with the server's text.
+/// Changes the password of `overseer`'s account (`POST /api/user/password`).
+async fn set_password(
+    overseer: &Overseer,
+    old_password: String,
+    password: String,
+) -> Result<(), net::Error> {
+    let body = UserPasswordSetRequest {
+        old_password,
+        password,
+    };
+    overseer
+        .client()
+        .send(&endpoints::UserPasswordSet { body })
+        .await
+        .map(drop)
+}
+
+/// The password changes: a new session signs in with the new password, the old one fails.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn password_change() {
     let account = support::register().await;
     let overseer = account.connect().await;
-    let set_password = |old_password: String, password: String| {
-        let overseer = overseer.clone();
-        async move {
-            let body = UserPasswordSetRequest {
-                old_password,
-                password,
-            };
-            overseer
-                .client()
-                .send(&endpoints::UserPasswordSet { body })
-                .await
-                .map(drop)
-        }
-    };
-
-    let wrong = set_password(
-        format!("{}-wrong", account.password),
-        "never-used-1234".to_owned(),
-    )
-    .await
-    .expect_err("a wrong current password is refused");
-    assert_eq!(server_error(&wrong), "invalid password");
-
     let password = format!("new-{}", support::unique(""));
-    set_password(account.password.clone(), password.clone())
+    set_password(&overseer, account.password.clone(), password.clone())
         .await
         .expect("the password is changed");
     let renewed = sign_in(&account.username, &password)
@@ -343,4 +336,28 @@ async fn password_change() {
         .await
         .expect_err("the old password no longer signs in");
     assert!(is_unauthorized(&old), "unexpected error: {old:?}");
+}
+
+/// A wrong current password is refused with the server's text and changes nothing.
+///
+/// Not run on `community` (see `COMMUNITY_SKIPPED` in `xtask/src/e2e.rs`): screepsmod-auth
+/// 2.10.1 answers it with HTTP 401, then stores an undefined password and replies again, which
+/// ends the server's backend (`lib/backend.js`, `POST /api/user/password`,
+/// <https://unpkg.com/screepsmod-auth@2.10.1/lib/backend.js>).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live private server: cargo xtask e2e"]
+async fn wrong_current_password_is_refused() {
+    let account = support::register().await;
+    let overseer = account.connect().await;
+    let wrong = set_password(
+        &overseer,
+        format!("{}-wrong", account.password),
+        "never-used-1234".to_owned(),
+    )
+    .await
+    .expect_err("a wrong current password is refused");
+    assert_eq!(server_error(&wrong), "invalid password");
+    sign_in(&account.username, &account.password)
+        .await
+        .expect("the password is unchanged");
 }

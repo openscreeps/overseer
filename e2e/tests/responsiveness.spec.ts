@@ -2,18 +2,21 @@
 // portal scan of every room (screeps.com's `shard0`: 33 124 rooms, about 500 `roomMap2` answers a
 // second) must never hold input or frames for long.
 //
-// The disposable world is 11 × 11 rooms, so the first test makes it look like `shard0`: the page
-// is told the world is 182 × 182 rooms, rooms outside the real world get a real room's terrain
-// and a made-up overview (some owned), and their `roomMap2` scans are answered by the test after
-// 0.3 to 0.7 s, as screeps.com answers them; the real world's rooms stay real. On the official
-// target the second test loads the real `shard0` (cold: a fresh browser profile).
+// The disposable world is small (11 × 11 rooms), so the first test makes it look like `shard0`:
+// the page is told the world is 182 × 182 rooms, rooms the server does not have get a real
+// room's terrain and a made-up overview (some owned), and their `roomMap2` scans are answered by
+// the test after 0.3 to 0.7 s, as screeps.com answers them; the real world's rooms stay real. On
+// the official target the second test loads the real `shard0` (cold: a fresh browser profile).
 //
 // While the world loads behind a room-level view, the test measures what a user would feel: how
-// long a plain `page.evaluate` takes to come back (it waits behind whatever the main thread is
-// doing) and the main thread's long tasks (over 50 ms, `PerformanceObserver`).
+// long a task posted to the page's main thread every 250 ms waits before it runs (it waits behind
+// whatever the main thread is doing), measured in the page, and the main thread's long tasks
+// (over 50 ms, `PerformanceObserver`). Measured in the page: a `page.evaluate` round trip also
+// waits for the test's own process, which answers the made-up scans meanwhile and, recording a
+// trace, logs each answer.
 
 import type { Page } from '@playwright/test';
-import { currentTarget, expect, test, type Server } from './fixtures';
+import { api, currentTarget, expect, test, type Server } from './fixtures';
 
 /** How many times slower the pages run (`OVERSEER_E2E_SLOW`), as the fixtures apply it. */
 const SLOWDOWN = Math.max(1, Number(process.env.OVERSEER_E2E_SLOW ?? 1) || 1);
@@ -27,11 +30,11 @@ const WARM_UP = 1_000;
 /** Rooms scanned while measuring (about 20 s at screeps.com's pace). */
 const MEASURED = 10_000;
 
-/** Slowest `page.evaluate` round trip allowed while the world loads (screeps.com: 6 s before). */
-const MAX_ROUND_TRIP_MS = 300 * SLOWDOWN;
+/** Longest wait of a posted task allowed while the world loads (screeps.com: 6 s before). */
+const MAX_DELAY_MS = 300 * SLOWDOWN;
 
-/** 95th percentile of the round trips allowed. */
-const P95_ROUND_TRIP_MS = 100 * SLOWDOWN;
+/** 95th percentile of the waits allowed. */
+const P95_DELAY_MS = 100 * SLOWDOWN;
 
 /** Share of the measured time the main thread may spend in long tasks. */
 const LONG_TASK_SHARE = 0.1;
@@ -40,6 +43,8 @@ declare global {
   interface Window {
     /** Long tasks since the page loaded: start and duration, in milliseconds. */
     e2eLongTasks?: [number, number][];
+    /** How long each posted task waited (see {@link measure}), while measuring. */
+    e2eDelays?: number[];
   }
 }
 
@@ -91,34 +96,34 @@ const USERS = Object.fromEntries(
 );
 
 /**
+ * The rooms `server` has, of the 32 × 32 rooms around the zero lines (`POST /api/game/rooms`
+ * lists only rooms it has): OpenScreeps' world is centred on them, the community world lies
+ * north-west of them (W10N10 to W0N0).
+ */
+async function realRooms(server: Server): Promise<Set<string>> {
+  const rooms: string[] = [];
+  for (const h of ['W', 'E'])
+    for (const v of ['N', 'S'])
+      for (let x = 0; x < 16; x++) for (let y = 0; y < 16; y++) rooms.push(`${h}${x}${v}${y}`);
+  const { body } = await api<{ rooms: { room: string }[] }>(server.url, 'api/game/rooms', {
+    body: { rooms },
+  });
+  return new Set(body.rooms.map(({ room }) => room));
+}
+
+/**
  * Makes the page see the disposable world as a 182 × 182 shard (see the file's comment).
  * Returns how many made-up rooms were scanned so far.
  */
-async function fakeShard(page: Page): Promise<() => number> {
-  let real: ((name: string) => boolean) | undefined;
+async function fakeShard(page: Page, server: Server): Promise<() => number> {
+  const real = await realRooms(server);
   let terrains: string[] = [];
   let scanned = 0;
-  const isReal = (name: string) => real?.(name) ?? true;
+  const isReal = (name: string) => real.has(name) || !coords(name);
 
   await page.route(
     (url) => url.pathname.endsWith('/api/game/world-size'),
-    async (route) => {
-      const response = await route.fetch();
-      const { width, height } = (await response.json()) as { width: number; height: number };
-      // The real world, centred on the zero lines like screeps.com's.
-      real = (name) => {
-        const at = coords(name);
-        if (!at) return true;
-        const [x, y] = at;
-        return (
-          x >= -Math.ceil(width / 2) &&
-          x < Math.floor(width / 2) &&
-          y >= -Math.ceil(height / 2) &&
-          y < Math.floor(height / 2)
-        );
-      };
-      await route.fulfill({ json: { ok: 1, width: SIDE, height: SIDE } });
-    },
+    (route) => route.fulfill({ json: { ok: 1, width: SIDE, height: SIDE } }),
   );
   await page.route(
     (url) => url.pathname.endsWith('/api/game/rooms'),
@@ -205,8 +210,8 @@ async function fakeShard(page: Page): Promise<() => number> {
 
 /** What the main thread did while the world loaded. */
 interface Measurement {
-  /** Every `page.evaluate` round trip, in milliseconds. */
-  roundTrips: number[];
+  /** How long each posted task waited before it ran, in milliseconds. */
+  delays: number[];
   /** Time in long tasks, in milliseconds. */
   longTaskMs: number;
   /** The longest task, in milliseconds. */
@@ -216,25 +221,37 @@ interface Measurement {
 }
 
 /**
- * What the main thread did while `loading()` was true: a round trip every 250 ms (a sampling
- * interval, not a wait for the app) and the long tasks meanwhile.
+ * What the main thread did while `loading()` was true: every 250 ms (a sampling interval, not a
+ * wait for the app) the page posts itself a task (`MessageChannel`, which no timer clamps) and
+ * records how long it waited, and the long tasks meanwhile.
  */
 async function measure(page: Page, loading: () => boolean): Promise<Measurement> {
-  const since = await page.evaluate(() => performance.now());
+  const since = await page.evaluate(() => {
+    const delays: number[] = [];
+    window.e2eDelays = delays;
+    const channel = new MessageChannel();
+    let posted = 0;
+    const post = () => {
+      if (window.e2eDelays !== delays) return;
+      posted = performance.now();
+      channel.port2.postMessage(null);
+    };
+    channel.port1.onmessage = () => {
+      delays.push(performance.now() - posted);
+      setTimeout(post, 250);
+    };
+    post();
+    return performance.now();
+  });
   const started = Date.now();
-  const roundTrips: number[] = [];
-  while (loading()) {
-    const sent = Date.now();
-    await page.evaluate(() => 0);
-    roundTrips.push(Date.now() - sent);
-    await page.waitForTimeout(250);
-  }
-  const tasks = await page.evaluate(
-    (from) => (window.e2eLongTasks ?? []).filter(([start]) => start >= from),
-    since,
-  );
+  while (loading()) await page.waitForTimeout(250);
+  const { delays, tasks } = await page.evaluate((from) => {
+    const delays = window.e2eDelays ?? [];
+    delete window.e2eDelays;
+    return { delays, tasks: (window.e2eLongTasks ?? []).filter(([start]) => start >= from) };
+  }, since);
   return {
-    roundTrips,
+    delays,
     longTaskMs: tasks.reduce((total, [, duration]) => total + duration, 0),
     longestTaskMs: Math.max(0, ...tasks.map(([, duration]) => duration)),
     elapsedMs: Date.now() - started,
@@ -243,13 +260,13 @@ async function measure(page: Page, loading: () => boolean): Promise<Measurement>
 
 /** Checks the measurements against the limits, with the numbers in the message. */
 function expectResponsive(result: Measurement): void {
-  const sorted = [...result.roundTrips].sort((a, b) => a - b);
+  const sorted = [...result.delays].sort((a, b) => a - b);
   const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
   const max = sorted.at(-1) ?? 0;
-  const summary = JSON.stringify({ ...result, roundTrips: undefined, p95, max, samples: sorted.length });
+  const summary = JSON.stringify({ ...result, delays: undefined, p95, max, samples: sorted.length });
   expect(sorted.length, summary).toBeGreaterThan(10);
-  expect(max, `slowest round trip: ${summary}`).toBeLessThanOrEqual(MAX_ROUND_TRIP_MS);
-  expect(p95, `95th percentile round trip: ${summary}`).toBeLessThanOrEqual(P95_ROUND_TRIP_MS);
+  expect(max, `longest wait: ${summary}`).toBeLessThanOrEqual(MAX_DELAY_MS);
+  expect(p95, `95th percentile wait: ${summary}`).toBeLessThanOrEqual(P95_DELAY_MS);
   expect(result.longTaskMs, `time in long tasks: ${summary}`).toBeLessThanOrEqual(
     result.elapsedMs * LONG_TASK_SHARE,
   );
@@ -272,7 +289,7 @@ test.describe('responsiveness', () => {
   }) => {
     test.setTimeout(240_000);
     await recordLongTasks(page);
-    const scanned = await fakeShard(page);
+    const scanned = await fakeShard(page, server);
     await openRoom(page, server, home.room, home.shard);
     await expect.poll(scanned, { timeout: 60_000 * SLOWDOWN }).toBeGreaterThanOrEqual(WARM_UP);
     const result = await measure(page, () => scanned() < WARM_UP + MEASURED);

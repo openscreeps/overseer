@@ -39,7 +39,7 @@ fn is_unauthorized(error: &Error) -> bool {
 /// Signing in with the username discovers the single world and the user, connects the socket,
 /// and shutting down closes the session.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn signs_in_with_username() {
     let account = support::register().await;
     let overseer = account.connect().await;
@@ -65,7 +65,7 @@ async fn signs_in_with_username() {
 
 /// The harness's own player (created by `init`, not registered) signs in; it has no spawn.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn harness_player_signs_in() {
     let admin = support::admin();
     let overseer = admin.connect().await;
@@ -82,7 +82,7 @@ async fn harness_player_signs_in() {
 
 /// Signing in with the e-mail address reaches the same user as the username.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn signs_in_with_email() {
     let account = support::register().await;
     let by_name = account.connect().await;
@@ -102,7 +102,7 @@ async fn signs_in_with_email() {
 
 /// A wrong password or an unknown user is the server's `unauthorized` (HTTP 401).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn wrong_credentials_are_unauthorized() {
     let account = support::register().await;
     for (login, password) in [
@@ -126,7 +126,7 @@ async fn wrong_credentials_are_unauthorized() {
 
 /// An anonymous session connects and reads public data; account features need a user.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn anonymous_session_reads_public_data() {
     let account = support::register().await;
     let overseer = Overseer::connect(profile(Auth::Anonymous))
@@ -165,7 +165,7 @@ async fn anonymous_session_reads_public_data() {
 /// still serves authenticated requests. The session holds a token, not credentials, so a lost
 /// token would fail instead of signing in again.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn idle_session_keeps_its_token_alive() {
     const IDLE: Duration = Duration::from_secs(70);
 

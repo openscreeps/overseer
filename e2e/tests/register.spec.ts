@@ -96,16 +96,18 @@ test.describe('registration', { tag: '@openscreeps' }, () => {
     await expect(confirm).toHaveAccessibleDescription(/The passwords do not match/);
   });
 
-  test("shows the server's error as it is", async ({ page, server, account }) => {
+  test("shows the server's error as it is", async ({ page, server, account, target }) => {
     const form = await openRegister(page, server);
     await form.getByLabel('Username', { exact: true }).fill(account.username);
     await form.getByLabel('E-mail', { exact: true }).fill(`${unique('new')}@e2e.invalid`);
     await form.getByLabel('Password', { exact: true }).fill('long-enough-1');
     await form.getByLabel('Repeat the password', { exact: true }).fill('long-enough-1');
     await form.getByLabel('Repeat the password', { exact: true }).press('Enter');
-    await expect(
-      form.getByRole('alert').filter({ hasText: 'username already exists' }),
-    ).toBeVisible();
+    // OpenScreeps says `username already exists`; screepsmod-auth answers the stack of its error
+    // (https://unpkg.com/screepsmod-auth@2.10.1/lib/register.js, L54 and L74-77), shown as it is.
+    const error =
+      target === 'community' ? /^Error: User already exists\s+at / : 'username already exists';
+    await expect(form.getByRole('alert').filter({ hasText: error })).toBeVisible();
     await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
   });
 

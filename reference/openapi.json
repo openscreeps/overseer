@@ -7937,7 +7937,7 @@
       "get": {
         "operationId": "userBranches",
         "summary": "List code branches",
-        "description": "Lists the player's code branches with their world/simulator activation flags. If no branch named `default` exists, an empty inactive `default` branch is created first (so this GET may write). The official web client passes `withCode` (true when it needs module contents, e.g. to sync local files) and reads `list`.",
+        "description": "Lists the player's code branches with their world/simulator activation flags. If no branch named `default` exists, an empty inactive `default` branch is created first (so this GET may write). The official web client passes `withCode` (true when it needs module contents, e.g. to sync local files) and reads `list`. Without `withCode` the entries carry only `_id`, `branch`, `activeWorld` and `activeSim`; with it they also carry `user`, `modules` and `timestamp`.",
         "tags": [
           "User Code"
         ],
@@ -8000,7 +8000,13 @@
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/user.ts#L65-L77",
           "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/user.js#L56-L80"
         ],
-        "x-unverified": "Whether `modules` is omitted when `withCode` is not set is unverified; node-screeps-api types only `_id`, `branch`, `activeWorld` and `activeSim`.",
+        "x-observations": [
+          {
+            "url": "https://screeps.com/api/user/branches?withCode=true",
+            "date": "2026-10-17",
+            "notes": "Without `withCode` entries carried only `_id`, `branch`, `activeWorld` and `activeSim`. With it they also carried `user`, `modules` and `timestamp`: milliseconds for branches saved by code uploads, an ISO 8601 string (`2026-10-11T14:41:23.934Z`) for `tutorial-1`, created by `POST /api/user/clone-branch`."
+          }
+        ],
         "parameters": [
           {
             "name": "withCode",
@@ -25238,7 +25244,7 @@
             "description": "Branch runs in the simulator. Absent on branches created by cloning until activated."
           },
           "timestamp": {
-            "description": "Last code change: Unix milliseconds or a stored date (ISO 8601 string).",
+            "description": "Last code change as stored: Unix milliseconds for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch` (both observed on screeps.com).",
             "anyOf": [
               {
                 "type": "integer"

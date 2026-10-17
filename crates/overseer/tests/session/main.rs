@@ -15,7 +15,7 @@ mod users;
 
 use std::time::Duration;
 
-use overseer::core::Token;
+use overseer::core::{ServerUrl, Token};
 use overseer::{Auth, Overseer, ServerProfile};
 
 use server::{Request, Server, Ws};
@@ -58,8 +58,15 @@ fn routes(request: &Request) -> (u16, String) {
 /// `auth ok` (rotating the token to `t2`) and receives the session's own `server-message`
 /// subscription.
 async fn connect(server: &mut Server) -> (Overseer, Ws) {
+    let url = server.url();
+    connect_as(server, url).await
+}
+
+/// [`connect`] with the server known as `url` (for example a stand-in for screeps.com,
+/// [`ServerUrl::proxied`]).
+async fn connect_as(server: &mut Server, url: ServerUrl) -> (Overseer, Ws) {
     let profile = ServerProfile {
-        url: server.url(),
+        url,
         auth: Auth::Token(Token::new("t1")),
         server_password: None,
         default_shard: None,

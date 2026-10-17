@@ -6,6 +6,10 @@
 // - `openscreeps` (default): a disposable OpenScreeps world. Two projects run every test:
 //   `direct` serves the app from a plain static server, `proxy` from `overseer-proxy --static`
 //   in front of the game server.
+// - `community`: a disposable world of the stock community server (screeps-launcher with
+//   screepsmod-auth and screepsmod-admin-utils). Only the `proxy` project and no
+//   `@wrong-password` tests (they crash its backend, see the fixtures); retries, workers and
+//   traces as on `openscreeps`.
 // - `official`: screeps.com, read-only. Only the `proxy` project (screeps.com sends no CORS
 //   headers), one worker (its rate limits are per account), no `@openscreeps` tests, and no
 //   traces, screenshots or videos (they would record the account's API token and data).
@@ -28,6 +32,9 @@ import type { Cache, Mode } from './tests/fixtures';
 
 const target = currentTarget();
 const official = target === 'official';
+// Stock community servers send no CORS headers unless screepsmod-admin-utils' `cors.origins`
+// lists the page's origin: browsers reach them through `overseer-proxy`, as the desktop app does.
+const proxyOnly = official || target === 'community';
 const ci = Boolean(process.env.CI);
 const slow = Number(process.env.OVERSEER_E2E_SLOW ?? 0) > 1;
 const directPort = Number(process.env.OVERSEER_E2E_DIRECT_PORT ?? 4610);
@@ -41,7 +48,11 @@ const proxy =
 const upstream = process.env.OVERSEER_LIVE_URL ?? 'http://127.0.0.1:21025/';
 // The proxy logs every request; keep them next to the server's log (the harness's
 // `<target>/e2e`, also when `CARGO_TARGET_DIR` moves it) instead of the test output.
-const proxyLog = resolve(dirname(proxy), official ? 'proxy-official.log' : 'proxy.log');
+const proxyLog = resolve(dirname(proxy), {
+  openscreeps: 'proxy.log',
+  official: 'proxy-official.log',
+  community: 'proxy-community.log',
+}[target]);
 
 const directServer: NonNullable<PlaywrightTestConfig['webServer']> = {
   command: 'node static-server.mjs',
@@ -74,6 +85,7 @@ const directProjects = served('direct', directPort);
 const proxyProjects = served('proxy', proxyPort);
 const excluded = [
   ...(official ? ['@openscreeps'] : []),
+  ...(target === 'community' ? ['@wrong-password'] : []),
   ...(process.env.OVERSEER_E2E_SCREENS ? [] : ['@screens']),
 ];
 
@@ -95,6 +107,6 @@ export default defineConfig<{ mode: Mode; cache: Cache; cacheFile: string | unde
     video: 'off',
     launchOptions: slow ? { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] } : {},
   },
-  projects: official ? proxyProjects : [...directProjects, ...proxyProjects],
-  webServer: official ? [proxyServer] : [directServer, proxyServer],
+  projects: proxyOnly ? proxyProjects : [...directProjects, ...proxyProjects],
+  webServer: proxyOnly ? [proxyServer] : [directServer, proxyServer],
 });

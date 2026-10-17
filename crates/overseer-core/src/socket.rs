@@ -8,6 +8,7 @@
 //! Event data are the [`types`] generated from the socket reference, re-exported here.
 
 mod channel;
+mod code;
 mod flag;
 mod payload;
 pub mod room;

@@ -46,7 +46,7 @@ async fn ok<T>(what: &str, operation: impl Future<Output = Result<T, Error>>) ->
 /// A new account has the `default` branch, active in the world and the simulator, holding the
 /// code it registered with.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn default_branch_of_a_new_account() {
     let mut registered = Modules::new();
     registered.insert_js("main", "module.exports.loop = function () {};");
@@ -82,7 +82,7 @@ async fn default_branch_of_a_new_account() {
 /// Branches are created, uploaded to (JavaScript and `WebAssembly`), read back, cloned,
 /// activated and deleted; every change is announced live.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn branches_round_trip() {
     let account = support::register().await;
     let overseer = account.connect().await;
@@ -169,7 +169,7 @@ async fn branches_round_trip() {
 
 /// Unknown branches are refused with the server's texts.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn unknown_branches_are_refused() {
     let account = support::register().await;
     let overseer = account.connect().await;

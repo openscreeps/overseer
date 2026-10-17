@@ -131,6 +131,12 @@ impl Server {
         self.url.clone()
     }
 
+    /// The server as a stand-in for screeps.com ([`ServerUrl::proxied`] in front of it):
+    /// channels, history and requests name shards.
+    pub fn official_url(&self) -> ServerUrl {
+        ServerUrl::proxied(self.url.base().as_str(), &ServerUrl::official()).unwrap()
+    }
+
     /// The next accepted WebSocket connection.
     pub async fn socket(&mut self) -> Ws {
         self.sockets.recv().await.expect("the server is running")

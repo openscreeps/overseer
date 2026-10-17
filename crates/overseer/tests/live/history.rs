@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use overseer::core::api::ApiError;
 use overseer::core::api::types::GameRoomObject;
-use overseer::{RoomSnapshot, Seek};
+use overseer::{Error, RoomSnapshot, Seek, net};
 use tokio::time::{sleep, timeout};
 
 use crate::support::{self, PATIENCE};
@@ -19,39 +20,71 @@ fn creeps(snapshot: &RoomSnapshot, user: &str) -> BTreeMap<String, (u64, u64)> {
         .collect()
 }
 
+/// The player replays a chunk of its room tick by tick, steps across chunks and reports ticks
+/// that are not kept.
+///
+/// The community server keeps no room history: `@screeps/backend` 3.3.0 answers every
+/// `/room-history` request with HTTP 500 `not implemented` unless a mod replaces its
+/// `onGetRoomHistory` (`lib/game/server.js`,
+/// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L34-L36>),
+/// and the world under test runs none. There the player reports that refusal and stays put.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn history_replays_the_players_room() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
     let user = overseer.user_id().expect("signed in").to_owned();
     let size = overseer.world().history_chunk_size();
     assert_eq!(size, 20, "the server advertises its chunk size");
+    if support::community() {
+        let mut history = overseer
+            .history()
+            .player(&player.room, None)
+            .expect("a history player");
+        let refused = history.seek(size).await.expect_err("no history is served");
+        assert!(
+            matches!(
+                &refused,
+                Error::Net(net::Error::Api(ApiError::Status { status, .. })) if status.as_u16() == 500
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(history.tick(), None);
+        assert!(history.snapshot().is_none());
+        return;
+    }
     let mut room = overseer
         .rooms()
         .watch(&player.room)
         .await
         .expect("the room is watched");
 
-    // The first chunk that starts after a creep exists, and the time it is complete.
-    let mut base = None;
-    timeout(PATIENCE * 2, async {
-        loop {
-            let snapshot = room.changed().await.expect("the session stays open");
-            let Some(time) = snapshot.game_time else {
-                continue;
-            };
-            if base.is_none() && !creeps(&snapshot, &user).is_empty() {
-                base = Some(time - time % size + size);
-            }
-            // The next chunk has begun: this one is complete.
-            if base.is_some_and(|base| time > base + size) {
-                break;
-            }
+    // The first chunk that starts after a creep exists, and the time it is complete. Ticks pass
+    // at the server's pace, slower while the whole suite loads it: each tick must come within
+    // `PATIENCE`, and the wait is bounded in ticks.
+    let (mut first, mut base) = (None, None);
+    loop {
+        let snapshot = timeout(PATIENCE, room.changed())
+            .await
+            .expect("the room advances")
+            .expect("the session stays open");
+        let Some(time) = snapshot.game_time else {
+            continue;
+        };
+        let first = *first.get_or_insert(time);
+        assert!(
+            time < first + 10 * size,
+            "a creep and two history chunks within {} ticks",
+            10 * size
+        );
+        if base.is_none() && !creeps(&snapshot, &user).is_empty() {
+            base = Some(time - time % size + size);
         }
-    })
-    .await
-    .expect("two history chunks pass");
+        // The next chunk has begun: this one is complete.
+        if base.is_some_and(|base| time > base + size) {
+            break;
+        }
+    }
     drop(room);
     let base = base.expect("a creep was seen");
 

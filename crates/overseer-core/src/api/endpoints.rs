@@ -1010,7 +1010,7 @@ impl Endpoint for GameRoomObjects {
     const METHOD: Method = Method::GET;
     const PATH: &'static str = "api/game/room-objects";
     const AUTH: Auth = Auth::Optional;
-    const FORMAT: Format = Format::Envelope;
+    const FORMAT: Format = Format::Json;
 
     fn query(&self, query: &mut Query<'_>) {
         query.pair("room", &self.room);
@@ -2102,7 +2102,7 @@ impl Endpoint for UserBadgeSvg {
 
 /// `GET /api/user/branches`: List code branches.
 ///
-/// Lists the player's code branches with their world/simulator activation flags. If no branch named `default` exists, an empty inactive `default` branch is created first (so this GET may write). The official web client passes `withCode` (true when it needs module contents, e.g. to sync local files) and reads `list`.
+/// Lists the player's code branches with their world/simulator activation flags. If no branch named `default` exists, an empty inactive `default` branch is created first (so this GET may write). The official web client passes `withCode` (true when it needs module contents, e.g. to sync local files) and reads `list`. Without `withCode` the entries carry only `_id`, `branch`, `activeWorld` and `activeSim`; with it they also carry `user`, `modules` and `timestamp`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UserBranches {
     /// Set by the official web client when branch module contents are needed.

@@ -203,7 +203,7 @@ impl WorldProgress {
 ///
 /// # Pacing per server
 ///
-/// A server shows rate limits when it lists shards (screeps.com and its seasonal server:
+/// A server shows rate limits when it is official (screeps.com and its seasonal server:
 /// their server-wide limit of 120 requests per minute per token sends no headers) or once any
 /// response carried `X-RateLimit-*` headers or was refused with HTTP 429
 /// ([`net::Client::has_rate_limits`](crate::net::Client::has_rate_limits)). There every

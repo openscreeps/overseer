@@ -20,7 +20,9 @@ use overseer_net::core::api::types::{
     UserCloneBranchRequest, UserCodeBranch, UserCodeSetRequest, UserDeleteBranchRequest,
     UserSetActiveBranchRequest, UserSetActiveBranchRequestActiveName,
 };
-use overseer_net::core::socket::types::{UserActiveBranchActiveName, UserCodeHash};
+use overseer_net::core::socket::types::{
+    UserActiveBranchActiveName, UserCodeHash, UserCodeTimestamp,
+};
 use overseer_net::core::socket::{Channel, Payload};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,7 +83,8 @@ pub struct CodeChange {
     /// The `_hash` the uploading client sent, if any (the official web client sends a random
     /// number to recognize its own uploads).
     pub hash: Option<UserCodeHash>,
-    /// Save time in milliseconds since the Unix epoch.
+    /// Save time in milliseconds since the Unix epoch, also for the date servers send for a
+    /// branch last saved by cloning ([`UserCodeTimestamp::millis`]).
     pub timestamp: Option<u64>,
 }
 
@@ -258,7 +261,7 @@ impl Code {
                 branch: code.branch,
                 modules: Modules::from_event(code.modules),
                 hash: code.hash,
-                timestamp: code.timestamp,
+                timestamp: code.timestamp.as_ref().and_then(UserCodeTimestamp::millis),
             })
         }))
     }

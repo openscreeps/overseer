@@ -7,7 +7,7 @@
 // at once that nobody owns it, although the overview fetched before still named the player.
 
 import type { Page } from '@playwright/test';
-import { api, expect, Session, test, type Player, type Server } from './fixtures';
+import { api, expect, Session, test, type Player, type Server, type Target } from './fixtures';
 import { breadcrumb, hoverTile, openRoom, roomInfo, search } from './world-map';
 
 /** How long a viewed room may take to show its live overview (the live room's first update). */
@@ -31,9 +31,17 @@ async function controller(server: Server, room: string): Promise<RoomObject> {
   return found;
 }
 
-/** A room four or more rooms away from `room`, inside the harness's world (11 × 11 rooms). */
-function farFrom(room: string): string {
-  const [, h, , v] = /^([WE])(\d+)([NS])(\d+)$/.exec(room) ?? [];
+/**
+ * A room four or more rooms away from `room` (a player's room), inside the harness's world:
+ * OpenScreeps' 11 × 11 rooms centred on the zero lines (W5N5 to E5S5), or the community world
+ * W10N10 to W0N0 (players start within W9N9 to W1N1).
+ */
+function farFrom(room: string, target: Target): string {
+  const [, h, x, v, y] = /^([WE])(\d+)([NS])(\d+)$/.exec(room) ?? [];
+  if (target === 'community') {
+    const away = (n: number) => (n <= 5 ? n + 4 : n - 4);
+    return `W${away(Number(x))}N${away(Number(y))}`;
+  }
   return `${h === 'W' ? 'E' : 'W'}3${v === 'N' ? 'S' : 'N'}3`;
 }
 
@@ -67,6 +75,7 @@ test.describe('live overview', { tag: '@openscreeps' }, () => {
     signedInPage: page,
     server,
     player,
+    target,
   }) => {
     await openRoom(page, `/#/${server.slug}/-/${player.room}`);
     const info = roomInfo(page, player.room);
@@ -82,7 +91,7 @@ test.describe('live overview', { tag: '@openscreeps' }, () => {
     await expect(tip).toContainText(`${player.username} · RCL 1`);
 
     // Elsewhere on the map, the player gives the room up: the overview still names them.
-    await view(page, farFrom(player.room));
+    await view(page, farFrom(player.room, target));
     await unclaim(server, player);
 
     // Viewing the room again: the drawer and the tooltip agree with the live room at once.

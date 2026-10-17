@@ -2,26 +2,36 @@
 //
 // Every target:
 // - `target` (worker): what the tests run against (`OVERSEER_E2E_TARGET`): `openscreeps`, the
-//   disposable world `cargo xtask e2e` starts, or `official`, screeps.com
-//   (`cargo xtask e2e --target official`, read-only). Tests that need a disposable world (the
-//   admin API, created players, registration, account changes, intents) are tagged
-//   `@openscreeps`; the official run leaves them out.
+//   disposable OpenScreeps world `cargo xtask e2e` starts (with its admin API); `community`, a
+//   disposable world of the stock community server (`cargo xtask e2e --target community`, with
+//   its CLI); or `official`, screeps.com (`cargo xtask e2e --target official`, read-only). Two
+//   tags leave tests out:
+//   - `@openscreeps`: needs a disposable world (created players, registration, account changes,
+//     intents, the server's administration). The `official` run leaves these out.
+//   - `@wrong-password`: sends a wrong current password to `POST /api/user/password`. The
+//     `community` run leaves these out: screepsmod-auth 2.10.1 answers 401, then its promise
+//     chain goes on (https://unpkg.com/screepsmod-auth@2.10.1/lib/backend.js, L285-306): it
+//     stores the reply object's `pass` and `salt` (`undefined`) as the account's password and
+//     replies again, which throws `ERR_HTTP_HEADERS_SENT` in an unhandled rejection. The backend
+//     process exits and every request fails until the launcher has restarted it.
 // - `mode` (worker option): how the app is served. `direct`: a plain static server, the app
 //   talks to the game server cross-origin. `proxy`: `overseer-proxy --static` serves the app
 //   same-origin in front of the game server. Each Playwright project sets it and its baseURL;
-//   the official run has the `proxy` project only (screeps.com sends no CORS headers).
-// - `server` (worker): the server under test ({@link Server}; `admin` on `openscreeps` only).
-// - `user`: the account `signedInPage` is signed in as ({@link User}): a fresh `player` on
-//   `openscreeps`, the API token's account on `official`.
-// - `home`: a room that shows the user's presence ({@link Home}): the player's room on
-//   `openscreeps`; on `official`, the account's start room (its own room when it has one) on
+//   the official and community runs have the `proxy` project only (screeps.com and stock
+//   community servers send no CORS headers).
+// - `server` (worker): the server under test ({@link Server}; the harness's `player` on the
+//   disposable targets, `admin` on `openscreeps` only).
+// - `user`: the account `signedInPage` is signed in as ({@link User}): a fresh `player` on a
+//   disposable world, the API token's account on `official`.
+// - `home`: a room that shows the user's presence ({@link Home}): the player's room on a
+//   disposable world; on `official`, the account's start room (its own room when it has one) on
 //   the shard a first visit opens (the first shard the server lists).
-// - `signedInPage`: `page` already signed in as `user` (a password session on `openscreeps`, the
-//   API token on `official`), on the world of the server (`/#/<slug>/`). On `official` it
-//   answers "Not now" whenever the "Rate limit running low" prompt opens (the account's real
-//   budget runs low across runs).
-// - `apiToken`: the `official` account's API token (`undefined` on `openscreeps`). Never print
-//   it or assert on it: the official run records no traces, screenshots or videos.
+// - `signedInPage`: `page` already signed in as `user` (a password session on a disposable
+//   world, the API token on `official`), on the world of the server (`/#/<slug>/`). On
+//   `official` it answers "Not now" whenever the "Rate limit running low" prompt opens (the
+//   account's real budget runs low across runs).
+// - `apiToken`: the `official` account's API token (`undefined` elsewhere). Never print it or
+//   assert on it: the official run records no traces, screenshots or videos.
 // - `cleanup`: work for after the test's browser context has closed (the app never sees it).
 // - `context`/`page`: with `OVERSEER_E2E_SLOW=<factor>` (see `playwright.config.ts`), every page
 //   of the context, popups included, runs its CPU `<factor>` times slower and waits
@@ -37,13 +47,18 @@
 //   out with `test.use({ cache: 'cold' })`. `cacheFile` (option, per project): where the setup
 //   saves it.
 //
-// `openscreeps` only (tag the test `@openscreeps`):
+// Disposable world only (`openscreeps`, `community`; tag the test `@openscreeps`):
 // - `account`: a fresh registered account without a spawn.
-// - `player`: a fresh account with a spawn and a small bot running (creeps move), removed with
-//   everything it owns once the test's browser context has closed. The same account as `user`.
+// - `player`: a fresh account with a spawn and a small bot running (creeps move), taken out of
+//   the world once the test's browser context has closed (`retirePlayer`: removed with
+//   everything it owns on `openscreeps`, respawned on `community`). The same account as `user`.
 // - `signIn(page, server, account)` seeds a signed-in session the way the app stores it (profile
 //   and token in localStorage) and opens the server's world; the UI then resumes it.
-// - `addServer`, `createPlayer`, `register`, `removeUser`, `adminOf` (the admin API).
+// - `addServer`, `createPlayer`, `register`.
+//
+// The server's administration, per target (the admin API on `openscreeps`, the CLI on
+// `community`): `adminOf`, `removeUser` (`openscreeps` only), `cli` (`community` only), and the
+// helpers built on them in `support/accounts.ts`.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { test as base, expect, type BrowserContextOptions, type Page } from '@playwright/test';
@@ -55,7 +70,7 @@ import {
   liveServer,
   liveToken,
   register,
-  removeUser,
+  retirePlayer,
   Session,
   SERVER_NAME,
 } from './api';
@@ -111,7 +126,7 @@ interface Presence {
   home: Home;
   /** The account's session token or API token. */
   token: string;
-  /** The created player (`openscreeps` only). */
+  /** The created player (disposable world only). */
   player?: Player;
 }
 
@@ -238,7 +253,8 @@ export async function addServer(page: Page, server: Server, name = SERVER_NAME):
 
 /**
  * Seeds the app's storage of `page` with `server` saved and `account` signed in with a fresh
- * session token, and opens the server's world (`openscreeps` only: signs in with the password).
+ * session token, and opens the server's world (disposable world only: signs in with the
+ * password).
  */
 export async function signIn(page: Page, server: Server, account: Account): Promise<void> {
   const session = await Session.signIn(server.url, account.username, account.password);
@@ -248,8 +264,8 @@ export async function signIn(page: Page, server: Server, account: Account): Prom
 
 /**
  * Signs `page` in to read the world (the cache setup) and opens the server's world: with the
- * API token `token` on `official`, as a fresh account without a spawn on `openscreeps`. Returns
- * the `home` the tests get on `official` (the token's account), `null` on `openscreeps` (each
+ * API token `token` on `official`, as a fresh account without a spawn on a disposable world.
+ * Returns the `home` the tests get on `official` (the token's account), `null` elsewhere (each
  * test's player has its own).
  */
 export async function signInReader(
@@ -267,8 +283,8 @@ export async function signInReader(
 }
 
 /** Fails a fixture that only the disposable world has. */
-function openscreepsOnly(target: Target, fixture: string): void {
-  if (target !== 'openscreeps') {
+function disposableOnly(target: Target, fixture: string): void {
+  if (target === 'official') {
     throw new Error(`\`${fixture}\` needs a disposable world: tag the test @openscreeps`);
   }
 }
@@ -350,7 +366,7 @@ export const test = base.extend<
     await use(page);
   },
   account: async ({ target, server }, use) => {
-    openscreepsOnly(target, 'account');
+    disposableOnly(target, 'account');
     await use(await register(server.url));
   },
   presence: async ({ target, server, apiToken, cleanup }, use) => {
@@ -360,7 +376,7 @@ export const test = base.extend<
       return;
     }
     const player = await createPlayer(server.url);
-    cleanup.push(() => removeUser(server, player.id));
+    cleanup.push(() => retirePlayer(server, player));
     const session = await Session.signIn(server.url, player.username, player.password);
     await use({
       user: { id: player.id, username: player.username },
@@ -370,7 +386,7 @@ export const test = base.extend<
     });
   },
   player: async ({ target, presence }, use) => {
-    openscreepsOnly(target, 'player');
+    disposableOnly(target, 'player');
     if (!presence.player) throw new Error('no player was created');
     await use(presence.player);
   },

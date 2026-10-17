@@ -9,10 +9,14 @@ use url::Url;
 /// The base always ends with `/`, so servers hosted below a path prefix (for example
 /// `https://screeps.com/season/`) resolve API, room-history and socket addresses under that
 /// prefix.
+///
+/// It also knows which server it reaches ([`Self::is_official`]), also through a proxy
+/// ([`Self::proxied`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServerUrl {
     base: Url,
     socket: Url,
+    official: bool,
 }
 
 /// A server URL that cannot address a Screeps server.
@@ -28,6 +32,9 @@ pub enum ServerUrlError {
     #[error("server URL must not carry credentials, a query or a fragment")]
     Extra,
 }
+
+/// The host of every official server ([`ServerUrl::is_official`]).
+const OFFICIAL_HOST: &str = "screeps.com";
 
 impl ServerUrl {
     /// The official Screeps World.
@@ -71,7 +78,37 @@ impl ServerUrl {
         socket
             .set_scheme(socket_scheme)
             .map_err(|()| ServerUrlError::Scheme(socket_scheme.to_owned()))?;
-        Ok(Self { base, socket })
+        let official = base.host_str() == Some(OFFICIAL_HOST);
+        Ok(Self {
+            base,
+            socket,
+            official,
+        })
+    }
+
+    /// The address `proxy` of something that forwards every request to `server` unchanged,
+    /// such as `overseer-proxy`: requests go to `proxy`, and it is the server `server` is
+    /// ([`Self::is_official`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::parse`] for `proxy`.
+    pub fn proxied(proxy: &str, server: &Self) -> Result<Self, ServerUrlError> {
+        Ok(Self {
+            official: server.official,
+            ..Self::parse(proxy)?
+        })
+    }
+
+    /// Whether this is a screeps.com server (the persistent world, `/season/`, `/ptr/`), which
+    /// follows the official contract: socket channels, room history and shard-routed requests
+    /// name a shard. Every other server is a private server (`openscreeps/server`, or the
+    /// Screeps server with community mods) following the standalone profile: one world whose
+    /// channels, history and requests name no shard, whatever shards its `GET /api/version`
+    /// lists. The official web client draws the same line (`options.official`).
+    #[must_use]
+    pub const fn is_official(&self) -> bool {
+        self.official
     }
 
     /// The base URL, ending with `/`.
@@ -131,6 +168,39 @@ mod tests {
             local.socket().as_str(),
             "ws://127.0.0.1:21025/socket/websocket"
         );
+    }
+
+    #[test]
+    fn only_screeps_com_is_official_also_through_a_proxy() {
+        for official in [
+            ServerUrl::OFFICIAL,
+            "https://SCREEPS.com:443/season",
+            "https://screeps.com/ptr/",
+        ] {
+            assert!(
+                ServerUrl::parse(official).unwrap().is_official(),
+                "{official}"
+            );
+        }
+        for private in [
+            "http://localhost:21025/",
+            "https://screeps.com.example/",
+            "https://www.example.com/screeps.com/",
+        ] {
+            assert!(
+                !ServerUrl::parse(private).unwrap().is_official(),
+                "{private}"
+            );
+        }
+        let proxy = "http://127.0.0.1:8080/";
+        let fronting = ServerUrl::proxied(proxy, &ServerUrl::official()).unwrap();
+        assert!(fronting.is_official());
+        assert_eq!(
+            fronting.socket().as_str(),
+            "ws://127.0.0.1:8080/socket/websocket"
+        );
+        let local = ServerUrl::parse("http://localhost:21025/").unwrap();
+        assert!(!ServerUrl::proxied(proxy, &local).unwrap().is_official());
     }
 
     #[test]

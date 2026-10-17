@@ -9,7 +9,7 @@ use overseer_net::core::socket::Event;
 use crate::support;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn the_socket_opens_and_authenticates_after_the_client_idled() {
     let account = support::register().await;
     let client = account.client();

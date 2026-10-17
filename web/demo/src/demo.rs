@@ -7,27 +7,32 @@ use overseer::prelude::*;
 use tokio::sync::broadcast::error::RecvError;
 use wasm_bindgen::prelude::*;
 
-/// Connects to `server` and starts the demo. Resolves once the session is set up (and the
-/// console expression sent), rejects with the error otherwise; the status, notices, room and
-/// console keep being logged while the page is open.
+/// Connects to `server` (through `proxy` when it is not empty: an `overseer-proxy` in front of
+/// `server`) and starts the demo. Resolves once the session is set up (and the console
+/// expression sent), rejects with the error otherwise; the status, notices, room and console
+/// keep being logged while the page is open.
 ///
 /// A non-empty `token` is used before `email`/`password`; with neither the session is
 /// anonymous (no console). An empty `room` or `expression` skips that part.
 ///
 /// # Errors
 ///
-/// Rejects when the URL is invalid, connecting or signing in fails, the room cannot be
+/// Rejects when a URL is invalid, connecting or signing in fails, the room cannot be
 /// watched or the console expression cannot be sent.
 #[wasm_bindgen]
 pub async fn run(
     server: String,
+    proxy: String,
     email: String,
     password: String,
     token: String,
     room: String,
     expression: String,
 ) -> Result<(), JsError> {
-    let url = ServerUrl::parse(&server)?;
+    let mut url = ServerUrl::parse(&server)?;
+    if !proxy.is_empty() {
+        url = ServerUrl::proxied(&proxy, &url)?;
+    }
     let auth = if !token.is_empty() {
         Auth::Token(Token::new(token))
     } else if !email.is_empty() {

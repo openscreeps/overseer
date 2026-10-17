@@ -33,7 +33,7 @@ const STARTUP: Duration = Duration::from_secs(120);
 /// The server's port in the container.
 const PORT: &str = "21025/tcp";
 /// Label of every container and volume the harness creates.
-const LABEL: &str = "overseer-e2e";
+pub(super) const LABEL: &str = "overseer-e2e";
 /// Where the server's image is built from when no checkout is given.
 const REPOSITORY: &str = "https://github.com/openscreeps/server.git";
 
@@ -50,9 +50,7 @@ pub struct World {
 /// The server image: built from the commit in `e2e/server.lock` unless cached (or from
 /// `OPENSCREEPS_SERVER_DIR`, see the module docs). Returns its tag.
 pub fn image(root: &Path) -> Result<String, Error> {
-    // Fails early, with a clear message, when Docker is not running.
-    docker_output(&["version", "--format", "{{.Server.Version}}"])
-        .map_err(|error| format!("Docker is not available ({error}); start Docker"))?;
+    docker_available()?;
     if let Some(dir) = std::env::var_os("OPENSCREEPS_SERVER_DIR") {
         let tag = "overseer-e2e-server:local".to_owned();
         status(
@@ -83,6 +81,13 @@ pub fn image(root: &Path) -> Result<String, Error> {
     Ok(tag)
 }
 
+/// Fails early, with a clear message, when Docker is not running.
+pub(super) fn docker_available() -> Result<(), Error> {
+    docker_output(&["version", "--format", "{{.Server.Version}}"])
+        .map_err(|error| format!("Docker is not available ({error}); start Docker"))?;
+    Ok(())
+}
+
 /// What must be undone however the run ends; taken by the first [`teardown`].
 struct Cleanup {
     /// The server's container.
@@ -105,15 +110,7 @@ pub fn teardown() {
     let Some(cleanup) = guard.take() else {
         return;
     };
-    if let Ok(output) = docker().args(["logs", &cleanup.container]).output() {
-        let log = fs::File::create(&cleanup.log).and_then(|mut log| {
-            log.write_all(&output.stdout)?;
-            log.write_all(&output.stderr)
-        });
-        if let Err(error) = log {
-            eprintln!("warning: cannot write {}: {error}", cleanup.log.display());
-        }
-    }
+    save_logs(&cleanup.container, &cleanup.log);
     // Containers that never started are no error.
     let removed = docker()
         .args([
@@ -190,14 +187,8 @@ pub fn start(image: &str, logs: &Path, log: &str) -> Result<World, Error> {
         TICK_MS,
     ])?;
     let admin_token = docker_output(&["exec", &name, "cat", "/data/world.sqlite.admin-token"])?;
-    // `127.0.0.1:49153` (one line per published address).
-    let published = docker_output(&["port", &name, PORT])?;
-    let address = published
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("127.0.0.1:"))
-        .ok_or_else(|| format!("unexpected `docker port` output: {published}"))?;
-    let address = format!("127.0.0.1:{address}");
-    wait_ready(&name, &address)?;
+    let address = published_address(&name)?;
+    wait_ready(&name, &address, STARTUP)?;
     let url = format!("http://{address}/");
     println!("    world at {url} (container {name})");
     Ok(World {
@@ -207,9 +198,39 @@ pub fn start(image: &str, logs: &Path, log: &str) -> Result<World, Error> {
     })
 }
 
-/// Polls `GET /api/version` until it answers 200; fails early when the container stopped.
-fn wait_ready(container: &str, address: &str) -> Result<(), Error> {
-    let deadline = Instant::now() + STARTUP;
+/// Writes the output of `container` to `log`; warns when that fails.
+pub(super) fn save_logs(container: &str, log: &Path) {
+    if let Ok(output) = docker().args(["logs", container]).output() {
+        let written = fs::File::create(log).and_then(|mut log| {
+            log.write_all(&output.stdout)?;
+            log.write_all(&output.stderr)
+        });
+        if let Err(error) = written {
+            eprintln!("warning: cannot write {}: {error}", log.display());
+        }
+    }
+}
+
+/// The loopback address (`127.0.0.1:<port>`) the server's port of `container` is published on.
+pub(super) fn published_address(container: &str) -> Result<String, Error> {
+    published_port(container, PORT)
+}
+
+/// The loopback address `container` publishes its `port` (such as `21026/tcp`) on.
+pub(super) fn published_port(container: &str, port: &str) -> Result<String, Error> {
+    // `127.0.0.1:49153` (one line per published address).
+    let published = docker_output(&["port", container, port])?;
+    let port = published
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("127.0.0.1:"))
+        .ok_or_else(|| format!("unexpected `docker port` output: {published}"))?;
+    Ok(format!("127.0.0.1:{port}"))
+}
+
+/// Polls `GET /api/version` until it answers 200, for up to `startup`; fails early when the
+/// container stopped.
+pub(super) fn wait_ready(container: &str, address: &str, startup: Duration) -> Result<(), Error> {
+    let deadline = Instant::now() + startup;
     let mut polls = 0_u32;
     loop {
         if version_ok(address) {
@@ -244,12 +265,12 @@ fn version_ok(address: &str) -> bool {
 }
 
 /// The `docker` CLI.
-fn docker() -> Command {
+pub(super) fn docker() -> Command {
     Command::new("docker")
 }
 
 /// Runs `docker <args>` and returns its trimmed standard output; its error output on failure.
-fn docker_output(args: &[&str]) -> Result<String, Error> {
+pub(super) fn docker_output(args: &[&str]) -> Result<String, Error> {
     let output = docker()
         .args(args)
         .stdin(Stdio::null())

@@ -1,48 +1,61 @@
 //! `cargo xtask e2e`: the live feature tests and the UI end-to-end tests, against a disposable
-//! `openscreeps/server` world in Docker (target `openscreeps`, the default) or, opt-in and read-only,
-//! against screeps.com (`--target official`). Neither runs under `cargo test`: the live tests
-//! are `#[ignore]`d there and Playwright runs only from here.
+//! `openscreeps/server` world in Docker (target `openscreeps`, the default), a disposable world
+//! of the standard community private server in Docker (`--target community`) or, opt-in and
+//! read-only, against screeps.com (`--target official`). Neither runs under `cargo test`: the
+//! live tests are `#[ignore]`d there and Playwright runs only from here.
 //!
 //! 1. Prepares what the selected suites need before any world exists: the server image
-//!    (`openscreeps`; see [`world`]) or the API token (`official`; see [`official`]); the web
-//!    app (`trunk build --release` of `app/` into `target/e2e/dist/`, its own bundle: `app/dist/`
-//!    is the development build `trunk serve` rewrites on every change; skipped with
-//!    `--no-build`), the `overseer-proxy` binary (copied to `target/e2e/`) and the live test
-//!    targets; installs the Playwright project (`npm ci` in `e2e/` when needed,
-//!    `npx playwright install chromium`).
-//! 2. `openscreeps`: for each suite, creates a fresh world in a new Docker volume
-//!    (`init --username e2e`), starts it on a free loopback port with fast ticks and waits until
-//!    `GET /api/version` answers. Players and their bots slow a world down as they add up, so
-//!    the suites do not share one.
-//! 3. Runs the live Rust tests (`cargo test --workspace --test live -- --ignored`; on
-//!    `official` only their read-only subset, the `read_only::` modules), then Playwright
-//!    (`npx playwright test`, extra arguments after `--` are passed on), each with the target's
-//!    environment (see [`common_environment`], [`world_environment`] and
-//!    [`official_environment`]). Each Playwright project first loads the server's world once
-//!    into the app's cache and saves it (`target/e2e/cache-<target>-<project>.json`); its tests
-//!    start from a copy (see `e2e/tests/cache.setup.ts`). On `official`, Playwright runs the
-//!    `proxy` project only, starts that setup from the previous official run's cache, leaves
-//!    out the `@openscreeps` tests and fails any test that sends a request that may change the
-//!    account (see `e2e/playwright.config.ts` and `e2e/tests/fixtures`); the summary counts the
-//!    requests the proxy forwarded to screeps.com per endpoint.
-//! 4. Always removes the world's container and volume: on success, on failure, on panic and on
-//!    Ctrl-C. The servers' output is kept in `target/e2e/server-live.log` and
-//!    `target/e2e/server-ui.log`, the test proxy's in `target/e2e/proxy.log`
-//!    (`proxy-official.log` on `official`).
+//!    (`openscreeps`, see [`world`]; `community`, see [`community`]) or the API token
+//!    (`official`; see [`official`]); the web app (`trunk build --release` of `app/` into
+//!    `target/e2e/dist/`, its own bundle: `app/dist/` is the development build `trunk serve`
+//!    rewrites on every change; skipped with `--no-build`), the `overseer-proxy` binary (copied
+//!    to `target/e2e/`) and the live test targets; installs the Playwright project (`npm ci` in
+//!    `e2e/` when needed, `npx playwright install chromium`).
+//! 2. `openscreeps` and `community`: for each suite, starts a fresh world on a free loopback
+//!    port with fast ticks and waits until `GET /api/version` answers. An `openscreeps` world is
+//!    created in a new Docker volume (`init --username e2e`); a `community` world lives in its
+//!    container, and the harness registers its player `e2e` over HTTP once the server answers.
+//!    Players and their bots slow a world down as they add up, so the suites do not share one.
+//! 3. Runs the live Rust tests (`cargo test --workspace --no-fail-fast --test live --
+//!    --ignored`, so that every crate's results show; on `community` without
+//!    [`COMMUNITY_SKIPPED`]: the test of a wrong current password, which crashes the community
+//!    server's backend; on `official` only their read-only subset, the `read_only::` modules),
+//!    then Playwright (`npx playwright test`, extra arguments after `--` are passed on), each
+//!    with the target's environment (see [`common_environment`], [`world_environment`],
+//!    [`community_environment`] and [`official_environment`]). Each Playwright project first
+//!    loads the server's world once into the app's cache and saves it
+//!    (`target/e2e/cache-<target>-<project>.json`); its tests start from a copy (see
+//!    `e2e/tests/cache.setup.ts`). On `community`, Playwright runs the `proxy` project only
+//!    (community servers send no CORS headers) and leaves out the `@wrong-password` tests, whose
+//!    wrong current password crashes the server's backend. On `official`, Playwright runs the
+//!    `proxy` project only, starts that setup from the previous official run's cache, leaves out
+//!    the `@openscreeps` tests (which need a disposable world, so also the `@admin` ones) and
+//!    fails any test that sends a request that may change the account (see
+//!    `e2e/playwright.config.ts` and `e2e/tests/fixtures`); the summary counts the requests the
+//!    proxy forwarded to screeps.com per endpoint.
+//! 4. Always removes the world's container (and volume): on success, on failure, on panic and
+//!    on Ctrl-C. The servers' output is kept in `target/e2e/server-live.log` and
+//!    `target/e2e/server-ui.log` (`server-community-live.log` and `server-community-ui.log` on
+//!    `community`, with the server processes' logs in the directories of the same names), the
+//!    test proxy's in `target/e2e/proxy.log` (`proxy-official.log` on `official`,
+//!    `proxy-community.log` on `community`).
 //!
 //! `--rust-only` and `--ui-only` select one suite. `--screens[=<set>]` captures the reference
 //! screenshots (the `@screens` tests, `proxy` project, `openscreeps` only) into
 //! `e2e/references/<set>/` (default set `current`). `--desktop` (Windows only, opt-in, not in
 //! CI) runs the desktop suite instead: the Tauri shell's test build driven over its
 //! `WebView2`'s remote debugging protocol (`e2e/desktop.config.ts`, specs in `e2e/desktop/`), on a
-//! fresh world or, with `--target official`, read-only against screeps.com; see [`desktop`].
-//! The exit code is non-zero when any step fails; a summary of every step closes the run.
+//! fresh world (`openscreeps` or `community`; server log `server-desktop.log` or
+//! `server-community-desktop.log`) or, with `--target official`, read-only against
+//! screeps.com; see [`desktop`]. The exit code is non-zero when any step fails; a summary of
+//! every step closes the run.
 //!
 //! `OVERSEER_E2E_SLOW=<factor>` (e.g. `4`) runs the UI tests the way the CI runner does on a
 //! fast machine: software WebGL (`SwiftShader`), pages whose CPU runs `<factor>` times slower
 //! and whose responses arrive `<factor>` × 125 ms later, and two workers (see
 //! `e2e/playwright.config.ts`).
 
+mod community;
 mod desktop;
 mod official;
 mod world;
@@ -64,6 +77,8 @@ enum Target {
     OpenScreeps,
     /// screeps.com, read-only.
     Official,
+    /// A disposable world of the community private server in Docker.
+    Community,
 }
 
 impl Target {
@@ -72,6 +87,7 @@ impl Target {
         match self {
             Self::OpenScreeps => "openscreeps",
             Self::Official => "official",
+            Self::Community => "community",
         }
     }
 }
@@ -169,7 +185,8 @@ impl Options {
         match value {
             "openscreeps" => Ok(Target::OpenScreeps),
             "official" => Ok(Target::Official),
-            _ => Err(format!("unknown target `{value}` (openscreeps, official)").into()),
+            "community" => Ok(Target::Community),
+            _ => Err(format!("unknown target `{value}` (openscreeps, official, community)").into()),
         }
     }
 }
@@ -241,7 +258,7 @@ impl Summary {
     }
 }
 
-/// Runs `cargo xtask e2e [--target openscreeps|official] [--rust-only | --ui-only | --desktop]
+/// Runs `cargo xtask e2e [--target openscreeps|official|community] [--rust-only | --ui-only | --desktop]
 /// [--screens[=<set>]] [--no-build] [-- <playwright args>]`.
 pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     let options = Options::parse(args)?;
@@ -264,12 +281,14 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Runs [`world::teardown`] and [`desktop::teardown`] when dropped, also while a panic unwinds.
+/// Runs [`world::teardown`], [`community::teardown`] and [`desktop::teardown`] when dropped,
+/// also while a panic unwinds.
 struct TeardownOnDrop;
 
 impl Drop for TeardownOnDrop {
     fn drop(&mut self) {
         world::teardown();
+        community::teardown();
         desktop::teardown();
     }
 }
@@ -307,12 +326,16 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
     // Before anything is built: a missing token fails at once.
     let token = match options.target {
         Target::Official => Some(official::token()?),
-        Target::OpenScreeps => None,
+        Target::OpenScreeps | Target::Community => None,
     };
     let mut image = None;
     let mut ready = match options.target {
         Target::OpenScreeps => summary.step("server image (docker build)", || {
             image = Some(world::image(root)?);
+            Ok(())
+        }),
+        Target::Community => summary.step("community server image (docker build)", || {
+            image = Some(community::image(root)?);
             Ok(())
         }),
         Target::Official => true,
@@ -377,24 +400,90 @@ fn suites(root: &Path, options: &Options, summary: &mut Summary) -> Result<(), E
     if !ready {
         return Ok(());
     }
-    match (image, token) {
-        (Some(image), _) => openscreeps_suites(&prepared, options, &image, summary),
-        (None, Some(token)) => official_suites(&prepared, options, &token, summary),
-        (None, None) => return Err("no server image".into()),
+    match (options.target, image.as_deref(), token.as_deref()) {
+        (Target::OpenScreeps, Some(image), _) => {
+            world_suites(&prepared, options, Worlds::OpenScreeps { image }, summary);
+        }
+        (Target::Community, Some(image), _) => {
+            world_suites(&prepared, options, Worlds::Community { image }, summary);
+        }
+        (Target::Official, _, Some(token)) => official_suites(&prepared, options, token, summary),
+        _ => return Err("nothing was prepared for the target".into()),
     }
     Ok(())
 }
 
-/// The suites against fresh worlds of `image`.
-fn openscreeps_suites(prepared: &Prepared, options: &Options, image: &str, summary: &mut Summary) {
+/// The disposable worlds of a target.
+#[derive(Clone, Copy)]
+enum Worlds<'a> {
+    /// `openscreeps/server` worlds of `image` ([`world`]).
+    OpenScreeps { image: &'a str },
+    /// Community private server worlds of `image` ([`community`]).
+    Community { image: &'a str },
+}
+
+/// A running world of [`Worlds`].
+enum World {
+    OpenScreeps(world::World),
+    Community(community::World),
+}
+
+impl Worlds<'_> {
+    /// The server log of the suite `suite` (`live`, `ui`, `desktop`).
+    fn log(self, suite: &str) -> String {
+        match self {
+            Self::OpenScreeps { .. } => format!("server-{suite}.log"),
+            Self::Community { .. } => format!("server-community-{suite}.log"),
+        }
+    }
+
+    /// Starts a fresh world, its output saved to `<logs>/<log>`.
+    fn start(self, logs: &Path, log: &str) -> Result<World, Error> {
+        Ok(match self {
+            Self::OpenScreeps { image } => World::OpenScreeps(world::start(image, logs, log)?),
+            Self::Community { image } => World::Community(community::start(image, logs, log)?),
+        })
+    }
+
+    /// Removes the world [`Worlds::start`] started.
+    fn teardown(self) {
+        match self {
+            Self::OpenScreeps { .. } => world::teardown(),
+            Self::Community { .. } => community::teardown(),
+        }
+    }
+}
+
+impl World {
+    /// Sets the world the tests run against.
+    fn environment(&self, command: &mut Command) {
+        match self {
+            Self::OpenScreeps(world) => world_environment(command, world),
+            Self::Community(world) => community_environment(command, world),
+        }
+    }
+}
+
+/// The live tests left out on `community`.
+const COMMUNITY_SKIPPED: [&str; 1] = [
+    // screepsmod-auth 2.10.1 answers a wrong current password with HTTP 401 and then goes on: it
+    // stores an undefined password and replies again, which throws `ERR_HTTP_HEADERS_SENT` in a
+    // promise and ends the backend (`lib/backend.js` `POST /api/user/password`,
+    // https://unpkg.com/screepsmod-auth@2.10.1/lib/backend.js); every request in flight fails
+    // until the launcher has restarted it. Changing the password with the right one works there.
+    "account::wrong_current_password_is_refused",
+];
+
+/// The suites against fresh worlds.
+fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summary: &mut Summary) {
     if options.desktop {
         desktop_suite(prepared, summary, |summary| {
             on_world(
                 prepared,
-                image,
+                worlds,
                 summary,
                 "Playwright desktop",
-                "server-desktop.log",
+                &worlds.log("desktop"),
                 || playwright(prepared, options),
             );
         });
@@ -404,13 +493,19 @@ fn openscreeps_suites(prepared: &Prepared, options: &Options, image: &str, summa
     if options.rust {
         on_world(
             prepared,
-            image,
+            worlds,
             summary,
             "live Rust tests",
-            "server-live.log",
+            &worlds.log("live"),
             || {
                 let mut test = cargo(&prepared.root);
-                test.args(["test", "--workspace", "--test", "live", "--", "--ignored"]);
+                test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"]);
+                test.args(["--", "--ignored"]);
+                if let Worlds::Community { .. } = worlds {
+                    for test_name in COMMUNITY_SKIPPED {
+                        test.args(["--skip", test_name]);
+                    }
+                }
                 test
             },
         );
@@ -420,10 +515,10 @@ fn openscreeps_suites(prepared: &Prepared, options: &Options, image: &str, summa
     if options.ui {
         on_world(
             prepared,
-            image,
+            worlds,
             summary,
             "Playwright",
-            "server-ui.log",
+            &worlds.log("ui"),
             || {
                 let mut playwright = playwright(prepared, options);
                 if let Some(set) = &options.screens {
@@ -441,7 +536,7 @@ fn openscreeps_suites(prepared: &Prepared, options: &Options, image: &str, summa
 /// world's environment and removes the world.
 fn on_world(
     prepared: &Prepared,
-    image: &str,
+    worlds: Worlds<'_>,
     summary: &mut Summary,
     name: &str,
     log: &str,
@@ -449,18 +544,18 @@ fn on_world(
 ) {
     let mut started = None;
     summary.step(&format!("{name}: disposable world"), || {
-        started = Some(world::start(image, &prepared.logs, log)?);
+        started = Some(worlds.start(&prepared.logs, log)?);
         Ok(())
     });
     if let Some(started) = started {
         summary.step(name, || {
             let mut command = suite();
             common_environment(&mut command, prepared)?;
-            world_environment(&mut command, &started);
+            started.environment(&mut command);
             status(&mut command, name)
         });
     }
-    world::teardown();
+    worlds.teardown();
 }
 
 /// The read-only suites against screeps.com.
@@ -479,8 +574,8 @@ fn official_suites(prepared: &Prepared, options: &Options, token: &str, summary:
     if options.rust {
         summary.step("live Rust tests (read-only)", || {
             let mut test = cargo(&prepared.root);
-            test.args(["test", "--workspace", "--test", "live", "--"])
-                .args(["--ignored", "read_only::"]);
+            test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"])
+                .args(["--", "--ignored", "read_only::"]);
             common_environment(&mut test, prepared)?;
             official_environment(&mut test, token);
             status(&mut test, "cargo test")
@@ -583,6 +678,22 @@ fn world_environment(command: &mut Command, world: &world::World) {
         .env("OVERSEER_LIVE_USER", world::USER)
         .env("OVERSEER_LIVE_PASSWORD", &world.password)
         .env("OVERSEER_LIVE_ADMIN_TOKEN", &world.admin_token)
+        .env_remove("OVERSEER_LIVE_TOKEN")
+        .env_remove("OVERSEER_LIVE_CLI_URL");
+}
+
+/// Sets the community world the tests run against: `OVERSEER_E2E_TARGET=community`,
+/// `OVERSEER_LIVE_URL` (server base URL), `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a
+/// registered player without a spawn) and `OVERSEER_LIVE_CLI_URL` (the server's CLI: `POST` a
+/// JavaScript command, the result comes back as text); no admin API, no token.
+fn community_environment(command: &mut Command, world: &community::World) {
+    command
+        .env("OVERSEER_E2E_TARGET", Target::Community.name())
+        .env("OVERSEER_LIVE_URL", &world.url)
+        .env("OVERSEER_LIVE_USER", community::USER)
+        .env("OVERSEER_LIVE_PASSWORD", &world.password)
+        .env("OVERSEER_LIVE_CLI_URL", &world.cli)
+        .env_remove("OVERSEER_LIVE_ADMIN_TOKEN")
         .env_remove("OVERSEER_LIVE_TOKEN");
 }
 
@@ -595,7 +706,8 @@ fn official_environment(command: &mut Command, token: &str) {
         .env("OVERSEER_LIVE_TOKEN", token)
         .env_remove("OVERSEER_LIVE_USER")
         .env_remove("OVERSEER_LIVE_PASSWORD")
-        .env_remove("OVERSEER_LIVE_ADMIN_TOKEN");
+        .env_remove("OVERSEER_LIVE_ADMIN_TOKEN")
+        .env_remove("OVERSEER_LIVE_CLI_URL");
 }
 
 /// `npm ci` in `dir` unless it already has `node_modules`.
@@ -650,6 +762,7 @@ fn install_interrupt_handler() -> Result<(), Error> {
         INTERRUPTED.store(true, Ordering::SeqCst);
         eprintln!("\ninterrupted: removing the world and the desktop test app's state");
         world::teardown();
+        community::teardown();
         desktop::teardown();
         std::process::exit(130);
     })?;
@@ -732,6 +845,21 @@ mod tests {
         assert_eq!(
             Options::parse(&["--screens"]).unwrap().screens.as_deref(),
             Some("current")
+        );
+
+        let community = Options::parse(&["--target", "community", "--rust-only"]).unwrap();
+        assert_eq!(community.target, Target::Community);
+        assert!(community.rust && !community.ui);
+        assert_eq!(
+            Options::parse(&["--target=community"]).unwrap().target,
+            Target::Community
+        );
+        assert!(Options::parse(&["--screens", "--target", "community"]).is_err());
+        assert_eq!(
+            Options::parse(&["--desktop", "--target", "community"])
+                .unwrap()
+                .target,
+            Target::Community
         );
 
         assert!(Options::parse(&["--rust-only", "--ui-only"]).is_err());

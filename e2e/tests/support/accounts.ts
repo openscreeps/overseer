@@ -1,9 +1,10 @@
 // Helpers of the account specs (servers, sign-in, sessions, profile, rate limits): seeding the
-// app's saved profiles the way it stores them, the server's admin API, and rewriting the
-// server's answers (`page.route`) for what a disposable server cannot do on its own.
+// app's saved profiles the way it stores them, changing accounts as the server's administrator
+// (the admin API on `openscreeps`, the CLI on `community`), and rewriting the server's answers
+// (`page.route`) for what a disposable server cannot do on its own.
 
 import type { Locator, Page, Request, Route } from '@playwright/test';
-import { adminOf, Session, type Account, type Server } from '../fixtures';
+import { adminOf, cli, Session, type Account, type Server } from '../fixtures';
 
 /**
  * The alerts of `scope` that say something: forms keep an empty alert ready for their error, so
@@ -61,7 +62,7 @@ export function storedToken(page: Page, url: string): Promise<string | null> {
   return page.evaluate((key) => localStorage.getItem(key), `overseer.secret.token:${url}`);
 }
 
-/** Runs `action` of the server's admin API (`POST /admin`) and returns its reply. */
+/** Runs `action` of the server's admin API (`POST /admin`) and returns its reply (`openscreeps`). */
 export async function admin(
   server: Server,
   action: Record<string, unknown>,
@@ -77,6 +78,60 @@ export async function admin(
   const text = await reply.text();
   if (!reply.ok) throw new Error(`admin ${String(action.action)}: HTTP ${reply.status} ${text}`);
   return JSON.parse(text) as Record<string, unknown>;
+}
+
+/** An account's statistics as {@link updateUser} sets them. */
+export interface UserStats {
+  /** Global Control Level points. */
+  gcl: number;
+  /** Power points. */
+  power: number;
+  credits: number;
+  /** CPU limit. */
+  cpu: number;
+}
+
+/**
+ * Sets `username`'s statistics as the server's administrator: `user-update` of the admin API on
+ * `openscreeps`; on `community` the CLI updates the user's document, which keeps the same fields
+ * (`gcl`, `power`, `cpu`, and the credits in thousandths as `money`, as `user-update` stores
+ * them).
+ */
+export async function updateUser(server: Server, username: string, stats: UserStats): Promise<void> {
+  if (server.admin) {
+    await admin(server, { action: 'user-update', username, ...stats });
+    return;
+  }
+  const { credits, ...rest } = stats;
+  const set = JSON.stringify({ ...rest, money: Math.round(credits * 1000) });
+  const reply = await cli(
+    server,
+    `storage.db.users.update({ username: ${JSON.stringify(username)} }, { $set: ${set} })`,
+  );
+  if (reply !== '{ modified: 1 }') throw new Error(`updating ${username}: ${reply}`);
+}
+
+/**
+ * Revokes the session `page` has open for `account`, as the server's administrator. On
+ * `openscreeps` a new password (`user-update` of the admin API) revokes every session of the
+ * account at once. The community server has no revocation: a session token is a one-minute entry
+ * `auth_<token>` (the user's id) of its `storage.env`, and every authenticated reply issues the
+ * next one (`@screeps/backend` `lib/authlib.js`, screepsmod-auth `lib/backend.js`). There the CLI
+ * deletes the token the page holds and each one the server issues to the page from now on.
+ */
+export async function revokeSession(page: Page, server: Server, account: Account): Promise<void> {
+  if (server.admin) {
+    await admin(server, { action: 'user-update', username: account.username, password: 'revoked-1234' });
+    return;
+  }
+  const revoke = (token: string) => cli(server, `storage.env.del(${JSON.stringify(`auth_${token}`)})`);
+  page.on('response', (response) => {
+    const issued = response.headers()['x-token'];
+    if (issued) void revoke(issued);
+  });
+  const token = await storedToken(page, server.url);
+  if (!token) throw new Error(`the page holds no session token of ${account.username}`);
+  await revoke(token);
 }
 
 /** Lets a cross-origin page (direct mode) read a rewritten response and the headers it needs. */

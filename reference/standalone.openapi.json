@@ -3000,14 +3000,17 @@
           "https://screeps.com/a/app2/main.js?bust=1787842760865#L196312C50",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsHttpClient.ts#L1002-L1008",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/game.ts#L153-L156",
-          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/common/rooms.ts#L83-L90"
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/common/rooms.ts#L83-L90",
+          "https://github.com/screepsmods/screepsmod-admin-utils/blob/2dad36835ad501ba8edac624269d315556d1a6e1/lib/backend.js#L70-L78"
         ],
         "x-unverified": "Whether screeps.com requires authentication is not visible in source (the official client sends its token when it has one); object fields beyond the base fields are typed only by the community client.",
         "x-profile": {
-          "status": "required",
+          "status": "adapted",
+          "reason": "Community private servers serve the route through screepsmod-admin-utils, which answers `{objects, users}` without `ok` (override: GameRoomObjectsResponse).",
           "overriddenComponents": [
             "#/components/parameters/ServerPassword",
-            "#/components/parameters/Shard"
+            "#/components/parameters/Shard",
+            "#/components/schemas/GameRoomObjectsResponse"
           ]
         }
       }
@@ -3944,7 +3947,7 @@
       "get": {
         "operationId": "registerCheckEmail",
         "summary": "Check e-mail availability",
-        "description": "Public availability check used by the official web client's registration and e-mail forms. Succeeds with `{ok: 1}` when no account uses the address; otherwise returns the error envelope `exists`. A missing/empty `email` yields `invalid email`. Addresses are compared lower-cased.",
+        "description": "Public availability check used by the official web client's registration and e-mail forms. Succeeds with `{ok: 1}` when no account uses the address; otherwise returns the error envelope `exists`. A missing/empty `email` yields `invalid email`. Addresses are compared lower-cased.\n\nStandalone: Community servers serve this check through screepsmod-auth, which answers a taken address with `User Exists` instead of `exists` and compares addresses as stored.",
         "tags": [
           "Register"
         ],
@@ -3995,7 +3998,8 @@
           "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/register.js#L15-L27",
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/accounts.ts#L37-L41",
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/accounts.ts#L201-L206",
-          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/users.ts#L27-L30"
+          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/users.ts#L27-L30",
+          "https://github.com/screepsmods/screepsmod-auth/blob/9195e87424475139d749df6d8063df677c4f9917/lib/register.js#L14-L25"
         ],
         "x-profile": {
           "status": "required",
@@ -4009,7 +4013,7 @@
       "get": {
         "operationId": "registerCheckUsername",
         "summary": "Check username availability",
-        "description": "Public, case-insensitive username availability check. Succeeds with `{ok: 1}` when the name is free; `exists` when taken; `invalid username` when missing/empty. It does not validate the username format (that happens in `POST /api/register/set-username`).",
+        "description": "Public, case-insensitive username availability check. Succeeds with `{ok: 1}` when the name is free; `exists` when taken; `invalid username` when missing/empty. It does not validate the username format (that happens in `POST /api/register/set-username`).\n\nStandalone: Community servers serve this check through screepsmod-auth, which answers a taken name with `User Exists` instead of `exists` and compares usernames case-sensitively.",
         "tags": [
           "Register"
         ],
@@ -4059,7 +4063,8 @@
           "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/register.js#L30-L42",
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/accounts.ts#L43-L47",
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/accounts.ts#L208-L215",
-          "https://github.com/openscreeps/game/blob/fd9cde57de20a1e37a0108c46ca78314c8b9bc36/src/players.ts#L37-L40"
+          "https://github.com/openscreeps/game/blob/fd9cde57de20a1e37a0108c46ca78314c8b9bc36/src/players.ts#L37-L40",
+          "https://github.com/screepsmods/screepsmod-auth/blob/9195e87424475139d749df6d8063df677c4f9917/lib/register.js#L8-L13"
         ],
         "x-profile": {
           "status": "required",
@@ -4515,7 +4520,7 @@
       "get": {
         "operationId": "userBranches",
         "summary": "List code branches",
-        "description": "Lists the player's code branches with their world/simulator activation flags. If no branch named `default` exists, an empty inactive `default` branch is created first (so this GET may write). The official web client passes `withCode` (true when it needs module contents, e.g. to sync local files) and reads `list`.\n\nStandalone: Ignores `withCode` and always returns complete branch documents including `user`, `modules` and `timestamp` (Unix milliseconds, absent until code is first saved).",
+        "description": "Lists the player's code branches with their world/simulator activation flags. If no branch named `default` exists, an empty inactive `default` branch is created first (so this GET may write). The official web client passes `withCode` (true when it needs module contents, e.g. to sync local files) and reads `list`. Without `withCode` the entries carry only `_id`, `branch`, `activeWorld` and `activeSim`; with it they also carry `user`, `modules` and `timestamp`.\n\nStandalone: Ignores `withCode` and always returns complete branch documents including `user`, `modules` and `timestamp` (Unix milliseconds, absent until code is first saved).",
         "tags": [
           "User Code"
         ],
@@ -4578,7 +4583,6 @@
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/accounts.ts#L282-L285",
           "https://github.com/openscreeps/game/blob/fd9cde57de20a1e37a0108c46ca78314c8b9bc36/src/code.ts#L83-L89"
         ],
-        "x-unverified": "Whether `modules` is omitted when `withCode` is not set is unverified; node-screeps-api types only `_id`, `branch`, `activeWorld` and `activeSim`.",
         "parameters": [
           {
             "name": "withCode",
@@ -5531,7 +5535,7 @@
       "post": {
         "operationId": "userMemorySet",
         "summary": "Write Memory",
-        "description": "Assigns `value` at `path`, deletes the value at `path` when `value` is omitted, or (without `path`) clears Memory and merges an object `value` into it. The edit is not applied synchronously: it is queued as a hidden console command executed inside the player's runtime on the given shard. Commands are queued and run only when the player's runtime reaches its console-processing step (after a main loop run); no ordering relative to other queued commands, ticks or code deployment is guaranteed by this API, and the response does not contain the evaluation result (results arrive on the console realtime channel). JSON-serialized values over 1 MiB yield `memory size is too large`.\n\nStandalone: Rejects invalid paths (empty segments, `__proto__`) with `Incorrect memory path` and, at execution, fails the hidden command when an intermediate path element is not an object. Returns only `{ok: 1}`.",
+        "description": "Assigns `value` at `path`, deletes the value at `path` when `value` is omitted, or (without `path`) clears Memory and merges an object `value` into it. The edit is not applied synchronously: it is queued as a hidden console command executed inside the player's runtime on the given shard. Commands are queued and run only when the player's runtime reaches its console-processing step (after a main loop run); no ordering relative to other queued commands, ticks or code deployment is guaranteed by this API, and the response does not contain the evaluation result (results arrive on the console realtime channel). JSON-serialized values over 1 MiB yield `memory size is too large`.\n\nStandalone: Rejects invalid paths (empty segments, `__proto__`) with `Incorrect memory path`. At execution, an assignment creates missing intermediate objects and fails the hidden command when an intermediate path element is a primitive or `null`; deleting below a missing element does nothing. The Screeps server (backend-local) instead queues `Memory['a']['b'] = value` (or `delete …`) as written: it accepts any path, and a missing intermediate element makes the hidden command throw, leaving Memory unchanged although the reply is a success. Returns only `{ok: 1}`.",
         "tags": [
           "User Memory"
         ],
@@ -5608,7 +5612,8 @@
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/api/accounts.ts#L137-L141",
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/accounts.ts#L383-L397",
           "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/accounts.ts#L66-L84",
-          "https://github.com/openscreeps/engine/blob/55883bef45d0d1c3c8c16e497fca56fe0b43ff11/src/runtime/index.ts#L363"
+          "https://github.com/openscreeps/engine/blob/55883bef45d0d1c3c8c16e497fca56fe0b43ff11/src/runtime/index.ts#L363",
+          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/user.js#L285-L319"
         ],
         "x-unverified": "A legacy official web client code path posts `{memory, shard}`; how the server treats `memory` is unverified.",
         "parameters": [
@@ -7649,7 +7654,7 @@
       "get": {
         "operationId": "platformVersion",
         "summary": "Read server capabilities",
-        "description": "Reports protocol and server capabilities. The official web client fetches it without credentials to configure itself (history chunk size, renderer resources, feature menu). Official responses carry `features` with optional `menuData` and `shards`; the client falls back to the market and auth features when `serverData.features` is absent.\n\nStandalone: Standalone servers serve one world: `serverData.shards` and official hosted `features` (seasons, decorations, inventory) may be absent, in which case the official client falls back to its market/auth feature set.",
+        "description": "Reports protocol and server capabilities. The official web client fetches it without credentials to configure itself (history chunk size, renderer resources, feature menu). Official responses carry `features` with optional `menuData` and `shards`; the client falls back to the market and auth features when `serverData.features` is absent.\n\nStandalone: Standalone servers serve one world. `serverData.features` and `serverData.shards` may be absent (stock backend-local and OpenScreeps send neither), in which case the official client falls back to its market/auth feature set. With screepsmod-admin-utils, `/api/version` lists the features mods register (screepsmod-auth, screepsmod-admin-utils, screepsmod-mongo: their package version string, or no version) and `shards` holds the `shardName` setting, `[null]` until one is set. That name is only what `Game.shard.name` reports: socket channels, room history and requests carry no shard on a standalone server whatever it lists, because the official client qualifies them only when `options.official` is true and reads `shards` only to decide whether to show shard names (`_.some`, so `[null]` counts as none).",
         "tags": [
           "Platform"
         ],
@@ -7688,12 +7693,21 @@
           "https://screeps.com/a/app2/main.js?bust=1787842760865#L220605C46",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/base.ts#L103-L151",
           "https://screeps.com/a/build.min.js?bust=1787842760865#L1C180790",
-          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/host.service.ts#L15-L31"
+          "https://github.com/openscreeps/server/blob/3954fd26f107a4b508ccaf6b5f64e4aa951d9e91/src/services/host.service.ts#L15-L31",
+          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L46-L72",
+          "https://github.com/screepsmods/screepsmod-admin-utils/blob/2dad36835ad501ba8edac624269d315556d1a6e1/lib/backend.js#L9-L13",
+          "https://github.com/screepsmods/screepsmod-admin-utils/blob/2dad36835ad501ba8edac624269d315556d1a6e1/lib/backend.js#L45-L69",
+          "https://github.com/screepsmods/screepsmod-auth/blob/9195e87424475139d749df6d8063df677c4f9917/lib/menu.js#L8-L28",
+          "https://github.com/screepsmods/screepsmod-mongo/blob/e3bd4bb93748d44d684f5f255e1ec24c46285302/lib/backend/index.js#L3-L7",
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C5918",
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C320915"
         ],
         "x-profile": {
-          "status": "required",
+          "status": "adapted",
+          "reason": "Community private servers (screeps/backend-local with screepsmod-admin-utils) publish the features their mods register and a configured shard name, which the official schema does not allow (override: PlatformVersion).",
           "overriddenComponents": [
-            "#/components/parameters/ServerPassword"
+            "#/components/parameters/ServerPassword",
+            "#/components/schemas/PlatformVersion"
           ]
         }
       }
@@ -17060,11 +17074,13 @@
       "GameRoomObjectsResponse": {
         "allOf": [
           {
-            "$ref": "#/components/schemas/Ok"
-          },
-          {
             "type": "object",
             "properties": {
+              "ok": {
+                "type": "integer",
+                "const": 1,
+                "description": "Success marker; absent when screepsmod-admin-utils serves the route."
+              },
               "objects": {
                 "type": "array",
                 "items": {
@@ -17082,7 +17098,8 @@
             ]
           }
         ],
-        "description": "Every room object of the room plus the public profiles of referenced users (typed by the community client; the official client reads `objects` and `users`)."
+        "description": "Every room object of the room plus the public profiles of referenced users (typed by the community client; the official client reads `objects` and `users`).",
+        "x-profile-reason": "screepsmod-admin-utils replaces `GET /api/game/room-objects` and answers `{objects, users}` without the `ok` marker."
       },
       "GameRoomOverviewResponse": {
         "allOf": [
@@ -18072,7 +18089,15 @@
                       "type": "string"
                     },
                     "version": {
-                      "type": "number"
+                      "anyOf": [
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "string"
+                        }
+                      ],
+                      "description": "Feature version: a number for server features, the mod's package version string (for example `2.10.1`) for mod features, absent for some mod features (screepsmod-auth `auth-tokens`)."
                     },
                     "menuData": {
                       "type": "array",
@@ -18160,8 +18185,7 @@
                     }
                   },
                   "required": [
-                    "name",
-                    "version"
+                    "name"
                   ],
                   "additionalProperties": true
                 }
@@ -18169,8 +18193,12 @@
               "shards": {
                 "type": "array",
                 "items": {
-                  "type": "string"
-                }
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "description": "Shard names. A standalone server lists at most the `shardName` setting of screepsmod-admin-utils, `null` until one is set, which is only what `Game.shard.name` reports: its socket channels, room history and requests carry no shard."
               }
             },
             "required": [
@@ -18187,7 +18215,8 @@
           "users",
           "serverData"
         ],
-        "additionalProperties": true
+        "additionalProperties": true,
+        "x-profile-reason": "screepsmod-admin-utils replaces `/api/version` and publishes `config.backend.features` and its `shardName` setting: mod features carry their package version string or no version, and the shard list holds `null` until a name is set."
       },
       "PowerCreep": {
         "type": "object",
@@ -18870,7 +18899,7 @@
             "description": "Branch runs in the simulator. Absent on branches created by cloning until activated."
           },
           "timestamp": {
-            "description": "Last code change: Unix milliseconds or a stored date (ISO 8601 string).",
+            "description": "Last code change as stored: Unix milliseconds for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch` (both observed on screeps.com).",
             "anyOf": [
               {
                 "type": "integer"

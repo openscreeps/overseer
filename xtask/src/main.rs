@@ -9,12 +9,13 @@
 //!   `reference/`; `--check` fails instead of writing when the generated files are stale.
 //! - `web-demo` builds the browser demo (`web/demo`) into the static bundle
 //!   `target/web-demo/` (needs the `wasm-bindgen` CLI matching the locked crate version).
-//! - `e2e [--target openscreeps|official] [--rust-only | --ui-only | --desktop]
+//! - `e2e [--target openscreeps|official|community] [--rust-only | --ui-only | --desktop]
 //!   [--screens[=<set>]] [--no-build] [-- <playwright args>]` runs the live feature tests and the
-//!   Playwright UI tests against a disposable `openscreeps/server` world in Docker (the server image is built from the
-//!   commit in `e2e/server.lock`) or, with `--target official`, their read-only subset against
-//!   screeps.com with `SCREEPS_TOKEN`; `--desktop` runs the desktop app's suite instead
-//!   (Windows); see `e2e.rs`.
+//!   Playwright UI tests against a disposable `openscreeps/server` world in Docker (the server
+//!   image is built from the commit in `e2e/server.lock`), with `--target community` against a
+//!   disposable world of the community private server in Docker (built from `e2e/community/`)
+//!   or, with `--target official`, their read-only subset against screeps.com with
+//!   `SCREEPS_TOKEN`; `--desktop` runs the desktop app's suite instead (Windows); see `e2e.rs`.
 
 mod codegen;
 mod e2e;
@@ -27,7 +28,7 @@ use std::process::ExitCode;
 /// Errors are reported as text; every command is a one-shot developer tool.
 type Error = Box<dyn std::error::Error>;
 
-const USAGE: &str = "usage: cargo xtask codegen [--check] | cargo xtask vendor [<openapi checkout>] | cargo xtask web-demo | cargo xtask e2e [--target openscreeps|official] [--rust-only | --ui-only | --desktop] [--screens[=<set>]] [--no-build] [-- <playwright args>]";
+const USAGE: &str = "usage: cargo xtask codegen [--check] | cargo xtask vendor [<openapi checkout>] | cargo xtask web-demo | cargo xtask e2e [--target openscreeps|official|community] [--rust-only | --ui-only | --desktop] [--screens[=<set>]] [--no-build] [-- <playwright args>]";
 
 fn main() -> ExitCode {
     let root = workspace_root();

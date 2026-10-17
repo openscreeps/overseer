@@ -25,7 +25,7 @@ async fn eventually<T, F: Future<Output = Option<T>>>(mut check: impl FnMut() ->
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn discovery_registration_and_sign_in_pass_through() {
     let proxy = support::start(None, &[]).await;
     let server = support::via(&proxy);
@@ -45,7 +45,10 @@ async fn discovery_registration_and_sign_in_pass_through() {
     assert_eq!(world.version().protocol, direct.version().protocol);
     assert_eq!(world.user(), None);
 
-    // Registration and its logical failures (HTTP 200 `{error}`) pass unchanged.
+    // Registration and its logical failures (HTTP 200 `{error}`) pass unchanged: the server's
+    // text for a taken username, which a community server's screepsmod-auth 2.10.1 follows with
+    // the error's stack trace (`lib/register.js`,
+    // <https://unpkg.com/screepsmod-auth@2.10.1/lib/register.js>).
     let account = support::register_with(&server, None).await;
     let again = RegisterSubmitRequest {
         email: format!("other-{}", account.email),
@@ -56,8 +59,15 @@ async fn discovery_registration_and_sign_in_pass_through() {
     let result = anonymous
         .send(&endpoints::RegisterSubmit { body: again })
         .await;
+    let taken = |message: &str| {
+        if support::community() {
+            message.lines().next() == Some("Error: User already exists")
+        } else {
+            message == "username already exists"
+        }
+    };
     assert!(
-        matches!(&result, Err(Error::Api(ApiError::Server(message))) if message == "username already exists"),
+        matches!(&result, Err(Error::Api(ApiError::Server(message))) if taken(message)),
         "{result:?}"
     );
 
@@ -93,7 +103,7 @@ async fn discovery_registration_and_sign_in_pass_through() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn tokens_rotate_through_the_proxy_and_authenticate_requests() {
     let proxy = support::start(None, &[]).await;
     let server = support::via(&proxy);
@@ -168,8 +178,16 @@ async fn tokens_rotate_through_the_proxy_and_authenticate_requests() {
     proxy.shutdown().await;
 }
 
+/// A history chunk through the proxy replays like the one fetched directly; a chunk that is not
+/// kept is the server's HTTP 404.
+///
+/// The community server keeps no room history: `@screeps/backend` 3.3.0 answers every
+/// `/room-history` request with HTTP 500 `not implemented` unless a mod replaces its
+/// `onGetRoomHistory` (`lib/game/server.js`,
+/// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L34-L36>),
+/// and the world under test runs none: there that refusal passes through unchanged.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_history_is_forwarded() {
     let proxy = support::start(None, &[]).await;
     let server = support::via(&proxy);
@@ -182,6 +200,29 @@ async fn room_history_is_forwarded() {
     let placed = support::game_time(&client).await;
     let base = placed - placed % size + size;
     support::wait_for_tick(&client, base + 4).await;
+    if support::community() {
+        let query = format!("room-history?room={}&time={base}", player.room);
+        let http = support::http();
+        for url in [proxy.url().join(&query), support::upstream().join(&query)] {
+            let reply = http
+                .get(url.expect("a URL"))
+                .send()
+                .await
+                .expect("an answer");
+            assert_eq!(reply.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(reply.text().await.expect("a body"), "not implemented");
+        }
+        let refused = client.room_history(None, &player.room, base).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(Error::Api(ApiError::Status { status, .. })) if status.as_u16() == 500
+            ),
+            "{refused:?}"
+        );
+        proxy.shutdown().await;
+        return;
+    }
     let proxied = client
         .room_history(None, &player.room, base)
         .await

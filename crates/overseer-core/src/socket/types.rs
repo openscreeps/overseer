@@ -1888,9 +1888,9 @@ pub struct UserCode {
     pub hash: Option<UserCodeHash>,
     /// Module name to JavaScript source or `{binary}` (base64 `WebAssembly`).
     pub modules: BTreeMap<String, UserCodeModulesValue>,
-    /// Save time in milliseconds since the Unix epoch.
+    /// Save time as stored with the branch: milliseconds since the Unix epoch for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<u64>,
+    pub timestamp: Option<UserCodeTimestamp>,
 }
 
 /// The `_hash` sent with the upload (`POST /api/user/code`), absent for other code changes. The official web client sends a random integer and compares it to its own to skip its own uploads; other clients may send any string or number.
@@ -1918,6 +1918,16 @@ pub enum UserCodeModulesValue {
 pub struct UserCodeModulesValueObject {
     /// The `binary` property.
     pub binary: String,
+}
+
+/// Save time as stored with the branch: milliseconds since the Unix epoch for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UserCodeTimestamp {
+    /// An integer.
+    Integer(u64),
+    /// A string.
+    String(String),
 }
 
 /// Console output of the latest run (sent every run, also with empty lists) or, as a separate event, the error that ended a run.

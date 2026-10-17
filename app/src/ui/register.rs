@@ -21,6 +21,11 @@ use crate::ui::style;
 /// Pause after typing before a value is checked with the server.
 const CHECK_DELAY: Duration = Duration::from_millis(400);
 
+/// The errors of a check whose value an account already uses: `exists` (screeps.com,
+/// `openscreeps/server` and the Screeps server) and `User Exists` (screepsmod-auth, which serves
+/// the checks on community servers).
+const TAKEN: [&str; 2] = ["exists", "User Exists"];
+
 /// What the server said about a username or e-mail address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Check {
@@ -90,7 +95,7 @@ fn live_check(
                     check.set(match result {
                         Ok(()) => Check::Available,
                         Err(error) => match session::message(&error) {
-                            exists if exists == "exists" => Check::Taken,
+                            message if TAKEN.contains(&message.as_str()) => Check::Taken,
                             message => Check::Failed(message),
                         },
                     });

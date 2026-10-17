@@ -5,8 +5,8 @@
 // instead of loading the same rooms again. localStorage is not saved: no profile, token or
 // camera leaks into the tests.
 //
-// - `openscreeps`: the whole disposable world (11 × 11 rooms), for the tests that zoom out,
-//   until its loading progress is gone and its requests stopped.
+// - `openscreeps`, `community`: the whole disposable world (11 × 11 rooms on `openscreeps`), for
+//   the tests that zoom out, until its loading progress is gone and its requests stopped.
 // - `official`: the account's home room on screeps.com (thousands of rooms per shard), until
 //   the terrain and owners around it are known. The portal scan and the portal destinations,
 //   paced over many minutes by the rate limits, are not waited for: they go on in the tests as

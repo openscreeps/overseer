@@ -79,7 +79,7 @@ fn assert_room_shaped(room: &str, terrain: &Terrain) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn terrain_decodes_for_single_rooms_and_batches() {
     let overseer = support::register().await.connect().await;
     let (min, max) = bounds(&overseer).await;
@@ -134,7 +134,7 @@ async fn terrain_decodes_for_single_rooms_and_batches() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn owner_statistics_name_players_and_the_invader() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -204,8 +204,15 @@ async fn owner_statistics_name_players_and_the_invader() {
     }
 }
 
+/// The world size the server reports and Overseer's reading of it both match the rooms the
+/// server has. Servers measure each axis from its westernmost (northernmost) room to its
+/// easternmost (southernmost) one but always count the `E0` (`S0`) line (`@screeps/common`
+/// `calcWorldSize` starts the maximum at 0): an `openscreeps/server` world spans both sides of
+/// `W0`|`E0` and `N0`|`S0` and reports its own size, the community default world (`W10N10` to
+/// `W0N0`) reports one room more per axis. [`overseer::map::RoomRect`] undoes that from the
+/// sides the central rooms are on, so `Map::world` spans exactly the server's rooms.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn world_size_and_room_status_follow_the_world() {
     let overseer = support::register().await.connect().await;
     let (min, max) = bounds(&overseer).await;
@@ -216,10 +223,23 @@ async fn world_size_and_room_status_follow_the_world() {
         .expect("world size decodes");
     assert_eq!(
         (size.width, size.height),
-        (i64::from(max.0 - min.0 + 1), i64::from(max.1 - min.1 + 1)),
+        (
+            i64::from(max.0.max(0) - min.0 + 1),
+            i64::from(max.1.max(0) - min.1 + 1)
+        ),
         "the world spans {} to {}",
         name(min),
         name(max)
+    );
+    let world = overseer.map().world(None).await.expect("the world opens");
+    let rect = world.bounds();
+    assert_eq!(
+        (
+            name((rect.min.x, rect.min.y)),
+            name((rect.max.x, rect.max.y))
+        ),
+        (name(min), name(max)),
+        "Overseer's world bounds are the server's rooms"
     );
 
     let rooms = overseer.rooms();
@@ -243,7 +263,7 @@ async fn world_size_and_room_status_follow_the_world() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn map_views_show_the_players_objects() {
     let player = support::player().await;
     let overseer = player.account.connect().await;

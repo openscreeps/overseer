@@ -47,14 +47,16 @@ impl Platform {
         self.tauri
     }
 
-    /// The address to connect to for the server with base URL `server`.
+    /// The address to connect to for the server with base URL `server`: through a proxy, the
+    /// proxy's address, still known as `server` ([`ServerUrl::proxied`]).
     ///
     /// # Errors
     ///
     /// Returns a message when the URL is invalid or the shell cannot start its proxy.
     pub async fn server_url(&self, server: &str) -> Result<ServerUrl, String> {
         let url = Url::parse(server).map_err(|error| format!("Invalid server URL: {error}"))?;
-        let address = match connect_target(self.tauri, self.page_proxy.as_ref(), &url) {
+        let upstream = ServerUrl::parse(server).map_err(|error| error.to_string())?;
+        let proxy = match connect_target(self.tauri, self.page_proxy.as_ref(), &url) {
             ConnectTarget::TauriProxy => {
                 let args = object(&[("upstream", server)]);
                 invoke("proxy_url", &args)
@@ -62,9 +64,10 @@ impl Platform {
                     .as_string()
                     .ok_or_else(|| "proxy_url returned no URL".to_owned())?
             }
-            ConnectTarget::Direct(url) | ConnectTarget::PageOrigin(url) => url.into(),
+            ConnectTarget::PageOrigin(url) => url.into(),
+            ConnectTarget::Direct(_) => return Ok(upstream),
         };
-        ServerUrl::parse(&address).map_err(|error| error.to_string())
+        ServerUrl::proxied(&proxy, &upstream).map_err(|error| error.to_string())
     }
 
     /// The secret stored under `key`.

@@ -19,9 +19,10 @@
 //   sees what the app sends once Playwright attached, a moment after the launch: the app sends
 //   nothing before a test drives it, except resuming a session after a restart (reads only).
 // - `credentials`: an account to sign in with through the UI ({@link signIn}): a fresh account
-//   on `openscreeps`, the API token's account on `official`.
+//   on a disposable world (`openscreeps`, `community`), the API token's account on `official`.
 // - `presence`: `credentials` with a room that shows the account (`home`): a fresh player with a
-//   spawn and a bot on `openscreeps` (removed after the test), the start room on `official`.
+//   spawn and a bot on a disposable world (taken out of the world after the test:
+//   `retirePlayer`), the start room on `official`.
 //
 // Windows are moved, resized, maximized, minimized and closed through the shell's window API
 // (`geometry`, `place`, `maximize`, `close`): the test build grants it, standing in for the user
@@ -47,7 +48,7 @@ import {
   liveServer,
   liveToken,
   register,
-  removeUser,
+  retirePlayer,
   type Server,
   type Target,
 } from '../tests/fixtures/api';
@@ -583,7 +584,7 @@ export const test = base.extend<
       return;
     }
     const player = await createPlayer(server.url);
-    cleanup.push(() => removeUser(server, player.id));
+    cleanup.push(() => retirePlayer(server, player));
     await use({
       credentials: {
         kind: 'password',

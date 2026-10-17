@@ -55,7 +55,7 @@ async fn watched(what: &str, watch: &mut Watch<String>, wanted: impl Fn(&str) ->
 
 /// The bot's `Memory.ticks` grows, read by path and as part of all of Memory.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn ticks_increase() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -82,14 +82,29 @@ async fn ticks_increase() {
 
 /// A value set at a path appears on a later tick, deeper paths read into it, and deleting it
 /// removes it; unreachable and malformed paths are reported as the server does.
+///
+/// The community server queues a write at `a.b` as the console expression
+/// `Memory['a']['b'] = value` for the player's next run, which throws (and sets nothing) when
+/// `Memory.a` is missing (`@screeps/backend` 3.3.0 `lib/game/api/user.js`, `POST /memory`,
+/// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/user.js#L285-L316>);
+/// `openscreeps/server` creates missing parents. The test creates the parent first, which both
+/// servers apply alike.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn set_and_delete_a_path() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
     let memory = overseer.memory();
     let value = json!({"answer": 42, "name": "live", "list": [1, "two", null]});
 
+    memory
+        .set("live", json!({}), None)
+        .await
+        .expect("the write is queued");
+    eventually(&memory, "live", |read| {
+        *read == MemoryValue::Json(json!({}))
+    })
+    .await;
     memory
         .set("live.data", value.clone(), None)
         .await
@@ -130,20 +145,24 @@ async fn set_and_delete_a_path() {
         MemoryValue::Json(json!({}))
     );
 
-    let error = memory
-        .set("live..data", json!(1), None)
-        .await
-        .expect_err("an empty path part is refused");
-    assert!(
-        matches!(&error, Error::Net(net::Error::Api(ApiError::Server(message))) if message == "Incorrect memory path"),
-        "unexpected error: {error:?}"
-    );
+    // `openscreeps/server` refuses an empty path part before queueing anything; the community
+    // server queues any path (the expression then throws in the player's runtime).
+    let result = memory.set("live..data", json!(1), None).await;
+    if support::community() {
+        assert!(result.is_ok(), "{result:?}");
+    } else {
+        let error = result.expect_err("an empty path part is refused");
+        assert!(
+            matches!(&error, Error::Net(net::Error::Api(ApiError::Server(message))) if message == "Incorrect memory path"),
+            "unexpected error: {error:?}"
+        );
+    }
 }
 
 /// Segments are written and read back; unwritten segments are empty and ids above 99 are
 /// refused before anything is sent.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn segments_round_trip() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -179,9 +198,10 @@ async fn segments_round_trip() {
 
 /// Watched paths report their JavaScript string form after every run: the growing tick count,
 /// `undefined` for an absent value, the server's text for a path through an absent value, and
-/// values set later (`[object Object]` for objects).
+/// values set later (`[object Object]` for objects). The parent is created before the nested
+/// value, as the community server needs it (see [`set_and_delete_a_path`]).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn watches_paths() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -208,14 +228,18 @@ async fn watches_paths() {
     );
 
     memory
-        .set("watched.flag", json!("on"), None)
+        .set("watched", json!({}), None)
         .await
         .expect("the write is queued");
-    watched("the set flag", &mut flag, |value| value == "on").await;
     watched("the new object", &mut parent, |value| {
         value == "[object Object]"
     })
     .await;
+    memory
+        .set("watched.flag", json!("on"), None)
+        .await
+        .expect("the write is queued");
+    watched("the set flag", &mut flag, |value| value == "on").await;
     assert!(matches!(
         memory.watch("", None),
         Err(Error::InvalidInput(_))

@@ -37,7 +37,7 @@ impl Tier {
 pub(super) enum Server {
     /// No rate limit seen, or the token is exempt: in-flight caps only.
     Unlimited,
-    /// It lists shards, reported a rate limit or refused a request with HTTP 429.
+    /// It is official, reported a rate limit or refused a request with HTTP 429.
     Limited,
 }
 

@@ -33,13 +33,21 @@
     import init, { run } from './overseer_web_demo.js';
 
     await init();
+    // Served by `overseer-proxy`: its upstream is reached through this page's origin.
+    const pageProxy = await fetch('/overseer-proxy.json')
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null);
+    if (pageProxy?.upstream) document.getElementById('server').value = pageProxy.upstream;
     const form = document.getElementById('connect');
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       form.querySelector('button').disabled = true;
       const value = (id) => document.getElementById(id).value.trim();
+      const href = (url) => URL.parse(url)?.href;
+      const proxy = pageProxy?.upstream && href(value('server')) === href(pageProxy.upstream)
+        ? `${location.origin}/` : '';
       try {
-        await run(value('server'), value('email'), document.getElementById('password').value,
+        await run(value('server'), proxy, value('email'), document.getElementById('password').value,
           value('token'), value('room'), value('expression'));
       } catch (error) {
         const line = document.createElement('div');

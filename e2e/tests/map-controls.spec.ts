@@ -145,7 +145,13 @@ test.describe('map controls', () => {
     const centre = await mapCentre(page);
     await page.mouse.move(centre.x, centre.y);
     await page.mouse.down();
-    await page.mouse.move(centre.x - 200, centre.y - 120, { steps: 10 });
+    // A steady drag of 200 × 120 pixels over a second: the app takes the release's speed from
+    // when the moves arrive, so a drag as fast as the machine dispatches it would glide as far as
+    // the machine is fast. 0.23 pixels per millisecond glide on about 75 pixels.
+    for (let step = 1; step <= 10; step++) {
+      await page.waitForTimeout(100);
+      await page.mouse.move(centre.x - 20 * step, centre.y - 12 * step);
+    }
     await page.mouse.up();
     // The ground follows the pointer: the camera moves the other way, a released drag
     // gliding on a little.

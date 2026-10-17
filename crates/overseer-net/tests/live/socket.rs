@@ -17,7 +17,7 @@ fn bogus() -> Token {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn the_socket_authenticates_and_streams_user_channels() {
     let player = support::player().await;
     let client = player.account.client();
@@ -90,7 +90,7 @@ async fn the_socket_authenticates_and_streams_user_channels() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn a_rejected_socket_token_is_renewed_with_credentials_only() {
     let account = support::register().await;
     let client = account.client();
@@ -149,7 +149,7 @@ fn shows_player(socket: &Socket, player: &Player, user: &str) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn watched_rooms_decode_terrain_objects_users_and_the_map() {
     let player = support::player().await;
     let client = player.account.client();

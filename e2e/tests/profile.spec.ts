@@ -5,7 +5,7 @@
 
 import type { Locator, Page } from '@playwright/test';
 import { expect, register, Session, signIn, test, unique } from './fixtures';
-import { accountMenu, admin, alerts, corsHeaders } from './support/accounts';
+import { accountMenu, alerts, corsHeaders, updateUser } from './support/accounts';
 
 /** Opens the profile through the account menu and returns it. */
 async function openProfile(page: Page, username: string): Promise<Locator> {
@@ -107,9 +107,7 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     server,
     account,
   }) => {
-    await admin(server, {
-      action: 'user-update',
-      username: account.username,
+    await updateUser(server, account.username, {
       gcl: 1_500_000,
       power: 5_000,
       credits: 1234.5,
@@ -272,7 +270,13 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     await Session.signIn(server.url, account.username, account.password);
   });
 
-  test('rejects a wrong current password', async ({ page, server, account }) => {
+  // screepsmod-auth answers a wrong current password and then crashes the community server's
+  // backend (`@wrong-password`, see the fixtures).
+  test('rejects a wrong current password', { tag: '@wrong-password' }, async ({
+    page,
+    server,
+    account,
+  }) => {
     await signIn(page, server, account);
     await openProfile(page, account.username);
     const section = page.getByRole('region', { name: 'Password' });

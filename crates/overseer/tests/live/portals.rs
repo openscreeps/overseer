@@ -1,9 +1,9 @@
 //! Live tests: portals found by the world map (every room scanned over `roomMap2`, destinations
 //! from room objects) and the badges of room owners.
 //!
-//! The portal test creates a portal pair between `W0S0` and `E0S0` through the server's admin
-//! API (`OVERSEER_LIVE_ADMIN_TOKEN`); worlds of 21 rooms and more also have the generator's
-//! portals between their sector centres.
+//! The portal test creates a portal pair through the server's administration (see
+//! [`create_portals`]); `openscreeps/server` worlds of 21 rooms and more also have the
+//! generator's portals between their sector centres.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -13,8 +13,6 @@ use overseer::core::api::types::{
     UserBadgeType,
 };
 use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 
 use crate::support::{self, PATIENCE};
@@ -23,54 +21,87 @@ fn room(name: &str) -> RoomCoord {
     name.parse().expect("a room name")
 }
 
-/// Runs `action` (a JSON object) on the server's admin API (`POST /admin` with
-/// `OVERSEER_LIVE_ADMIN_TOKEN`) and returns the response body.
-async fn admin(action: &str) -> String {
-    let token = std::env::var("OVERSEER_LIVE_ADMIN_TOKEN")
-        .expect("OVERSEER_LIVE_ADMIN_TOKEN is not set: run `cargo xtask e2e`");
-    let url = support::url().join("admin").expect("the admin URL");
-    let host = url.host_str().expect("a host");
-    let port = url.port_or_known_default().expect("a port");
-    let mut stream = TcpStream::connect((host, port))
-        .await
-        .expect("the server accepts connections");
-    let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{action}",
-        url.path(),
-        action.len()
-    );
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .expect("the request is sent");
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .await
-        .expect("the response arrives");
-    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+/// The CLI command that creates a portal pair between `{from}` and `{to}` on a community server
+/// like the admin API's `portal-create` does on `openscreeps/server` (which picks a random free
+/// area where this takes the first): in each room a free 5×5 plain area (no object within 2
+/// tiles) between 8 and 41 holds a constructed wall ringed by eight portals, each leading to the
+/// same offset around the other room's wall; then both rooms are activated, so the engine
+/// processes them and lists the portals in their map views (`@screeps/engine` 4.3.0
+/// `src/processor.js` keeps rooms with portals active). Prints `{"from":…,"to":…}`.
+const CREATE_PORTALS: &str = r"(async () => {
+  const objects = storage.db['rooms.objects'];
+  const spot = async (room) => {
+    const { terrain } = await storage.db['rooms.terrain'].findOne({ room });
+    const taken = await objects.find({ room });
+    for (let x = 8; x <= 41; x++) {
+      for (let y = 8; y <= 41; y++) {
+        let free = !taken.some((o) => Math.abs(o.x - x) <= 2 && Math.abs(o.y - y) <= 2);
+        for (let dx = -2; dx <= 2 && free; dx++) {
+          for (let dy = -2; dy <= 2 && free; dy++) {
+            free = terrain.charAt((y + dy) * 50 + x + dx) === '0';
+          }
+        }
+        if (free) return { room, x, y };
+      }
+    }
+    throw new Error('no free area in ' + room);
+  };
+  const cluster = (at, to) => {
+    const cluster = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        cluster.push(dx || dy
+          ? { type: 'portal', room: at.room, x: at.x + dx, y: at.y + dy,
+              destination: { room: to.room, x: to.x + dx, y: to.y + dy } }
+          : { type: 'constructedWall', room: at.room, x: at.x, y: at.y });
+      }
+    }
+    return cluster;
+  };
+  const from = await spot('{from}');
+  const to = await spot('{to}');
+  await objects.insert([...cluster(from, to), ...cluster(to, from)]);
+  await storage.env.sadd(storage.env.keys.ACTIVE_ROOMS, [from.room, to.room]);
+  return JSON.stringify({ from: from.room, to: to.room });
+})()";
+
+/// Creates a portal pair and returns its rooms: between `W0S0` and `E0S0` through the admin API
+/// of `openscreeps/server` (`portal-create`), between `W2N2` and `W8N8` (two ordinary rooms of
+/// the default world, `W10N10` to `W0N0`) through the CLI of a community server
+/// ([`CREATE_PORTALS`]), which has no such command.
+async fn create_portals() -> (RoomCoord, RoomCoord) {
+    let (from, to, created) = if support::community() {
+        let command = CREATE_PORTALS
+            .replace("{from}", "W2N2")
+            .replace("{to}", "W8N8");
+        ("W2N2", "W8N8", support::cli(&command).await)
+    } else {
+        let action = r#"{"action":"portal-create","from":"W0S0","to":"E0S0"}"#;
+        ("W0S0", "E0S0", support::admin_api(action).await)
+    };
     assert!(
-        head.starts_with("HTTP/1.1 2"),
-        "the admin API refused {action}: {head}\n{body}"
+        created.contains(&format!(r#""from":"{from}""#)),
+        "{created}"
     );
-    body.to_owned()
+    (room(from), room(to))
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     let overseer = support::register().await.connect().await;
     let map = overseer.map();
     let mut world = map.world(None).await.expect("the world opens");
     let bounds = world.bounds();
-    let (west, east) = (room("W0S0"), room("E0S0"));
-    assert!(bounds.contains(west) && bounds.contains(east), "{bounds:?}");
-    let created = admin(r#"{"action":"portal-create","from":"W0S0","to":"E0S0"}"#).await;
-    assert!(created.contains(r#""from":"W0S0""#), "{created}");
+    let (first, second) = create_portals().await;
+    assert!(
+        bounds.contains(first) && bounds.contains(second),
+        "{bounds:?}"
+    );
 
     // The server lists the new portals in the rooms' map views once it processed them.
     let mut views = map.view(None).expect("signed in");
-    views.set_rooms([west.to_string(), east.to_string()]);
+    views.set_rooms([first.to_string(), second.to_string()]);
     timeout(PATIENCE, async {
         loop {
             let listed = views
@@ -173,7 +204,7 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
                 })
             })
     };
-    for (from, to) in [(west, east), (east, west)] {
+    for (from, to) in [(first, second), (second, first)] {
         let portals = world.portals(from).expect("scanned");
         assert!(portals.len() >= 8, "{from}: {portals:?}");
         let objects = overseer
@@ -236,14 +267,14 @@ async fn portals_are_found_in_candidate_rooms_with_their_destinations() {
     }
     // `Map::portals` reads the same.
     let direct = map
-        .portals(&west.to_string(), None)
+        .portals(&first.to_string(), None)
         .await
         .expect("room objects");
-    assert_eq!(*world.portals(west).expect("scanned"), *direct);
+    assert_eq!(*world.portals(first).expect("scanned"), *direct);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_owners_carry_their_badges() {
     let player = support::player().await;
     let overseer = player.account.connect().await;

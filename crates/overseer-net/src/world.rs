@@ -1,30 +1,40 @@
 //! What the driver knows about the server's world and the signed-in user.
 
+use overseer_core::ServerUrl;
 use overseer_core::api::types::PlatformVersion;
 
 /// The server's shards and capabilities and the signed-in user, as discovered by
 /// [`Client::world`].
 ///
-/// Official servers run several shards and qualify room and Memory channels, as well as most
-/// requests, with one; private servers run a single world (no shards listed) and use shardless
-/// channel names.
+/// Official servers ([`ServerUrl::is_official`]) run several shards and qualify room and
+/// Memory channels, room history and most requests with one. Private servers run a single
+/// world and name no shard anywhere, whatever their `GET /api/version` lists
+/// ([`PlatformVersion::shards`]): the official web client never qualifies their channels
+/// either, and the Screeps server's socket only knows bare room names.
 ///
 /// [`Client::world`]: crate::Client::world
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
     version: PlatformVersion,
+    shards: Vec<String>,
     shard: Option<String>,
     user: Option<String>,
 }
 
 impl World {
-    /// A world described by `GET /api/version` (no shards listed for a single-world server) and
-    /// the user id from `GET /api/auth/me`. The default shard is the first one listed.
+    /// The world of `server` described by its `GET /api/version` reply and the user id from
+    /// `GET /api/auth/me`. On an official server the default shard is the first one listed.
     #[must_use]
-    pub fn new(version: PlatformVersion, user: Option<String>) -> Self {
-        let shard = version.shards().first().cloned();
+    pub fn new(server: &ServerUrl, version: PlatformVersion, user: Option<String>) -> Self {
+        let shards: Vec<String> = if server.is_official() {
+            version.shards().map(str::to_owned).collect()
+        } else {
+            Vec::new()
+        };
+        let shard = shards.first().cloned();
         Self {
             version,
+            shards,
             shard,
             user,
         }
@@ -37,16 +47,17 @@ impl World {
         &self.version
     }
 
-    /// The shards, in the order the server lists them; empty on single-world servers.
+    /// The shards channels and requests can name, in the order the server lists them; empty on
+    /// private servers, whatever they list.
     #[must_use]
     pub fn shards(&self) -> &[String] {
-        self.version.shards()
+        &self.shards
     }
 
-    /// Whether channels and requests name a shard.
+    /// Whether channels and requests name a shard: on official servers.
     #[must_use]
     pub fn is_sharded(&self) -> bool {
-        !self.shards().is_empty()
+        !self.shards.is_empty()
     }
 
     /// The shard used when none is named; `None` on single-world servers.
@@ -90,6 +101,7 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+    use overseer_core::ServerUrl;
     use overseer_core::api::types::PlatformVersion;
 
     use super::World;
@@ -102,9 +114,15 @@ mod tests {
         .unwrap()
     }
 
+    fn private() -> ServerUrl {
+        ServerUrl::parse("http://localhost:21025/").unwrap()
+    }
+
     #[test]
-    fn sharded_world_defaults_to_the_first_shard_and_honours_overrides() {
-        let mut world = World::new(version(r#","shards":["shard0","shard3"]"#, 100), None);
+    fn official_world_defaults_to_the_first_shard_and_honours_overrides() {
+        let shards = r#","shards":["shard0","shard3"]"#;
+        let mut world = World::new(&ServerUrl::official(), version(shards, 100), None);
+        assert_eq!(world.shards(), ["shard0", "shard3"]);
         assert_eq!(world.shard(), Some("shard0"));
         assert_eq!(world.resolve_shard(None).as_deref(), Some("shard0"));
         assert_eq!(
@@ -114,22 +132,32 @@ mod tests {
         world.set_shard("shard3");
         assert_eq!(world.resolve_shard(None).as_deref(), Some("shard3"));
         assert_eq!(world.history_chunk_size(), 100);
+        // Through a proxy in front of it.
+        let proxy = ServerUrl::proxied("http://127.0.0.1:8080/", &ServerUrl::official()).unwrap();
+        assert!(World::new(&proxy, version(shards, 100), None).is_sharded());
     }
 
     #[test]
-    fn single_world_never_names_a_shard() {
-        let mut world = World::new(version("", 20), Some("5a1b".into()));
-        world.set_shard("shard0");
-        assert!(!world.is_sharded());
-        assert_eq!(world.shard(), None);
-        assert_eq!(world.resolve_shard(Some("shard0")), None);
-        assert_eq!(world.user(), Some("5a1b"));
-        assert_eq!(world.history_chunk_size(), 20);
+    fn private_world_never_names_a_shard_whatever_it_lists() {
+        // Nothing listed (OpenScreeps, the stock Screeps server), screepsmod-admin-utils'
+        // unset `shardName`, and a set one.
+        for shards in ["", r#","shards":[null]"#, r#","shards":["shard0"]"#] {
+            let mut world = World::new(&private(), version(shards, 20), Some("5a1b".into()));
+            world.set_shard("shard0");
+            assert!(!world.is_sharded(), "{shards}");
+            assert_eq!(world.shards(), [] as [String; 0]);
+            assert_eq!(world.shard(), None);
+            assert_eq!(world.resolve_shard(Some("shard0")), None);
+            assert_eq!(world.user(), Some("5a1b"));
+            assert_eq!(world.history_chunk_size(), 20);
+        }
     }
 
     #[test]
     fn history_chunk_size_is_at_least_one() {
-        assert_eq!(World::new(version("", 0), None).history_chunk_size(), 1);
-        assert_eq!(World::new(version("", -5), None).history_chunk_size(), 1);
+        for chunk in [0, -5] {
+            let world = World::new(&private(), version("", chunk), None);
+            assert_eq!(world.history_chunk_size(), 1);
+        }
     }
 }

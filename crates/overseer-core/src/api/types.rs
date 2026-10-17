@@ -4948,9 +4948,9 @@ pub struct PlatformVersionServerData {
     pub history_chunk_size: i64,
     /// The `renderer` property.
     pub renderer: PlatformVersionServerDataRenderer,
-    /// The `shards` property.
+    /// Shard names. A standalone server lists at most the `shardName` setting of screepsmod-admin-utils, `null` until one is set, which is only what `Game.shard.name` reports: its socket channels, room history and requests carry no shard.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shards: Option<Vec<String>>,
+    pub shards: Option<Vec<Option<String>>>,
     /// The `socketUpdateThrottle` property.
     #[serde(
         rename = "socketUpdateThrottle",
@@ -4970,8 +4970,9 @@ pub struct PlatformVersionServerDataFeaturesItem {
     pub menu_data: Option<Vec<PlatformVersionServerDataFeaturesItemMenuDataItem>>,
     /// The `name` property.
     pub name: String,
-    /// The `version` property.
-    pub version: f64,
+    /// Feature version: a number for server features, the mod's package version string (for example `2.10.1`) for mod features, absent for some mod features (screepsmod-auth `auth-tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<PlatformVersionServerDataFeaturesItemVersion>,
 }
 
 /// The `menuData` property.
@@ -5031,6 +5032,16 @@ pub struct PlatformVersionServerDataFeaturesItemMenuDataItemItem {
     /// HTML template placed before the entry.
     #[serde(rename = "templateBefore", skip_serializing_if = "Option::is_none")]
     pub template_before: Option<String>,
+}
+
+/// Feature version: a number for server features, the mod's package version string (for example `2.10.1`) for mod features, absent for some mod features (screepsmod-auth `auth-tokens`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PlatformVersionServerDataFeaturesItemVersion {
+    /// A string.
+    String(String),
+    /// A number.
+    Number(f64),
 }
 
 /// The `renderer` property.
@@ -6472,7 +6483,7 @@ pub struct UserCodeBranch {
     /// The `modules` property.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modules: Option<UserCodeModules>,
-    /// Last code change: Unix milliseconds or a stored date (ISO 8601 string).
+    /// Last code change as stored: Unix milliseconds for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch` (both observed on screeps.com).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<UserCodeBranchTimestamp>,
     /// The `user` property.
@@ -6480,7 +6491,7 @@ pub struct UserCodeBranch {
     pub user: Option<UserId>,
 }
 
-/// Last code change: Unix milliseconds or a stored date (ISO 8601 string).
+/// Last code change as stored: Unix milliseconds for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch` (both observed on screeps.com).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UserCodeBranchTimestamp {

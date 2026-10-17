@@ -9,7 +9,9 @@
 //! `wasm-bindgen` CLI of the same version as the `wasm-bindgen` crate in `Cargo.lock`:
 //! `cargo install wasm-bindgen-cli --version <that version>`) and serve that directory over
 //! HTTP, for example `python -m http.server 8000 --directory target/web-demo`. The server must
-//! allow the page's origin (CORS); the `openscreeps` server allows any origin.
+//! allow the page's origin (CORS); the `openscreeps` server allows any origin. Served by
+//! `overseer-proxy` (`mise run web-demo-proxy`), the page fills in the proxy's upstream and
+//! reaches it through its own origin, as that server (`ServerUrl::proxied`).
 //!
 //! On native targets the crate is empty, so workspace commands build it.
 

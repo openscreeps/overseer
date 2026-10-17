@@ -53,8 +53,12 @@ run = "cargo xtask e2e"
 description = "Opt-in: the read-only live and UI tests against screeps.com with $SCREEPS_TOKEN (or $SCREEPS_TOKEN_FILE); requests that may change the account are blocked and fail"
 run = "cargo xtask e2e --target official"
 
+[tasks.e2e-community]
+description = "Live feature tests and Playwright UI tests against a disposable community private server world in Docker (screeps-launcher with screepsmod-auth and screepsmod-admin-utils, image built from e2e/community/, cached); only the tests of a wrong current password are left out (it crashes the server's backend)"
+run = "cargo xtask e2e --target community"
+
 [tasks.e2e-desktop]
-description = "Opt-in, Windows: the desktop app's tests (its test build driven by Playwright over WebView2 remote debugging) against a disposable OpenScreeps world; add --target official for the read-only ones against screeps.com"
+description = "Opt-in, Windows: the desktop app's tests (its test build driven by Playwright over WebView2 remote debugging) against a disposable OpenScreeps world; add --target community for a disposable community private server world, --target official for the read-only ones against screeps.com"
 run = "cargo xtask e2e --desktop"
 
 [tasks.ci]

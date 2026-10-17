@@ -1027,12 +1027,13 @@
         "x-sources": [
           "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/socket/user.js#L13-L24",
           "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/user.js#L116",
+          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/user.js#L232-L243",
           "https://screeps.com/a/build.min.js?bust=1787842760865#L1C304545"
         ],
         "x-availability": {
           "screeps-com": "supported"
         },
-        "x-unverified": "Not observed live (no code was uploaded during observation)."
+        "x-unverified": "Not observed live (no code was saved during observation). The event re-reads the stored branch, whose save times were observed through `GET /api/user/branches?withCode=true` (2026-10-17): milliseconds, and an ISO 8601 string for a branch created by `POST /api/user/clone-branch`."
       },
       "userConsoleEvent": {
         "name": "userConsoleEvent",
@@ -8645,9 +8646,17 @@
             }
           },
           "timestamp": {
-            "type": "integer",
-            "description": "Save time in milliseconds since the Unix epoch.",
-            "minimum": 0
+            "description": "Save time as stored with the branch: milliseconds since the Unix epoch for a branch last saved by `POST /api/user/code`, a date (ISO 8601 string) for one last saved by `POST /api/user/clone-branch`.",
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "string",
+                "format": "date-time"
+              }
+            ]
           },
           "hash": {
             "description": "The `_hash` sent with the upload (`POST /api/user/code`), absent for other code changes. The official web client sends a random integer and compares it to its own to skip its own uploads; other clients may send any string or number.",

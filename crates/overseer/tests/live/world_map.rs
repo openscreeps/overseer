@@ -88,7 +88,7 @@ fn assert_room_shaped(room: RoomCoord, terrain: &Terrain) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn bounds_span_the_disposable_world() {
     let overseer = support::register().await.connect().await;
     let map = overseer.map();
@@ -125,10 +125,12 @@ async fn bounds_span_the_disposable_world() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn overviews_cover_the_whole_world() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
+    // The world holds a stronghold (a community world's own may come later: see the helper).
+    support::stronghold(overseer.client()).await;
     let user = overseer.user_id().expect("signed in").to_owned();
     let mut world = overseer.map().world(None).await.expect("the world opens");
     let bounds = world.bounds();
@@ -188,7 +190,7 @@ async fn overviews_cover_the_whole_world() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn terrain_fills_in_and_seeded_rooms_are_not_fetched() {
     let overseer = support::register().await.connect().await;
     let map = overseer.map();
@@ -249,7 +251,7 @@ async fn terrain_fills_in_and_seeded_rooms_are_not_fetched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn minimaps_show_the_rooms_and_stop_when_unwanted() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -307,7 +309,7 @@ async fn minimaps_show_the_rooms_and_stop_when_unwanted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn detail_stays_within_the_servers_cap_and_is_released_when_unwanted() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -405,7 +407,7 @@ async fn detail_stays_within_the_servers_cap_and_is_released_when_unwanted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn a_viewed_room_updates_its_overview_and_portals_at_once() {
     let player = support::player().await;
     let overseer = player.account.connect().await;

@@ -5,14 +5,21 @@
 // On the `official` target (screeps.com) the API is read-only: {@link api} refuses every request
 // that {@link isMutating} names, before it leaves.
 
-/** What the tests run against (`OVERSEER_E2E_TARGET`). */
-export type Target = 'openscreeps' | 'official';
+/**
+ * What the tests run against (`OVERSEER_E2E_TARGET`): `openscreeps`, a disposable OpenScreeps
+ * world with its admin API; `community`, a disposable world of the stock community server
+ * (screeps-launcher with screepsmod-auth and screepsmod-admin-utils) with its CLI; `official`,
+ * screeps.com, read-only.
+ */
+export type Target = 'openscreeps' | 'official' | 'community';
 
-/** The server under test, from `OVERSEER_E2E_TARGET` (`openscreeps` unless `official`). */
+/** The server under test, from `OVERSEER_E2E_TARGET` (`openscreeps` unless set). */
 export function currentTarget(): Target {
   const target = process.env.OVERSEER_E2E_TARGET ?? 'openscreeps';
-  if (target !== 'openscreeps' && target !== 'official') {
-    throw new Error(`OVERSEER_E2E_TARGET is \`${target}\`, not \`openscreeps\` or \`official\``);
+  if (target !== 'openscreeps' && target !== 'official' && target !== 'community') {
+    throw new Error(
+      `OVERSEER_E2E_TARGET is \`${target}\`, not \`openscreeps\`, \`official\` or \`community\``,
+    );
   }
   return target;
 }
@@ -20,13 +27,22 @@ export function currentTarget(): Target {
 /** The server's display name in seeded profiles of the disposable server. */
 export const SERVER_NAME = 'Local e2e';
 
-/** The disposable server's administration (`openscreeps` only). */
-export interface Admin {
-  /** The harness's own player (no spawn). */
+/** The harness's own player on a disposable world (`openscreeps`, `community`): no spawn. */
+export interface HarnessPlayer {
   user: string;
   password: string;
+}
+
+/** The disposable server's administration (`openscreeps` only). */
+export interface Admin {
   /** Bearer token of the server's admin API (`POST /admin`). */
   token: string;
+}
+
+/** The community server's CLI (`community` only). */
+export interface Cli {
+  /** The CLI endpoint (`OVERSEER_LIVE_CLI_URL`, `http://127.0.0.1:<port>/cli`). */
+  url: string;
 }
 
 /** The server under test: the disposable world started by `cargo xtask e2e`, or screeps.com. */
@@ -39,14 +55,33 @@ export interface Server {
   name: string;
   /** The profile kind the app gives the server. */
   kind: 'private' | 'official';
+  /** The harness's player; on the disposable targets (`openscreeps`, `community`). */
+  player?: HarnessPlayer;
   /** The admin API; only on the `openscreeps` target. */
   admin?: Admin;
+  /** The server's CLI; only on the `community` target. */
+  cli?: Cli;
 }
 
-/** `server`'s admin API; fails on a server without one (tag the test `@openscreeps`). */
+/** `server`'s admin API; fails on a server without one (`openscreeps` only). */
 export function adminOf(server: Server): Admin {
-  if (!server.admin) throw new Error(`${server.url} has no admin API: tag the test @openscreeps`);
+  if (!server.admin) throw new Error(`${server.url} has no admin API`);
   return server.admin;
+}
+
+/**
+ * Runs the JavaScript `command` in the community server's CLI (`community` only) and returns its
+ * result as text: a string as it is, anything else as `util.inspect` shows it, a promise once it
+ * settles. Throws when the command fails (the CLI answers `Error: …`).
+ */
+export async function cli(server: Server, command: string): Promise<string> {
+  if (!server.cli) throw new Error(`${server.url} has no CLI`);
+  const reply = await fetch(server.cli.url, { method: 'POST', body: command });
+  const text = (await reply.text()).trimEnd();
+  if (!reply.ok || text.startsWith('Error: ')) {
+    throw new Error(`CLI \`${command.slice(0, 80)}\`: HTTP ${reply.status} ${text.slice(0, 300)}`);
+  }
+  return text;
 }
 
 /**
@@ -112,20 +147,20 @@ function required(name: string): string {
 /** The server from the harness's environment. */
 export function liveServer(): Server {
   const url = required('OVERSEER_LIVE_URL');
-  if (currentTarget() === 'official') {
+  const target = currentTarget();
+  if (target === 'official') {
     return { url, slug: slug(url), name: 'screeps.com', kind: 'official' };
   }
-  return {
+  const server: Server = {
     url,
     slug: slug(url),
     name: SERVER_NAME,
     kind: 'private',
-    admin: {
-      user: required('OVERSEER_LIVE_USER'),
-      password: required('OVERSEER_LIVE_PASSWORD'),
-      token: required('OVERSEER_LIVE_ADMIN_TOKEN'),
-    },
+    player: { user: required('OVERSEER_LIVE_USER'), password: required('OVERSEER_LIVE_PASSWORD') },
   };
+  if (target === 'openscreeps') server.admin = { token: required('OVERSEER_LIVE_ADMIN_TOKEN') };
+  else server.cli = { url: required('OVERSEER_LIVE_CLI_URL') };
+  return server;
 }
 
 /** The API token of the `official` target's account (`OVERSEER_LIVE_TOKEN`); never print it. */
@@ -255,8 +290,7 @@ export async function createPlayer(url: string): Promise<Player> {
 
 /**
  * Removes the user `id` with everything they own (`user-remove` of the server's admin API): the
- * room is free again and the bot stops. Every bot runs each tick until then, so players that
- * pile up slow the world down (requests take seconds) and fill its rooms.
+ * room is free again and the bot stops.
  */
 export async function removeUser(server: Server, id: string): Promise<void> {
   const reply = await fetch(new URL('admin', server.url), {
@@ -268,6 +302,24 @@ export async function removeUser(server: Server, id: string): Promise<void> {
     body: JSON.stringify({ action: 'user-remove', userId: id }),
   });
   if (!reply.ok) throw new ApiError(`admin user-remove: HTTP ${reply.status} ${await reply.text()}`);
+}
+
+/**
+ * Takes `player` out of the disposable world once its test is done. Every bot runs each tick
+ * until then, so players that pile up slow the world down (requests take seconds) and fill its
+ * rooms. With the admin API (`openscreeps`) the account goes with everything it owns
+ * ({@link removeUser}); without one (`community`) the player respawns
+ * (`POST /api/user/respawn`): the server removes its rooms and objects, the account stays. A
+ * player already out of the world (`invalid status`: the test respawned it) needs nothing.
+ */
+export async function retirePlayer(server: Server, player: Player): Promise<void> {
+  if (server.admin) return removeUser(server, player.id);
+  const session = await Session.signIn(server.url, player.username, player.password);
+  try {
+    await session.call('api/user/respawn', {});
+  } catch (error) {
+    if (!(error instanceof ApiError && error.message.endsWith(': invalid status'))) throw error;
+  }
 }
 
 /** Rooms with status `normal` that nobody owns. */

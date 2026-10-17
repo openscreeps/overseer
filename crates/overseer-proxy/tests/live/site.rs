@@ -1,5 +1,5 @@
-//! What the proxy answers itself (static files, discovery, unknown paths) and its CORS policy in
-//! front of a server that allows every origin.
+//! What the proxy answers itself (static files, discovery, unknown paths) and its CORS policy,
+//! whatever the server's own.
 
 use http::StatusCode;
 use overseer_net::serde_json::{self, json};
@@ -19,7 +19,7 @@ fn no_cors(response: &reqwest::Response) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn static_files_discovery_and_unknown_paths() {
     let site = TempDir::new("static");
     site.write("index.html", INDEX);
@@ -48,15 +48,16 @@ async fn static_files_discovery_and_unknown_paths() {
         serde_json::from_str(&version.text().await.expect("a body")).expect("JSON");
     assert_eq!(version["ok"], json!(1));
 
-    // The server's own non-API paths are never forwarded: the upstream answers `/health`.
-    let upstream_health = support::http()
-        .get(support::upstream().join("health").expect("a URL"))
+    // The server's own non-API paths are never forwarded (see `support::upstream_own_path`).
+    let own = support::upstream_own_path();
+    let upstream_own = support::http()
+        .get(support::upstream().join(own).expect("a URL"))
         .send()
         .await
-        .expect("the upstream health");
-    assert_eq!(upstream_health.status(), StatusCode::OK);
+        .expect("the upstream's own path");
+    assert_eq!(upstream_own.status(), StatusCode::OK);
     assert_eq!(
-        get("health").await.expect("an answer").status(),
+        get(own).await.expect("an answer").status(),
         StatusCode::NOT_FOUND
     );
     assert_eq!(
@@ -74,7 +75,7 @@ async fn static_files_discovery_and_unknown_paths() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        get("health").await.expect("an answer").status(),
+        get(own).await.expect("an answer").status(),
         StatusCode::NOT_FOUND
     );
     assert_eq!(
@@ -91,24 +92,33 @@ async fn static_files_discovery_and_unknown_paths() {
     proxy.shutdown().await;
 }
 
+/// The proxy sends CORS headers to the origins it allows and to no other, whatever the server
+/// sends: `openscreeps/server` allows every origin, a community server none
+/// (screepsmod-admin-utils 1.37.1 sends CORS headers only to the origins its `cors` setting
+/// lists, none by default: `lib/services/cors/backend.js`,
+/// <https://unpkg.com/screepsmod-admin-utils@1.37.1/lib/services/cors/backend.js>).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn cors_headers_are_sent_to_allowed_origins_only() {
     let proxy = support::start(None, &[ALLOWED]).await;
     let http = support::http();
     let version = proxy.url().join("api/version").expect("a URL");
 
-    // The server itself allows any origin; the proxy decides on its own.
+    // The server's own policy; the proxy decides on its own.
     let upstream = http
         .get(support::upstream().join("api/version").expect("a URL"))
         .header("Origin", DENIED)
         .send()
         .await
         .expect("the upstream version");
-    assert_eq!(
-        header(&upstream, "access-control-allow-origin"),
-        Some(DENIED)
-    );
+    if support::community() {
+        assert!(no_cors(&upstream), "{:?}", upstream.headers());
+    } else {
+        assert_eq!(
+            header(&upstream, "access-control-allow-origin"),
+            Some(DENIED)
+        );
+    }
 
     let allowed = http
         .get(version.clone())
@@ -178,6 +188,6 @@ async fn cors_headers_are_sent_to_allowed_origins_only() {
     );
     let rotated = header(&authenticated, "x-token").expect("a rotated token");
     assert_ne!(rotated, token.as_str());
-    assert_eq!(rotated.len(), 64);
+    assert_eq!(rotated.len(), support::token_length());
     proxy.shutdown().await;
 }

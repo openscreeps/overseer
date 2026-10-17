@@ -6,9 +6,15 @@
 //! `OVERSEER_LIVE_USER` and `OVERSEER_LIVE_PASSWORD` (a player without a spawn). Tests register
 //! their own accounts (through the proxy) so that none depends on another's state.
 //!
+//! `cargo xtask e2e --target community` runs them against a disposable community world instead
+//! (the Screeps server with screepsmod-auth and screepsmod-admin-utils, which lists the shard
+//! name `shard0` although it serves a single world), with `OVERSEER_E2E_TARGET=community` and
+//! the same variables but no admin API. Where the two servers legitimately differ, tests assert
+//! each one's behaviour ([`community`]).
+//!
 //! `cargo xtask e2e --target official` runs only the `read_only` tests against screeps.com, with
 //! `OVERSEER_E2E_TARGET=official`, `OVERSEER_LIVE_URL` and `OVERSEER_LIVE_TOKEN` (an API token of
-//! an account that owns rooms); [`reader`] is that account on either target.
+//! an account that owns rooms); [`reader`] is that account on every target.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -71,9 +77,9 @@ pub async fn start(static_dir: Option<PathBuf>, allowed_origins: &[&str]) -> Pro
     .expect("the proxy starts")
 }
 
-/// The proxy as a client's server.
+/// The proxy as a client's server, known as [`direct`].
 pub fn via(proxy: &Proxy) -> ServerUrl {
-    ServerUrl::parse(proxy.url().as_str()).expect("a server URL")
+    ServerUrl::proxied(proxy.url().as_str(), &direct()).expect("a server URL")
 }
 
 /// A client without an account.
@@ -85,6 +91,29 @@ pub fn anonymous(server: &ServerUrl) -> Client {
 /// where [`reader`] owns rooms.
 pub fn official() -> bool {
     std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "official")
+}
+
+/// Whether the tests run against a community server (`OVERSEER_E2E_TARGET=community`): the
+/// Screeps server (`@screeps/backend` 3.3.0) with screepsmod-auth 2.10.1 and
+/// screepsmod-admin-utils 1.37.1.
+pub fn community() -> bool {
+    std::env::var("OVERSEER_E2E_TARGET").is_ok_and(|target| target == "community")
+}
+
+/// The length of the server's session tokens (hex digits): 40 on a community server, whose
+/// tokens are SHA-1 HMACs (`@screeps/backend` 3.3.0 `lib/authlib.js` `genToken`,
+/// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/authlib.js#L7-L8>),
+/// 64 on `openscreeps/server` (32 random bytes).
+pub fn token_length() -> usize {
+    if community() { 40 } else { 64 }
+}
+
+/// A path the upstream answers itself, outside the paths the proxy forwards: `health` on
+/// `openscreeps/server`, the server statistics `stats` of screepsmod-admin-utils on a community
+/// server (`lib/services/stats/backend.js`,
+/// <https://unpkg.com/screepsmod-admin-utils@1.37.1/lib/services/stats/backend.js>).
+pub fn upstream_own_path() -> &'static str {
+    if community() { "stats" } else { "health" }
 }
 
 /// The account of the `read_only` tests on `server`: a client holding the API token

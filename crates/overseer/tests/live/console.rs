@@ -26,7 +26,7 @@ async fn next(
 /// The bot's `console.log` lines arrive on the feed, one per tick, and are kept in the
 /// history.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn bot_logs_arrive() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -64,7 +64,7 @@ async fn bot_logs_arrive() {
 /// An expression runs in the player's runtime: the command is echoed and its result arrives on
 /// the feed as HTML (results are not escaped), plain text after decoding; commands are recalled.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn expression_result_arrives() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
@@ -115,7 +115,7 @@ async fn expression_result_arrives() {
 
 /// An expression that throws reports the error on the feed.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a live OpenScreeps server: cargo xtask e2e"]
+#[ignore = "needs a live private server: cargo xtask e2e"]
 async fn throwing_expression_reports_the_error() {
     let player = support::player().await;
     let overseer = player.account.connect().await;

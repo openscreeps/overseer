@@ -5,15 +5,21 @@
 //
 // `OVERSEER_E2E_TARGET` picks the server as for the web tests (`playwright.config.ts`); the
 // `official` run (`--target official`) leaves out the `@openscreeps` tests and records no
-// screenshots.
+// screenshots, the `community` run (`--target community`) the `@wrong-password` tests (see
+// `tests/fixtures`).
 //
 // One worker: the test app keeps its profile, window state and keychain entries per identifier,
 // so one instance runs at a time.
 
 import { defineConfig } from '@playwright/test';
-import { currentTarget } from './tests/fixtures/api';
+import { currentTarget, type Target } from './tests/fixtures/api';
 
-const official = currentTarget() === 'official';
+/** The tests each target leaves out. */
+const excluded: Record<Target, RegExp | undefined> = {
+  openscreeps: undefined,
+  official: /@openscreeps/,
+  community: /@wrong-password/,
+};
 
 export default defineConfig({
   testDir: './desktop',
@@ -24,6 +30,6 @@ export default defineConfig({
   retries: 0,
   timeout: 120_000,
   expect: { timeout: 15_000 },
-  grepInvert: official ? /@openscreeps/ : undefined,
+  grepInvert: excluded[currentTarget()],
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report/desktop' }]],
 });

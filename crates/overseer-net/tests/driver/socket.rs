@@ -81,6 +81,47 @@ async fn subscriptions_are_sent_again_after_the_server_drops_the_connection() {
     assert_eq!(socket.room("W1N1").unwrap().game_time(), Some(7));
 }
 
+/// `GET /api/version` of the Screeps server with screepsmod-auth and screepsmod-admin-utils
+/// (`shardName: shard0`): mod features carry a package version or none, and the shard name is
+/// listed.
+const COMMUNITY_VERSION: &str = r#"{"ok":1,"protocol":14,"useNativeAuth":false,"users":1,"serverData":{"shards":["shard0"],"customObjectTypes":{},"historyChunkSize":20,"socketUpdateThrottle":1000,"renderer":{"resources":{},"metadata":{}},"features":[{"name":"auth","version":1},{"name":"auth-tokens"},{"name":"screepsmod-auth","version":"2.10.1"},{"name":"screepsmod-admin-utils","version":"1.37.1"}]}}"#;
+
+#[tokio::test]
+async fn only_official_servers_name_the_shard_they_list_in_room_channels() {
+    let mut server = Server::start(
+        |request: &Request| match request.path.as_str() {
+            "/api/version" => (200, COMMUNITY_VERSION.to_owned()),
+            _ => (404, "{}".to_owned()),
+        },
+        |_| true,
+    )
+    .await;
+    // The same reply from a private server and from a stand-in for screeps.com.
+    for (url, shard, line) in [
+        (server.url(), None, "subscribe room:W1N1"),
+        (
+            server.official_url(),
+            Some("shard0"),
+            "subscribe room:shard0/W1N1",
+        ),
+    ] {
+        let client = Client::builder(url).build().unwrap();
+        let mut socket = client.connect().await.unwrap();
+        let room = socket.subscribe_room("W1N1");
+        assert_eq!(
+            room,
+            Channel::Room {
+                shard: shard.map(str::to_owned),
+                room: "W1N1".to_owned()
+            }
+        );
+        socket.flush().await.unwrap();
+        let mut websocket = server.socket().await;
+        let lines = tokio::time::timeout(PATIENCE, server::receive(&mut websocket, 2)).await;
+        assert_eq!(lines.expect("subscribed"), ["gzip on", line]);
+    }
+}
+
 #[tokio::test]
 async fn reconnect_attempts_back_off_exponentially() {
     // The first upgrade succeeds, the next three fail, the fifth succeeds.

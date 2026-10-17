@@ -471,9 +471,12 @@ pub fn WorldScreen(
                 viewer.set_camera(camera);
                 viewer.set_mode(map.mode.get_untracked());
             }
+            // A restored camera already on the room keeps its view. The default camera shows
+            // the whole world around its centre, which may be the room itself (`W5N5` of a
+            // `W10N10..W0N0` world): frame the room then too.
             if let Some(room) = opening.get_value()
                 && feed.bounds().contains(room)
-                && viewer.focused_room() != Some(room)
+                && (saved_camera.is_none() || viewer.focused_room() != Some(room))
             {
                 viewer.frame_room(room, false);
             }

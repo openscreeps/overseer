@@ -2,7 +2,7 @@
 
 use serde_json::{Map, Value};
 
-use super::merge::{self, Components, ref_name, shape};
+use super::merge::{self, Components, ObjectShape, ref_name, shape};
 use super::model::{Body, Model, Ty, description};
 use super::names;
 use crate::Error;
@@ -18,9 +18,10 @@ const METHODS: &[&str] = &[
 /// How a reply body is read; mirrors `overseer_core::api::Format`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
-    /// JSON with the `ok`/`error` envelope.
+    /// JSON with the `ok`/`error` envelope: every server's success reply carries `ok`.
     Envelope,
-    /// A bare JSON document.
+    /// A bare JSON document, also a reply of the envelope's shape without `ok` from some
+    /// server.
     Json,
     /// Text such as SVG.
     Text,
@@ -223,6 +224,30 @@ fn without_api_error(schema: &Value) -> Option<Value> {
     Some(Value::Object(map))
 }
 
+/// Whether every success reply `schema` (resolved against `components`) describes requires
+/// `ok`: an object requiring it, or a union whose every member but `null` (a reply without an
+/// envelope, read as an absent body) does.
+fn requires_ok(schema: &Value, components: &Components) -> bool {
+    if let Some(target) = schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(ref_name)
+        && let Some(target) = components.get(target)
+        && target.get("anyOf").is_some()
+    {
+        return requires_ok(target, components);
+    }
+    if let Some(members) = schema.get("anyOf").and_then(Value::as_array) {
+        let is_null = |member: &Value| member.get("type").and_then(Value::as_str) == Some("null");
+        return members
+            .iter()
+            .filter(|member| !is_null(member))
+            .all(|member| requires_ok(member, components));
+    }
+    ObjectShape::of(schema, components)
+        .is_some_and(|shape| shape.required.iter().any(|name| name == "ok"))
+}
+
 /// Maps the security requirement alternatives.
 fn auth(operation: &Value) -> Result<Auth, Error> {
     let security = operation
@@ -343,6 +368,11 @@ fn build(
             ));
         }
     }
+    // An `{ok}` envelope is demanded only where every server's success reply carries `ok`.
+    let format = match (format, &response) {
+        (Format::Envelope, Some(schema)) if !requires_ok(schema, &model.components) => Format::Json,
+        (format, _) => format,
+    };
     let mut params = Vec::new();
     for param in document.params(operation).map_err(context)? {
         params.push(lower_param(model, &name, param).map_err(context)?);
@@ -567,13 +597,8 @@ mod tests {
                     Format::Json,
                     false
                 ),
-                (
-                    "GameTick",
-                    "api/game/tick",
-                    Auth::None,
-                    Format::Envelope,
-                    true
-                ),
+                // Its `{error}`-or-reply schema documents no `ok`: no envelope is demanded.
+                ("GameTick", "api/game/tick", Auth::None, Format::Json, true),
             ]
         );
         let history = &operations[3];

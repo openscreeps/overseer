@@ -3,7 +3,7 @@
 // raw JSON) and the selection shared with the map and the room preview both ways.
 
 import type { Page } from '@playwright/test';
-import { expect, Session, test, type Player, type Server } from './fixtures';
+import { api, expect, Session, test, type Player, type Server } from './fixtures';
 import {
   clickTile,
   inspectedTile,
@@ -40,6 +40,27 @@ async function openObjects(page: Page, path: string, room: string) {
 async function deploy(server: Server, player: Player, main: string) {
   const session = await Session.signIn(server.url, player.username, player.password);
   await session.call('api/user/code', { modules: { main } });
+}
+
+/**
+ * Waits until both creeps of the player's bot are out of the spawn. A creep being spawned is a
+ * room object already, on the spawn's tile (`spawning: true`), that cannot act yet (`suicide`
+ * answers `ERR_BUSY`): the community server lists it in the room from its first tick, so a
+ * click on the spawn's tile may pick it and a picked creep may not obey.
+ */
+async function creepsOut(server: Server, player: Player) {
+  await expect
+    .poll(
+      async () => {
+        const { body } = await api<{
+          objects: { type: string; user?: string; spawning?: boolean }[];
+        }>(server.url, `api/game/room-objects?room=${player.room}`);
+        const creeps = body.objects.filter((o) => o.type === 'creep' && o.user === player.id);
+        return creeps.length === 2 && creeps.every((creep) => !creep.spawning);
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
 }
 
 test.describe('objects', () => {
@@ -246,9 +267,11 @@ test.describe('objects', () => {
   test.describe('in the player’s room', { tag: '@openscreeps' }, () => {
     test('lists the player’s objects first and follows a walking creep', async ({
       signedInPage: page,
+      server,
       home,
       player,
     }) => {
+      await creepsOut(server, player);
       await openRoom(page, home.path, home.room);
       // A click on the spawn in the room preview selects it on the Objects tab and the map.
       await clickTile(page, 'room-control', home.room, player.spawn.x, player.spawn.y);
@@ -358,6 +381,7 @@ test.describe('objects', () => {
       home,
       player,
     }) => {
+      await creepsOut(server, player);
       await openObjects(page, home.path, home.room);
       const list = objectList(page);
       // A walking creep: its row's position changes every tick.

@@ -7,8 +7,8 @@ import type { Request } from '@playwright/test';
 import { expect, SERVER_NAME, signIn, test } from './fixtures';
 import {
   accountMenu,
-  admin,
   alerts,
+  revokeSession,
   seed,
   sessionOf,
   storedToken,
@@ -186,18 +186,20 @@ test.describe('session', () => {
     await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
   });
 
-  test('a session revoked while open ends with the sign-in form', { tag: '@openscreeps' }, async ({
-    page,
-    server,
-    account,
-  }) => {
+  test('a session revoked while open ends with the sign-in form', {
+    tag: '@openscreeps',
+  }, async ({ page, server, account, target }) => {
     await signIn(page, server, account);
     const status = page.getByRole('contentinfo', { name: 'Status' });
     await expect(status).toContainText('Connected');
-    // A new password revokes every session of the account at once.
-    await admin(server, { action: 'user-update', username: account.username, password: 'revoked-1234' });
+    await revokeSession(page, server, account);
+    // OpenScreeps closes the account's sockets at once, and the reconnecting socket's token is
+    // refused. A community server keeps the socket open: the app finds out with its next refresh
+    // of the token (`auth/me`), at most 25 seconds after its latest token.
     const form = page.getByRole('region', { name: `Sign in to ${SERVER_NAME}` });
-    await expect(alerts(form)).toHaveText('Your session has expired. Sign in again.');
+    await expect(alerts(form)).toHaveText('Your session has expired. Sign in again.', {
+      timeout: target === 'community' ? 40_000 : undefined,
+    });
     await expect(form.getByLabel('Username or e-mail')).toHaveValue(account.username);
     await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
     await expect(status).toContainText('Not connected');

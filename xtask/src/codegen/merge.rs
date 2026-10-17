@@ -4,9 +4,10 @@
 //! only one side sends, a property of another type, or a response of another shape. Generated
 //! types must deserialize replies from both kinds of server, so where the documents differ the
 //! merged schema accepts either: objects merge into one object whose properties are the union
-//! (required only when both sides require them), unions of references merge into the union of
-//! the references, unions of as many members merge member by member, and anything else becomes
-//! an `anyOf` of both.
+//! (required only when both sides require them), arrays merge into one array of the merged
+//! items, schemas of nothing but a `type` merge into the union of their types, unions of
+//! references merge into the union of the references, unions of as many members merge member
+//! by member, and anything else becomes an `anyOf` of both.
 
 use serde_json::{Map, Value, json};
 
@@ -67,6 +68,12 @@ pub fn merge(a: &Value, b: &Value, ca: &Components, cb: &Components) -> Value {
         }
         return merged;
     }
+    if let Some(merged) = merge_arrays(a, b, ca, cb) {
+        return merged;
+    }
+    if let Some(merged) = merge_types(a, b) {
+        return merged;
+    }
     if let Some(merged) = merge_unions(a, b, ca, cb) {
         return merged;
     }
@@ -88,6 +95,63 @@ pub fn merge(a: &Value, b: &Value, ca: &Components, cb: &Components) -> Value {
     }
     merged.insert("anyOf".to_owned(), Value::Array(variants));
     Value::Object(merged)
+}
+
+/// Two arrays that differ only in their items merged into one array whose items accept both
+/// sides' items, documented by `a`, else by `b`. `None` for other pairs.
+fn merge_arrays(a: &Value, b: &Value, ca: &Components, cb: &Components) -> Option<Value> {
+    let is_array = |schema: &Value| schema.get("type").and_then(Value::as_str) == Some("array");
+    if !is_array(a) || !is_array(b) {
+        return None;
+    }
+    let (left, right) = (a.get("items")?, b.get("items")?);
+    let without_items = |schema: &Value| {
+        let mut rest = shape(schema);
+        rest.as_object_mut()?.remove("items");
+        Some(rest)
+    };
+    if without_items(a)? != without_items(b)? {
+        return None;
+    }
+    let mut merged = a.clone();
+    merged["items"] = merge(left, right, ca, cb);
+    if a.get("description").is_none()
+        && let Some(description) = b.get("description")
+    {
+        merged["description"] = description.clone();
+    }
+    Some(merged)
+}
+
+/// Two schemas constraining nothing but `type` (a name or a list of names) merged into one
+/// whose `type` lists both sides' types, documented by `a`, else by `b`. `None` for other pairs.
+fn merge_types(a: &Value, b: &Value) -> Option<Value> {
+    let types = |schema: &Value| -> Option<Vec<Value>> {
+        let shape = shape(schema);
+        let map = shape.as_object()?;
+        if map.len() != 1 {
+            return None;
+        }
+        match map.get("type")? {
+            name @ Value::String(_) => Some(vec![name.clone()]),
+            Value::Array(names) if names.iter().all(Value::is_string) => Some(names.clone()),
+            _ => None,
+        }
+    };
+    let mut union = types(a)?;
+    for name in types(b)? {
+        if !union.contains(&name) {
+            union.push(name);
+        }
+    }
+    let mut merged = a.clone();
+    merged["type"] = Value::Array(union);
+    if a.get("description").is_none()
+        && let Some(description) = b.get("description")
+    {
+        merged["description"] = description.clone();
+    }
+    Some(merged)
 }
 
 /// The `oneOf`/`anyOf` keyword and members of a union schema.
@@ -336,6 +400,38 @@ mod tests {
         );
         assert_eq!(merged["oneOf"].as_array().unwrap().len(), 2);
         assert_eq!(merged["oneOf"][0]["required"], json!(["messages"]));
+    }
+
+    #[test]
+    fn arrays_merge_their_items_and_bare_types_their_type_lists() {
+        let empty = Map::new();
+        // The standalone profile lets shard lists hold `null` (an unset `shardName`).
+        let merged = merge(
+            &json!({"type": "array", "items": {"type": "string"}}),
+            &json!({"type": "array", "items": {"type": ["string", "null"]}, "description": "Names."}),
+            &empty,
+            &empty,
+        );
+        assert_eq!(
+            merged,
+            json!({"type": "array", "items": {"type": ["string", "null"]}, "description": "Names."})
+        );
+        // Other array constraints differ: no single array accepts both.
+        let merged = merge(
+            &json!({"type": "array", "items": {"type": "string"}, "maxItems": 1}),
+            &json!({"type": "array", "items": {"type": "integer"}}),
+            &empty,
+            &empty,
+        );
+        assert_eq!(merged["anyOf"].as_array().unwrap().len(), 2);
+        // A constrained type is not a bare type.
+        let merged = merge(
+            &json!({"type": "integer", "minimum": 0}),
+            &json!({"type": "string"}),
+            &empty,
+            &empty,
+        );
+        assert_eq!(merged["anyOf"].as_array().unwrap().len(), 2);
     }
 
     #[test]
