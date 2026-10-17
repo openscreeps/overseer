@@ -4,30 +4,29 @@
 //! and visible rooms first, the rest of the world in the background; live rooms show their
 //! portals directly.
 
+mod fetch;
+mod learn;
+
 use std::cell::Cell;
 
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use overseer_net::api::WorldOperation;
+use overseer_net::Error as NetError;
 use overseer_net::core::api::ApiError;
 use overseer_net::core::socket::{Channel, Payload};
 use overseer_net::model::world::RoomMap;
-use overseer_net::rt::{self, BoxFuture, Instant};
-use overseer_net::{Client, Error as NetError};
+use overseer_net::rt::{BoxFuture, Instant};
 
-use super::focus::{Budget, Focus, Server, Tier, distance};
+use super::focus::{Budget, Focus, Server, Tier};
 use super::stats::epoch_millis;
 use super::terrain::{Terrains, reset_at};
 use super::{HELD_ROOM_MAPS, MINIMAP_CAP, WorldEvent};
 use crate::map::portal::portals_of;
-use crate::map::{
-    Map, Portal, PortalDestination, RoomCoord, RoomRect, WorldKnowledge, may_have_portals,
-};
+use crate::map::{Map, Portal, RoomCoord, RoomRect, WorldKnowledge, may_have_portals};
 use crate::{Closed, Error, Overseer, RoomSnapshot, Watch};
 
 /// How long the portals of a room (or their absence) are used before the room is scanned
@@ -520,152 +519,6 @@ impl Portals {
         due.0
     }
 
-    /// Requests the destinations of rooms with portals, up to [`PORTAL_IN_FLIGHT`] at once,
-    /// as far as the request `budget` allows: first the viewed rooms and the rooms whose
-    /// destinations are wanted now ([`Self::set_wanted`]), in their order, at the viewed
-    /// priority; then the others at the background priority, up to
-    /// [`PORTAL_BACKGROUND_IN_FLIGHT`] in flight, those whose fetch tells the most
-    /// portal tiles not known otherwise first, nearest the centre first. The others wait
-    /// while scans of rooms where portals usually stand are in flight, at most
-    /// [`PORTAL_SCAN_SETTLE`], and while a room with the same shape of portal tiles is being
-    /// fetched (they may be partners, told by that fetch). A room whose fetch failed waits
-    /// for its retry.
-    fn fetch(
-        &mut self,
-        map: &Map,
-        shard: Option<&str>,
-        (now, millis, focus): (Instant, u64, &Focus),
-        budget: &mut Budget<'_>,
-        due: &mut Due,
-    ) {
-        let mut waiting = Due::default();
-        let available = |portals: &Self, room: RoomCoord, waiting: &mut Due| {
-            if !portals.found.contains(&room)
-                || portals.fetches.iter().any(|fetch| fetch.room == room)
-            {
-                return false;
-            }
-            match portals.failed.get(&room) {
-                Some(failure) if failure.until > now => {
-                    waiting.at(failure.until);
-                    false
-                }
-                _ => true,
-            }
-        };
-        let mut urgent = Vec::new();
-        for &room in focus.viewed().iter().chain(&self.wanted) {
-            if !urgent.contains(&room) && available(self, room, &mut waiting) {
-                urgent.push(room);
-            }
-        }
-        for &room in &urgent {
-            if self.fetches.len() >= PORTAL_IN_FLIGHT {
-                return;
-            }
-            if let Err(at) = budget.take(Tier::Viewed) {
-                due.at(at);
-                return;
-            }
-            self.start(map, shard, room, millis);
-        }
-        if self.fetches.len() >= PORTAL_IN_FLIGHT {
-            return;
-        }
-        if let Some(settled) = self
-            .scans
-            .iter()
-            .filter(|scan| scan.settled > now && may_have_portals(scan.room))
-            .map(|scan| scan.settled)
-            .min()
-        {
-            due.at(settled);
-            return;
-        }
-        let centre = focus.centre();
-        if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT || self.found.is_empty() {
-            return;
-        }
-        // Planning runs after every scan: the rooms waiting are ordered only when one of them
-        // may go out.
-        if let Some(at) = budget.ready_at(Tier::Background) {
-            due.at(at);
-            return;
-        }
-        let mut rest = self
-            .found
-            .iter()
-            .copied()
-            .filter(|room| !urgent.contains(room))
-            .collect::<Vec<_>>();
-        rest.retain(|&room| available(self, room, &mut waiting));
-        let mut rest = rest
-            .into_iter()
-            .map(|room| {
-                let key = (
-                    Reverse(self.untold(room)),
-                    distance(room, centre),
-                    room.y,
-                    room.x,
-                );
-                (key, room)
-            })
-            .collect::<Vec<_>>();
-        rest.sort_unstable();
-        let mut flying = self
-            .fetches
-            .iter()
-            .map(|fetch| self.shape(fetch.room))
-            .collect::<Vec<_>>();
-        for (_, room) in rest {
-            if self.fetches.len() >= PORTAL_BACKGROUND_IN_FLIGHT {
-                return;
-            }
-            let shape = self.shape(room);
-            if flying.contains(&shape) {
-                continue;
-            }
-            if let Err(at) = budget.take(Tier::Background) {
-                due.at(at);
-                return;
-            }
-            self.start(map, shard, room, millis);
-            flying.push(shape);
-        }
-        if let Some(at) = waiting.0 {
-            due.at(at);
-        }
-    }
-
-    /// Requests the destinations of `room` now.
-    fn start(&mut self, map: &Map, shard: Option<&str>, room: RoomCoord, millis: u64) {
-        let (map, shard, name) = (map.clone(), shard.map(str::to_owned), room.to_string());
-        let request = Box::pin(async move {
-            rt::timeout(PORTAL_FETCH_TIMEOUT, map.portals(&name, shard.as_deref()))
-                .await
-                .ok()
-        });
-        self.fetches.push(Fetch {
-            room,
-            sent_at: millis,
-            request,
-        });
-    }
-
-    /// The shape of the portal tiles of `room`'s map view: the tiles moved to the origin, in
-    /// order (paired clusters have the same shape).
-    fn shape(&self, room: RoomCoord) -> Vec<Tile> {
-        let tiles = self.tiles.get(&room).map_or(&[][..], Vec::as_slice);
-        let x = tiles.iter().map(|tile| tile.0).min().unwrap_or(0);
-        let y = tiles.iter().map(|tile| tile.1).min().unwrap_or(0);
-        let mut shape = tiles
-            .iter()
-            .map(|tile| (tile.0 - x, tile.1 - y))
-            .collect::<Vec<_>>();
-        shape.sort_unstable();
-        shape
-    }
-
     /// Releases the scans that timed out (scanned again after [`SCAN_RETRY`]) and forgets
     /// the retries that are due; adds the deadlines left to `due`.
     fn release_timed_out(&mut self, now: Instant, due: &mut Due) {
@@ -682,20 +535,6 @@ impl Portals {
             }
         }
         self.retry.retain(|_, at| *at > now);
-    }
-
-    /// The portal tiles of `room`'s map view that no known portal leads to.
-    fn untold(&self, room: RoomCoord) -> usize {
-        let tiles = self.tiles.get(&room).map_or(&[][..], Vec::as_slice);
-        let incoming = self.incoming.get(&room);
-        tiles
-            .iter()
-            .filter(|tile| {
-                incoming
-                    .and_then(|incoming| incoming.get(*tile))
-                    .is_none_or(|sources| sources.len() != 1)
-            })
-            .count()
     }
 
     /// Completes the scans that were answered (a room whose map view shows no portal is known
@@ -778,178 +617,9 @@ impl Portals {
             .is_some_and(|live_at| live_at >= since)
     }
 
-    /// A room's map view arrived. Without portals, the room has none. With portals, their
-    /// tiles are known at once and reported with pending destinations (the map draws them),
-    /// unless the known portals stand on the same tiles (their destinations stay shown until
-    /// fetched again); the destinations are wanted (unless its paired portals tell them).
-    fn scanned(&mut self, room: RoomCoord, view: &RoomMap, events: &mut VecDeque<WorldEvent>) {
-        let mut tiles = view
-            .p
-            .iter()
-            .flatten()
-            .filter_map(|&[x, y]| Some((u8::try_from(x).ok()?, u8::try_from(y).ok()?)))
-            .collect::<Vec<_>>();
-        if tiles.is_empty() {
-            self.tiles.remove(&room);
-            self.record(room, Vec::new(), None, events);
-            return;
-        }
-        tiles.sort_unstable_by_key(|&(x, y)| (y, x));
-        tiles.dedup();
-        let unchanged = self.knowledge.portals(room).is_some_and(|known| {
-            known
-                .iter()
-                .map(|portal| (portal.x, portal.y))
-                .eq(tiles.iter().copied())
-        });
-        self.tiles.insert(room, tiles.clone());
-        self.found.insert(room);
-        if !self.infer(room, events) && !unchanged {
-            let pending = tiles
-                .into_iter()
-                .map(|(x, y)| Portal::pending(room, x, y))
-                .collect();
-            self.record(room, pending, None, events);
-        }
-    }
-
-    /// Infers the portals of `room`, waiting for its destinations, when every portal tile of
-    /// its map view is the destination of a known portal of the shard: each leads back to the
-    /// portal that leads to it, unstable and decaying alike (screeps.com places portals in
-    /// such pairs). Returns whether it did.
-    fn infer(&mut self, room: RoomCoord, events: &mut VecDeque<WorldEvent>) -> bool {
-        if !self.found.contains(&room) {
-            return false;
-        }
-        let (Some(tiles), Some(incoming)) = (self.tiles.get(&room), self.incoming.get(&room))
-        else {
-            return false;
-        };
-        let Some(mut portals) = tiles
-            .iter()
-            .map(|tile| {
-                // Exactly one known portal lands on the tile: two would not be a pair.
-                let [source] = incoming.get(tile)?.as_slice() else {
-                    return None;
-                };
-                Some(Portal {
-                    room,
-                    x: tile.0,
-                    y: tile.1,
-                    destination: Some(PortalDestination {
-                        room: source.room,
-                        shard: None,
-                        x: Some(source.x),
-                        y: Some(source.y),
-                    }),
-                    expires_at: source.expires_at,
-                    decay_time: source.decay_time,
-                })
-            })
-            .collect::<Option<Vec<_>>>()
-        else {
-            return false;
-        };
-        portals.sort_unstable_by_key(|portal| (portal.y, portal.x));
-        self.found.remove(&room);
-        self.failed.remove(&room);
-        self.store(room, portals, None, true, events);
-        true
-    }
-
-    /// Stores the portals of `room` fetched or scanned now (shown by a live room at
-    /// `live_at`) and queues them; then infers the portals of the rooms they lead to.
-    fn record(
-        &mut self,
-        room: RoomCoord,
-        portals: Vec<Portal>,
-        live_at: Option<u64>,
-        events: &mut VecDeque<WorldEvent>,
-    ) {
-        if let Some(old) = self.knowledge.portals(room) {
-            for portal in old.iter() {
-                if let Some((to, tile)) = lands(portal)
-                    && let Some(sources) = self
-                        .incoming
-                        .get_mut(&to)
-                        .and_then(|incoming| incoming.get_mut(&tile))
-                {
-                    sources.retain(|from| from.room != room);
-                }
-            }
-        }
-        let mut targets = Vec::new();
-        for portal in &portals {
-            if let Some((to, tile)) = lands(portal) {
-                self.incoming
-                    .entry(to)
-                    .or_default()
-                    .entry(tile)
-                    .or_default()
-                    .push(portal.clone());
-                if !targets.contains(&to) {
-                    targets.push(to);
-                }
-            }
-        }
-        self.store(room, portals, live_at, false, events);
-        for target in targets {
-            self.infer(target, events);
-        }
-    }
-
-    /// Stores the portals of `room` learnt now and queues them.
-    fn store(
-        &mut self,
-        room: RoomCoord,
-        portals: Vec<Portal>,
-        live_at: Option<u64>,
-        inferred: bool,
-        events: &mut VecDeque<WorldEvent>,
-    ) {
-        let scanned_at = epoch_millis();
-        let portals = Arc::<[Portal]>::from(portals);
-        let stale_at = stale_at(room, &portals, scanned_at, Instant::now(), scanned_at);
-        let some = !portals.is_empty() || self.tiles.contains_key(&room);
-        let learnt = self
-            .known
-            .insert(
-                room,
-                Known {
-                    // A room whose map view shows portals though none came (a portal its
-                    // objects do not list) counts as having some, so its live minimap does not
-                    // ask again.
-                    some,
-                    inferred,
-                    scanned_at,
-                    live_at,
-                    stale_at,
-                },
-            )
-            .is_none();
-        self.check_at(stale_at);
-        if learnt {
-            self.learn(room);
-        }
-        self.knowledge.set_portals(room, Arc::clone(&portals));
-        events.push_back(WorldEvent::Portals(room, portals));
-    }
-
     /// Rebuilds the scan queue at `at` at the latest.
     fn check_at(&mut self, at: Instant) {
         self.next_check = Some(self.next_check.map_or(at, |next| next.min(at)));
-    }
-
-    /// When a room-objects request may go out: after a refusal and, when the endpoint's
-    /// latest limit has no request left, after its reset.
-    fn ready_at(&self, client: &Client, now: Instant) -> Instant {
-        let mut ready = self.not_before.unwrap_or(now);
-        if let Some(limit) = WorldOperation::RoomObjects.rate_limit(client)
-            && limit.remaining == 0
-        {
-            ready = ready.max(reset_at(limit.reset, now));
-        }
-        ready
     }
 }
 

@@ -8,26 +8,26 @@
 //! `GET /room-history`). The community contract lacks room decorations, the object lookup,
 //! the random novice room, room objects and room history (its stock server keeps none);
 //! screepsmod-admin-utils provides room objects and adapts the first spawn (a name is
-//! required). Operations of a [`Subsystem`] the server lacks fail with
-//! [`Error::Unsupported`] without a request.
+//! required). Operations of a [`Subsystem`](crate::model::platform::Subsystem) the server lacks
+//! fail with [`Error::Unsupported`] without a request.
+
+mod contracts;
+mod room_objects;
 
 use std::collections::BTreeMap;
-use std::future::{Ready, ready};
 
-use overseer_core::api::official::types::GameCoordinateInput;
-use overseer_core::api::plugins::screepsmod_admin_utils;
-use overseer_core::api::{ApiError, RateLimit, community, official, openscreeps};
-use overseer_core::model::platform::Subsystem;
-use overseer_core::model::world::PlatformHistory;
+use overseer_core::api::{RateLimit, official};
 use overseer_core::model::world::{
     FlagColor, GameAddObjectIntentRequestIntent, GameBuildableStructureType,
     GameRandomNoviceRoomResponse, GameRoomDecoration, GameRoomOverviewResponse, GameRoomStatus,
-    GameWorldSizeResponse, InvaderRequest, MapStats, RoomObjects, Terrain,
+    GameWorldSizeResponse, InvaderRequest, MapStats, Terrain,
 };
 use serde_json::Value;
 
-use super::{Api, Community, Official, OpenScreeps, ScreepsmodAdminUtils, delegate};
+use super::{Api, delegate};
 use crate::{Client, Error, RoomHistory};
+
+pub use room_objects::{RoomObjectsSource, RoomObjectsSourceApi};
 
 /// The world: terrain, rooms, the map and the actions on rooms. `shard` names the shard of the
 /// operation (`None`: the client's default shard); servers serving one world ignore it.
@@ -84,7 +84,7 @@ pub trait WorldApi {
     ) -> impl Future<Output = Result<GameRoomOverviewResponse, Error>>;
 
     /// The decorations players activated in `room` (`GET /api/game/room-decorations`;
-    /// [`Subsystem::RoomDecorations`]).
+    /// [`Subsystem::RoomDecorations`](crate::model::platform::Subsystem::RoomDecorations)).
     ///
     /// # Errors
     ///
@@ -129,18 +129,19 @@ pub trait WorldApi {
     fn game_time(&self, shard: Option<&str>) -> impl Future<Output = Result<u64, Error>>;
 
     /// The room-history chunk of `room` that holds `tick`, ready to
-    /// [replay](RoomHistory::replay) ([`Subsystem::RoomHistory`]). Chunks start at multiples
-    /// of [`World::history_chunk_size`](crate::World::history_chunk_size); screeps.com serves
-    /// them as static files (`GET /room-history/{shard}/{room}/{tick}.json`), `OpenScreeps`
-    /// through `GET /room-history?room&time`.
+    /// [replay](RoomHistory::replay)
+    /// ([`Subsystem::RoomHistory`](crate::model::platform::Subsystem::RoomHistory)). Chunks
+    /// start at multiples of [`World::history_chunk_size`](crate::World::history_chunk_size);
+    /// screeps.com serves them as static files (`GET /room-history/{shard}/{room}/{tick}.json`),
+    /// `OpenScreeps` through `GET /room-history?room&time`.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`]: a chunk that is not kept yields an HTTP 404
-    /// [`ApiError::Status`]; [`Error::Unsupported`] on servers without room history (the
-    /// stock community server answers every chunk with HTTP 500 `not implemented`), and
-    /// [`Error::UnexpectedReply`] for a chunk whose ticks are not numbers or a sharded server
-    /// listing no shard.
+    /// [`ApiError::Status`](overseer_core::api::ApiError::Status); [`Error::Unsupported`] on
+    /// servers without room history (the stock community server answers every chunk with HTTP
+    /// 500 `not implemented`), and [`Error::UnexpectedReply`] for a chunk whose ticks are not
+    /// numbers or a sharded server listing no shard.
     fn room_history(
         &self,
         shard: Option<&str>,
@@ -149,7 +150,7 @@ pub trait WorldApi {
     ) -> impl Future<Output = Result<RoomHistory, Error>>;
 
     /// The room of the object `id`, when it exists (`GET /api/game/find-object`;
-    /// [`Subsystem::ObjectSearch`]).
+    /// [`Subsystem::ObjectSearch`](crate::model::platform::Subsystem::ObjectSearch)).
     ///
     /// # Errors
     ///
@@ -158,7 +159,7 @@ pub trait WorldApi {
     fn find_object(&self, id: &str) -> impl Future<Output = Result<Option<String>, Error>>;
 
     /// A random room of a novice area to start in (`GET /api/game/random-novice-room`;
-    /// [`Subsystem::NoviceRooms`]).
+    /// [`Subsystem::NoviceRooms`](crate::model::platform::Subsystem::NoviceRooms)).
     ///
     /// # Errors
     ///
@@ -524,687 +525,6 @@ impl WorldApi for Api {
     }
 }
 
-impl Official {
-    /// The shard an operation names: `shard`, else the client's default shard.
-    async fn world_shard(&self, shard: Option<&str>) -> Result<Option<String>, Error> {
-        self.client.resolve_shard(shard).await
-    }
-}
-
-impl OpenScreeps {
-    /// No shard: an `OpenScreeps` server serves one world.
-    #[expect(
-        clippy::unused_self,
-        reason = "the shared operations ask every contract's API for the shard alike"
-    )]
-    fn world_shard(&self, _shard: Option<&str>) -> Ready<Result<Option<String>, Error>> {
-        ready(Ok(None))
-    }
-}
-
-impl Community {
-    /// No shard: a community server serves one world.
-    #[expect(
-        clippy::unused_self,
-        reason = "the shared operations ask every contract's API for the shard alike"
-    )]
-    fn world_shard(&self, _shard: Option<&str>) -> Ready<Result<Option<String>, Error>> {
-        ready(Ok(None))
-    }
-}
-
-/// A room coordinate as requests take it.
-fn coordinate(value: u8) -> GameCoordinateInput {
-    GameCoordinateInput::Integer(value.into())
-}
-
-/// A name check's reply: `name exists` is a taken name, not a failure.
-fn name_free<T>(reply: Result<T, Error>) -> Result<bool, Error> {
-    match reply {
-        Ok(_) => Ok(true),
-        Err(Error::Api(ApiError::Server(message))) if message == "name exists" => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-/// The chunk of `room` that holds `tick`, which starts at `tick` rounded down to `chunk_size`.
-const fn chunk_base(tick: u64, chunk_size: u64) -> u64 {
-    if chunk_size == 0 {
-        tick
-    } else {
-        tick - tick % chunk_size
-    }
-}
-
-/// The operations whose request and reply types every contract shares, for the impl of
-/// `$contract` (`official`, `openscreeps` or `community`): items of an `impl WorldApi`.
-macro_rules! shared_operations {
-    ($contract:ident) => {
-        async fn room_terrain(&self, shard: Option<&str>, room: &str) -> Result<Terrain, Error> {
-            let terrain = $contract::endpoints::GameRoomTerrain {
-                room: room.to_owned(),
-                encoded: Some("1".to_owned()),
-                shard: self.world_shard(shard).await?,
-            };
-            Ok(Terrain::try_from(self.client.send(&terrain).await?.body)?)
-        }
-
-        async fn terrains(
-            &self,
-            shard: Option<&str>,
-            rooms: Vec<String>,
-        ) -> Result<Vec<(String, Terrain)>, Error> {
-            let request = $contract::endpoints::GameRooms {
-                shard: self.world_shard(shard).await?,
-                body: $contract::types::GameRoomsRequest { rooms },
-            };
-            let documents = self.client.send(&request).await?.body.rooms;
-            documents
-                .into_iter()
-                .map(|document| {
-                    let terrain = Terrain::try_from(&document)?;
-                    Ok((document.room, terrain))
-                })
-                .collect()
-        }
-
-        async fn room_status(
-            &self,
-            shard: Option<&str>,
-            room: &str,
-        ) -> Result<GameRoomStatus, Error> {
-            let status = $contract::endpoints::GameRoomStatus {
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
-            };
-            Ok(self.client.send(&status).await?.body.room)
-        }
-
-        async fn room_overview(
-            &self,
-            shard: Option<&str>,
-            room: &str,
-            interval: u64,
-        ) -> Result<GameRoomOverviewResponse, Error> {
-            let overview = $contract::endpoints::GameRoomOverview {
-                room: room.to_owned(),
-                interval: Some(interval),
-                shard: self.world_shard(shard).await?,
-            };
-            Ok(self.client.send(&overview).await?.body)
-        }
-
-        async fn map_stats(
-            &self,
-            shard: Option<&str>,
-            rooms: Vec<String>,
-            stat_name: &str,
-        ) -> Result<MapStats, Error> {
-            let body = $contract::types::GameMapStatsRequest {
-                rooms,
-                shard: self.world_shard(shard).await?,
-                stat_name: stat_name.to_owned(),
-            };
-            let stats = $contract::endpoints::GameMapStats { body };
-            Ok(self.client.send(&stats).await?.body.into())
-        }
-
-        async fn world_size(&self, shard: Option<&str>) -> Result<GameWorldSizeResponse, Error> {
-            let size = $contract::endpoints::GameWorldSize {
-                shard: self.world_shard(shard).await?,
-            };
-            Ok(self.client.send(&size).await?.body)
-        }
-
-        async fn game_time(&self, shard: Option<&str>) -> Result<u64, Error> {
-            let time = $contract::endpoints::GameTime {
-                shard: self.world_shard(shard).await?,
-            };
-            let time = self.client.send(&time).await?.body.time;
-            u64::try_from(time).map_err(|_| Error::UnexpectedReply("negative game tick"))
-        }
-
-        async fn create_flag(
-            &self,
-            shard: Option<&str>,
-            room: &str,
-            (x, y): (u8, u8),
-            name: &str,
-            colors: (FlagColor, FlagColor),
-        ) -> Result<(), Error> {
-            let body = $contract::types::GameCreateFlagRequest {
-                color: colors.0.code().into(),
-                name: name.to_owned(),
-                room: room.to_owned(),
-                secondary_color: colors.1.code().into(),
-                shard: self.world_shard(shard).await?,
-                x: x.into(),
-                y: y.into(),
-            };
-            self.client
-                .send(&$contract::endpoints::GameCreateFlag { body })
-                .await?;
-            Ok(())
-        }
-
-        async fn change_flag_colors(
-            &self,
-            shard: Option<&str>,
-            room: &str,
-            name: &str,
-            colors: (FlagColor, FlagColor),
-        ) -> Result<(), Error> {
-            let body = $contract::types::GameChangeFlagColorRequest {
-                color: colors.0.code().into(),
-                name: name.to_owned(),
-                room: Some(room.to_owned()),
-                secondary_color: colors.1.code().into(),
-                shard: self.world_shard(shard).await?,
-            };
-            self.client
-                .send(&$contract::endpoints::GameChangeFlagColor { body })
-                .await?;
-            Ok(())
-        }
-
-        async fn remove_flag(
-            &self,
-            shard: Option<&str>,
-            room: &str,
-            name: &str,
-        ) -> Result<(), Error> {
-            let body = $contract::types::GameRemoveFlagRequest {
-                name: name.to_owned(),
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
-            };
-            self.client
-                .send(&$contract::endpoints::GameRemoveFlag { body })
-                .await?;
-            Ok(())
-        }
-
-        async fn unique_flag_name(&self, shard: Option<&str>) -> Result<String, Error> {
-            let body = $contract::types::GameShardOnlyRequest {
-                shard: self.world_shard(shard).await?,
-            };
-            let request = $contract::endpoints::GameGenUniqueFlagName { body };
-            Ok(self.client.send(&request).await?.body.name)
-        }
-
-        async fn is_flag_name_free(&self, shard: Option<&str>, name: &str) -> Result<bool, Error> {
-            let body = $contract::types::GameCheckUniqueFlagNameRequest {
-                name: name.to_owned(),
-                shard: self.world_shard(shard).await?,
-            };
-            let request = $contract::endpoints::GameCheckUniqueFlagName { body };
-            name_free(self.client.send(&request).await)
-        }
-
-        async fn unique_spawn_name(&self, shard: Option<&str>) -> Result<String, Error> {
-            let body = $contract::types::GameGenUniqueObjectNameRequest {
-                shard: self.world_shard(shard).await?,
-                r#type: $contract::types::GameGenUniqueObjectNameRequestType::Spawn,
-            };
-            let request = $contract::endpoints::GameGenUniqueObjectName { body };
-            Ok(self.client.send(&request).await?.body.name)
-        }
-
-        async fn is_spawn_name_free(&self, shard: Option<&str>, name: &str) -> Result<bool, Error> {
-            let body = $contract::types::GameCheckUniqueObjectNameRequest {
-                name: name.to_owned(),
-                shard: self.world_shard(shard).await?,
-                r#type: $contract::types::GameCheckUniqueObjectNameRequestType::Spawn,
-            };
-            let request = $contract::endpoints::GameCheckUniqueObjectName { body };
-            name_free(self.client.send(&request).await)
-        }
-
-        async fn create_construction_site(
-            &self,
-            shard: Option<&str>,
-            room: &str,
-            (x, y): (u8, u8),
-            structure: GameBuildableStructureType,
-            name: Option<&str>,
-        ) -> Result<Option<String>, Error> {
-            let body = $contract::types::GameCreateConstructionRequest {
-                name: name.map(str::to_owned),
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
-                structure_type: structure,
-                x: coordinate(x),
-                y: coordinate(y),
-            };
-            let request = $contract::endpoints::GameCreateConstruction { body };
-            Ok(self.client.send(&request).await?.body.id)
-        }
-
-        async fn set_notify_when_attacked(
-            &self,
-            shard: Option<&str>,
-            id: &str,
-            enabled: bool,
-        ) -> Result<(), Error> {
-            let body = $contract::types::GameSetNotifyWhenAttackedRequest {
-                id: id.to_owned(),
-                enabled: Some(enabled),
-                shard: self.world_shard(shard).await?,
-            };
-            self.client
-                .send(&$contract::endpoints::GameSetNotifyWhenAttacked { body })
-                .await?;
-            Ok(())
-        }
-
-        async fn add_object_intent(
-            &self,
-            shard: Option<&str>,
-            (room, target): (&str, &str),
-            name: &str,
-            intent: GameAddObjectIntentRequestIntent,
-        ) -> Result<(), Error> {
-            let body = $contract::types::GameAddObjectIntentRequest {
-                id: target.to_owned(),
-                intent: Some(intent),
-                name: name.to_owned(),
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
-            };
-            self.client
-                .send(&$contract::endpoints::GameAddObjectIntent { body })
-                .await?;
-            Ok(())
-        }
-
-        async fn add_global_intent(
-            &self,
-            shard: Option<&str>,
-            name: &str,
-            intent: BTreeMap<String, Value>,
-        ) -> Result<(), Error> {
-            let body = $contract::types::GameAddGlobalIntentRequest {
-                intent: Some(intent),
-                name: name.to_owned(),
-                shard: self.world_shard(shard).await?,
-            };
-            self.client
-                .send(&$contract::endpoints::GameAddGlobalIntent { body })
-                .await?;
-            Ok(())
-        }
-
-        async fn remove_invader(&self, shard: Option<&str>, id: &str) -> Result<(), Error> {
-            let body = $contract::types::GameRemoveInvaderRequest {
-                id: id.to_owned(),
-                shard: self.world_shard(shard).await?,
-            };
-            self.client
-                .send(&$contract::endpoints::GameRemoveInvader { body })
-                .await?;
-            Ok(())
-        }
-    };
-}
-
-/// The request of `POST /api/game/create-invader`, shared by every contract.
-fn invader_body(
-    request: &InvaderRequest,
-    shard: Option<String>,
-) -> official::types::GameCreateInvaderRequest {
-    official::types::GameCreateInvaderRequest {
-        boosted: Some(request.boosted),
-        room: request.room.clone(),
-        shard,
-        size: request.size,
-        r#type: request.kind,
-        x: coordinate(request.x),
-        y: coordinate(request.y),
-    }
-}
-
-/// The request of `POST /api/game/place-spawn` of the official and the community contract.
-fn place_spawn_body(
-    room: &str,
-    (x, y): (u8, u8),
-    name: Option<&str>,
-    shard: Option<String>,
-) -> official::types::GamePlaceSpawnRequest {
-    official::types::GamePlaceSpawnRequest {
-        name: name.map(str::to_owned),
-        room: room.to_owned(),
-        shard,
-        x: coordinate(x),
-        y: coordinate(y),
-    }
-}
-
-impl WorldApi for Official {
-    shared_operations!(official);
-
-    async fn room_decorations(
-        &self,
-        shard: Option<&str>,
-        room: &str,
-    ) -> Result<Vec<GameRoomDecoration>, Error> {
-        let decorations = official::endpoints::GameRoomDecorations {
-            room: room.to_owned(),
-            shard: self.world_shard(shard).await?,
-        };
-        Ok(self.client.send(&decorations).await?.body.decorations)
-    }
-
-    async fn room_history(
-        &self,
-        shard: Option<&str>,
-        room: &str,
-        tick: u64,
-    ) -> Result<RoomHistory, Error> {
-        let world = self.client.world().await?;
-        let shard = world
-            .resolve_shard(shard)
-            .ok_or(Error::UnexpectedReply("a sharded server listing no shard"))?;
-        let chunk = official::endpoints::PlatformOfficialRoomHistory {
-            shard,
-            room: room.to_owned(),
-            tick: chunk_base(tick, world.history_chunk_size()),
-        };
-        let chunk: PlatformHistory = self.client.send(&chunk).await?.body;
-        RoomHistory::new(chunk, room.to_owned())
-    }
-
-    async fn find_object(&self, id: &str) -> Result<Option<String>, Error> {
-        let find = official::endpoints::GameFindObject { id: id.to_owned() };
-        let reply = self.client.send(&find).await?.body;
-        Ok(reply.object.and_then(|object| object.room))
-    }
-
-    async fn random_novice_room(
-        &self,
-        shard: Option<&str>,
-    ) -> Result<GameRandomNoviceRoomResponse, Error> {
-        let random = official::endpoints::GameRandomNoviceRoom {
-            shard: self.world_shard(shard).await?,
-        };
-        Ok(self.client.send(&random).await?.body)
-    }
-
-    async fn place_spawn(
-        &self,
-        shard: Option<&str>,
-        room: &str,
-        at: (u8, u8),
-        name: Option<&str>,
-    ) -> Result<(), Error> {
-        let body = place_spawn_body(room, at, name, self.world_shard(shard).await?);
-        self.client
-            .send(&official::endpoints::GamePlaceSpawn { body })
-            .await?;
-        Ok(())
-    }
-
-    async fn create_invader(
-        &self,
-        shard: Option<&str>,
-        request: &InvaderRequest,
-    ) -> Result<Option<String>, Error> {
-        let body = invader_body(request, self.world_shard(shard).await?);
-        self.client
-            .send(&official::endpoints::GameCreateInvader { body })
-            .await?;
-        Ok(None)
-    }
-}
-
-impl WorldApi for OpenScreeps {
-    shared_operations!(openscreeps);
-
-    async fn room_decorations(
-        &self,
-        shard: Option<&str>,
-        room: &str,
-    ) -> Result<Vec<GameRoomDecoration>, Error> {
-        let decorations = openscreeps::endpoints::GameRoomDecorations {
-            room: room.to_owned(),
-            shard: self.world_shard(shard).await?,
-        };
-        Ok(self.client.send(&decorations).await?.body.decorations)
-    }
-
-    async fn room_history(
-        &self,
-        _shard: Option<&str>,
-        room: &str,
-        tick: u64,
-    ) -> Result<RoomHistory, Error> {
-        let world = self.client.world().await?;
-        let chunk = openscreeps::endpoints::PlatformRoomHistory {
-            room: room.to_owned(),
-            time: chunk_base(tick, world.history_chunk_size()),
-        };
-        let chunk: PlatformHistory = self.client.send(&chunk).await?.body;
-        RoomHistory::new(chunk, room.to_owned())
-    }
-
-    async fn find_object(&self, id: &str) -> Result<Option<String>, Error> {
-        let find = openscreeps::endpoints::GameFindObject { id: id.to_owned() };
-        let reply = self.client.send(&find).await?.body;
-        Ok(reply.object.and_then(|object| object.room))
-    }
-
-    async fn random_novice_room(
-        &self,
-        _shard: Option<&str>,
-    ) -> Result<GameRandomNoviceRoomResponse, Error> {
-        let random = openscreeps::endpoints::GameRandomNoviceRoom { shard: None };
-        Ok(self.client.send(&random).await?.body)
-    }
-
-    async fn place_spawn(
-        &self,
-        _shard: Option<&str>,
-        room: &str,
-        at: (u8, u8),
-        name: Option<&str>,
-    ) -> Result<(), Error> {
-        let body = place_spawn_body(room, at, name, None);
-        self.client
-            .send(&openscreeps::endpoints::GamePlaceSpawn { body })
-            .await?;
-        Ok(())
-    }
-
-    async fn create_invader(
-        &self,
-        _shard: Option<&str>,
-        request: &InvaderRequest,
-    ) -> Result<Option<String>, Error> {
-        let body = invader_body(request, None);
-        let reply = self
-            .client
-            .send(&openscreeps::endpoints::GameCreateInvader { body })
-            .await?;
-        Ok(Some(reply.body.id))
-    }
-}
-
-impl WorldApi for Community {
-    shared_operations!(community);
-
-    fn room_decorations(
-        &self,
-        _shard: Option<&str>,
-        _room: &str,
-    ) -> impl Future<Output = Result<Vec<GameRoomDecoration>, Error>> {
-        ready(Err(Error::Unsupported(Subsystem::RoomDecorations)))
-    }
-
-    async fn room_history(
-        &self,
-        _shard: Option<&str>,
-        room: &str,
-        tick: u64,
-    ) -> Result<RoomHistory, Error> {
-        if !self.plugins.room_history {
-            return Err(Error::Unsupported(Subsystem::RoomHistory));
-        }
-        let world = self.client.world().await?;
-        let chunk = community::endpoints::PlatformRoomHistory {
-            room: room.to_owned(),
-            time: chunk_base(tick, world.history_chunk_size()),
-        };
-        let chunk: PlatformHistory = self.client.send(&chunk).await?.body;
-        RoomHistory::new(chunk, room.to_owned())
-    }
-
-    fn find_object(&self, _id: &str) -> impl Future<Output = Result<Option<String>, Error>> {
-        ready(Err(Error::Unsupported(Subsystem::ObjectSearch)))
-    }
-
-    fn random_novice_room(
-        &self,
-        _shard: Option<&str>,
-    ) -> impl Future<Output = Result<GameRandomNoviceRoomResponse, Error>> {
-        ready(Err(Error::Unsupported(Subsystem::NoviceRooms)))
-    }
-
-    async fn place_spawn(
-        &self,
-        shard: Option<&str>,
-        room: &str,
-        at: (u8, u8),
-        name: Option<&str>,
-    ) -> Result<(), Error> {
-        if let Some(admin_utils) = self.screepsmod_admin_utils() {
-            let name = match name {
-                Some(name) => name.to_owned(),
-                None => self.unique_spawn_name(shard).await?,
-            };
-            return admin_utils.place_spawn(room, at, name).await;
-        }
-        let body = place_spawn_body(room, at, name, None);
-        self.client
-            .send(&community::endpoints::GamePlaceSpawn { body })
-            .await?;
-        Ok(())
-    }
-
-    async fn create_invader(
-        &self,
-        _shard: Option<&str>,
-        request: &InvaderRequest,
-    ) -> Result<Option<String>, Error> {
-        let body = invader_body(request, None);
-        self.client
-            .send(&community::endpoints::GameCreateInvader { body })
-            .await?;
-        Ok(None)
-    }
-}
-
-impl ScreepsmodAdminUtils<'_> {
-    /// screepsmod-admin-utils' first spawn: always named.
-    async fn place_spawn(&self, room: &str, (x, y): (u8, u8), name: String) -> Result<(), Error> {
-        let body = screepsmod_admin_utils::types::GamePlaceSpawnRequest {
-            name,
-            room: room.to_owned(),
-            shard: None,
-            x: Some(coordinate(x)),
-            y: Some(coordinate(y)),
-        };
-        self.client
-            .send(&screepsmod_admin_utils::endpoints::GamePlaceSpawn { body })
-            .await?;
-        Ok(())
-    }
-}
-
-/// Every object of a room with the users they reference (`GET /api/game/room-objects`;
-/// [`Subsystem::RoomObjects`]): native on screeps.com and `OpenScreeps`, provided by
-/// screepsmod-admin-utils on community servers (the stock server has no such route). From
-/// [`Api::room_objects_source`].
-pub trait RoomObjectsSource {
-    /// A snapshot of every object in `room` and the public profiles of the users they
-    /// reference (`GET /api/game/room-objects`); `shard` as in [`WorldApi`]. Flags are not
-    /// included.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Client::send`].
-    fn room_objects(
-        &self,
-        shard: Option<&str>,
-        room: &str,
-    ) -> impl Future<Output = Result<RoomObjects, Error>>;
-}
-
-/// The API of a server offering [`RoomObjectsSource`]; from [`Api::room_objects_source`].
-#[derive(Clone, Copy, Debug)]
-pub enum RoomObjectsSourceApi<'a> {
-    /// Native on screeps.com.
-    Official(&'a Official),
-    /// Native on `OpenScreeps`.
-    OpenScreeps(&'a OpenScreeps),
-    /// screepsmod-admin-utils on a community server.
-    ScreepsmodAdminUtils(ScreepsmodAdminUtils<'a>),
-}
-
-impl Api {
-    /// The room objects of a room ([`RoomObjectsSource`]), when the server offers them
-    /// ([`Subsystem::RoomObjects`]): screeps.com, `OpenScreeps`, and community servers with
-    /// screepsmod-admin-utils.
-    #[must_use]
-    pub fn room_objects_source(&self) -> Option<RoomObjectsSourceApi<'_>> {
-        match self {
-            Self::Official(api) => Some(RoomObjectsSourceApi::Official(api)),
-            Self::OpenScreeps(api) => Some(RoomObjectsSourceApi::OpenScreeps(api)),
-            Self::Community(api) => api
-                .screepsmod_admin_utils()
-                .map(RoomObjectsSourceApi::ScreepsmodAdminUtils),
-        }
-    }
-}
-
-impl RoomObjectsSource for RoomObjectsSourceApi<'_> {
-    async fn room_objects(&self, shard: Option<&str>, room: &str) -> Result<RoomObjects, Error> {
-        match self {
-            Self::Official(api) => api.room_objects(shard, room).await,
-            Self::OpenScreeps(api) => api.room_objects(shard, room).await,
-            Self::ScreepsmodAdminUtils(api) => api.room_objects(shard, room).await,
-        }
-    }
-}
-
-impl RoomObjectsSource for Official {
-    async fn room_objects(&self, shard: Option<&str>, room: &str) -> Result<RoomObjects, Error> {
-        let objects = official::endpoints::GameRoomObjects {
-            room: room.to_owned(),
-            shard: self.world_shard(shard).await?,
-        };
-        Ok(self.client.send(&objects).await?.body.into())
-    }
-}
-
-impl RoomObjectsSource for OpenScreeps {
-    async fn room_objects(&self, _shard: Option<&str>, room: &str) -> Result<RoomObjects, Error> {
-        let objects = openscreeps::endpoints::GameRoomObjects {
-            room: room.to_owned(),
-            shard: None,
-        };
-        Ok(self.client.send(&objects).await?.body.into())
-    }
-}
-
-impl RoomObjectsSource for ScreepsmodAdminUtils<'_> {
-    async fn room_objects(&self, _shard: Option<&str>, room: &str) -> Result<RoomObjects, Error> {
-        let objects = screepsmod_admin_utils::endpoints::GameRoomObjects {
-            room: room.to_owned(),
-            shard: None,
-        };
-        Ok(self.client.send(&objects).await?.body.into())
-    }
-}
-
 /// World operations whose rate limit a caller paces its own requests by (screeps.com limits
 /// them per token). Every contract names them by the same method and path, so their limits
 /// are the same whichever the server speaks.
@@ -1239,18 +559,5 @@ impl WorldOperation {
             }
             Self::Terrains => client.forget_rate_limit::<official::endpoints::GameRooms>(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::chunk_base;
-
-    #[test]
-    fn chunks_start_at_multiples_of_the_chunk_size() {
-        assert_eq!(chunk_base(1234, 100), 1200);
-        assert_eq!(chunk_base(1200, 100), 1200);
-        assert_eq!(chunk_base(19, 20), 0);
-        assert_eq!(chunk_base(7, 0), 7);
     }
 }
