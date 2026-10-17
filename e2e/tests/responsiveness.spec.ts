@@ -14,8 +14,10 @@
 // long a task posted to the page's main thread every 250 ms waits before it runs (it waits behind
 // whatever the main thread is doing), measured in the page, and the main thread's long tasks
 // (over 50 ms, `PerformanceObserver`). Measured in the page: a `page.evaluate` round trip also
-// waits for the test's own process. The tests are tagged `@alone`: they run after every other
-// test, with the machine to themselves (`playwright.config.ts`).
+// waits for the test's own process. The view shows a room where nothing moves, so it draws
+// frames only for what loads: the test measures the loading, not the drawing of a live room
+// (software WebGL on the CI runner makes each frame expensive). The tests are tagged `@alone`:
+// they run after every other test, with the machine to themselves (`playwright.config.ts`).
 
 import type { Page } from '@playwright/test';
 import { api, currentTarget, expect, signIn, slug, test, type Server } from './fixtures';
@@ -121,10 +123,33 @@ async function realRooms(server: Server): Promise<Set<string>> {
   return new Set(body.rooms.map(({ room }) => room));
 }
 
-/** The made-up shard: a stand-in for the server, and how many made-up rooms it scanned. */
+/** Objects that never move or play: a room of only these draws a frame only when data comes. */
+const STILL = new Set(['source', 'controller', 'mineral']);
+
+/**
+ * A real room of `server` where nothing moves or plays (no creeps, portals or keeper lairs), so
+ * that a room-level view of it draws frames only for what loads. On the CI runner each frame is
+ * drawn in software (SwiftShader); a live room whose creeps move every tick would measure that
+ * drawing, not the shard loading behind it.
+ */
+async function stillRoom(server: Server, rooms: Set<string>): Promise<string> {
+  for (const room of [...rooms].sort()) {
+    const { body } = await api<{ objects: { type: string }[] }>(
+      server.url,
+      `api/game/room-objects?room=${room}`,
+    );
+    const types = body.objects.map((object) => object.type);
+    if (types.includes('controller') && types.every((type) => STILL.has(type))) return room;
+  }
+  throw new Error('the world has no room where nothing moves');
+}
+
+/** The made-up shard: a stand-in for the server, how many made-up rooms it scanned, and the
+ * rooms the server really has. */
 interface Shard {
   standIn: StandIn;
   scanned: () => number;
+  real: Set<string>;
 }
 
 /** `answer` with `value` as its JSON body. */
@@ -216,7 +241,7 @@ async function fakeShard(server: Server): Promise<Shard> {
       waiting.clear();
     },
   });
-  return { standIn, scanned: () => scanned };
+  return { standIn, scanned: () => scanned, real };
 }
 
 /** What the main thread did while the world loaded. */
@@ -302,15 +327,16 @@ test.describe('responsiveness', () => {
     test('a whole shard loading in the background never holds the page', { tag: ['@openscreeps', '@alone'] }, async ({
       page,
       server,
-      player,
+      account,
     }) => {
       test.setTimeout(240_000);
       const shard = await fakeShard(server);
       try {
+        const room = await stillRoom(server, shard.real);
         const standIn: Server = { ...server, url: shard.standIn.url, slug: slug(shard.standIn.url) };
-        await signIn(page, standIn, player);
+        await signIn(page, standIn, account);
         await recordLongTasks(page);
-        await openRoom(page, standIn, player.room, null);
+        await openRoom(page, standIn, room, null);
         await expect.poll(shard.scanned, { timeout: 60_000 * SLOWDOWN }).toBeGreaterThanOrEqual(WARM_UP);
         const result = await measure(page, () => shard.scanned() < WARM_UP + MEASURED);
         expectResponsive(result);
