@@ -515,6 +515,10 @@ fn Breadcrumb() -> impl IntoView {
             <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Account"</span>
         }
         .into_any(),
+        Route::User { .. } => view! {
+            <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Player"</span>
+        }
+        .into_any(),
         Route::Window { .. } => ().into_any(),
     }
     }

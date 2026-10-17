@@ -9,6 +9,7 @@ use overseer::map::PortalDestination;
 use super::colours::{part_class, resource_class};
 use super::fields::inspect;
 use super::{Context, Inspected, Value, number, title};
+use crate::ui::player::PlayerLink;
 use crate::ui::style;
 use crate::ui::style::concatcp;
 
@@ -208,12 +209,12 @@ fn detail_view(
             </dd>
         }
     };
-    // The signed-in user's own objects are marked by colour.
+    // The owner's name links to the player's page; the signed-in user's own objects are marked
+    // by colour.
     let owner = move || {
-        owner.get().map(|(owner, own)| {
-            let class = if own { "text-ok" } else { "" };
-            view! { <span class=class>{owner}</span> }
-        })
+        owner
+            .get()
+            .map(|(player, own)| view! { <PlayerLink player own /> })
     };
     let neighbours = move || {
         let neighbours = neighbours.get();

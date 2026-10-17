@@ -3,11 +3,13 @@
 //! ([`RoomInfo`]: status, owner and controller level with progress, safe mode, reservation,
 //! energy for spawning, sources, mineral, creeps and structures by owner, last update, and
 //! where its portals lead; in the drawer each destination room is a link through the portal).
+//! The names of owners and reservers link to their player pages ([`PlayerLink`]).
 //!
-//! The drawer shows the preview and facts on its Room tab; a popped-out room window shows the
-//! whole [`RoomPanel`] (preview, facts and the room's objects). A live room that the server
-//! refuses (the per-player limit of live rooms counts every window) shows the minimap with
-//! the reason.
+//! The drawer shows the preview and facts on its Room tab (the facts only as a phone's bottom
+//! sheet, under the map that shows the room already); a popped-out room window shows the
+//! whole [`RoomPanel`] (preview, facts and the room's objects; stacked on a phone). A live
+//! room that the server refuses (the per-player limit of live rooms counts every window)
+//! shows the minimap with the reason.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,6 +29,7 @@ use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, number, ticks};
 use crate::ui::next_id;
 use crate::ui::objects::{ObjectsPanel, Selection};
+use crate::ui::player::{Player, PlayerLink};
 use crate::ui::style::{self, concatcp};
 use crate::ui::surface::{Hooks, Surface, SurfaceCanvas};
 use crate::ui::world::MapState;
@@ -296,8 +299,8 @@ pub fn RoomPreview(
 /// The controller as the facts show it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControllerFacts {
-    /// Owner's name.
-    pub owner: Option<String>,
+    /// The owner.
+    pub owner: Option<Player>,
     /// Owned by the signed-in user.
     pub own: bool,
     /// Room control level.
@@ -311,14 +314,14 @@ pub struct ControllerFacts {
     /// Safe modes available.
     pub safe_modes: Option<u64>,
     /// Who reserves it, and for how many more ticks.
-    pub reservation: Option<(String, Option<u64>)>,
+    pub reservation: Option<(Player, Option<u64>)>,
 }
 
 /// Creeps and structures of one owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerCount {
-    /// The owner's name.
-    pub name: String,
+    /// The owner.
+    pub player: Player,
     /// The signed-in user.
     pub own: bool,
     /// Creeps and power creeps.
@@ -383,7 +386,7 @@ pub fn facts(objects: &[GameRoomObject], context: &Context<'_>) -> Facts {
             GameRoomObject::Controller(controller) => {
                 let user = controller.user.as_deref();
                 facts.controller = Some(ControllerFacts {
-                    owner: user.map(|user| context.name(user)),
+                    owner: user.map(|user| context.player(user)),
                     own: context.is_me(user),
                     level: controller.level,
                     progress: controller.progress.zip(controller.progress_needed()),
@@ -395,7 +398,7 @@ pub fn facts(objects: &[GameRoomObject], context: &Context<'_>) -> Facts {
                     safe_modes: controller.safe_mode_available.filter(|_| user.is_some()),
                     reservation: controller.reservation.as_ref().map(|reservation| {
                         (
-                            context.name(&reservation.user),
+                            context.player(&reservation.user),
                             context.until(reservation.end_time),
                         )
                     }),
@@ -426,12 +429,15 @@ pub fn facts(objects: &[GameRoomObject], context: &Context<'_>) -> Facts {
             }
             _ => 1,
         };
-        let name = context.name(user);
-        let index = if let Some(index) = facts.owners.iter().position(|owner| owner.name == name) {
+        let index = if let Some(index) = facts
+            .owners
+            .iter()
+            .position(|owner| owner.player.id == user)
+        {
             index
         } else {
             facts.owners.push(OwnerCount {
-                name,
+                player: context.player(user),
                 own: context.is_me(Some(user)),
                 creeps: 0,
                 structures: 0,
@@ -451,9 +457,11 @@ pub fn facts(objects: &[GameRoomObject], context: &Context<'_>) -> Facts {
         .into_iter()
         .map(|(_, energy, capacity)| (energy, capacity))
         .collect();
-    facts
-        .owners
-        .sort_by(|a, b| b.own.cmp(&a.own).then_with(|| a.name.cmp(&b.name)));
+    facts.owners.sort_by(|a, b| {
+        b.own
+            .cmp(&a.own)
+            .then_with(|| a.player.name.cmp(&b.player.name))
+    });
     facts
 }
 
@@ -639,13 +647,17 @@ fn portal_rows(
 /// safe mode and mineral (the live rows tell more).
 fn overview_rows(stat: &RoomStat, live: bool) -> impl IntoView + use<> {
     let owner = stat.owner.as_ref().map_or_else(
-        || "Nobody".to_owned(),
+        || "Nobody".into_any(),
         |owner| {
-            format!(
-                "{} · level {}",
-                owner.username.clone().unwrap_or_else(|| owner.id.clone()),
-                owner.level
-            )
+            let player = Player {
+                id: owner.id.clone(),
+                name: owner.username.clone().unwrap_or_else(|| owner.id.clone()),
+            };
+            view! {
+                <PlayerLink player />
+                {format!(" · level {}", owner.level)}
+            }
+            .into_any()
         },
     );
     let reservation = stat
@@ -653,10 +665,14 @@ fn overview_rows(stat: &RoomStat, live: bool) -> impl IntoView + use<> {
         .as_ref()
         .filter(|_| !live)
         .map(|reservation| {
-            reservation
-                .username
-                .clone()
-                .unwrap_or_else(|| reservation.id.clone())
+            let player = Player {
+                id: reservation.id.clone(),
+                name: reservation
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| reservation.id.clone()),
+            };
+            view! { <PlayerLink player /> }
         });
     let mineral = stat.mineral.as_ref().filter(|_| !live).map(|mineral| {
         stat.mineral_density.map_or_else(
@@ -708,12 +724,12 @@ fn facts_rows(facts: Facts, game_time: Option<u64>) -> impl IntoView {
                 <dd>{format!("in {}", ticks(left))}</dd>
             })}
             {safe_mode.map(|text| view! { <dt>"Safe mode"</dt><dd>{text}</dd> })}
-            {controller.reservation.map(|(name, left)| {
-                let text = match left {
-                    Some(left) => format!("{name}, {} left", ticks(left)),
-                    None => name,
-                };
-                view! { <dt>"Reservation"</dt><dd>{text}</dd> }
+            {controller.reservation.map(|(player, left)| {
+                let left = left.map(|left| format!(", {} left", ticks(left)));
+                view! {
+                    <dt>"Reservation"</dt>
+                    <dd><PlayerLink player />{left}</dd>
+                }
             })}
         }
     });
@@ -775,10 +791,9 @@ fn facts_rows(facts: Facts, game_time: Option<u64>) -> impl IntoView {
                 if owner.sites > 0 {
                     parts.push(counted(owner.sites, "site", "sites"));
                 }
-                let tone = if owner.own { "text-ok" } else { "" };
                 view! {
                     <li class="flex flex-wrap gap-x-2">
-                        <span class=tone>{owner.name}</span>
+                        <PlayerLink player=owner.player own=owner.own />
                         <span class="text-muted">{parts.join(" · ")}</span>
                     </li>
                 }
@@ -829,6 +844,7 @@ mod tests {
 
     use super::{ControllerFacts, OwnerCount, facts};
     use crate::ui::inspector::Context;
+    use crate::ui::player::Player;
 
     #[test]
     fn facts_of_a_live_room() {
@@ -877,7 +893,10 @@ mod tests {
         assert_eq!(
             facts.controller,
             Some(ControllerFacts {
-                owner: Some("smoke".to_owned()),
+                owner: Some(Player {
+                    id: "u1".to_owned(),
+                    name: "smoke".to_owned()
+                }),
                 own: true,
                 level: 2,
                 progress: Some((100, 45000)),
@@ -894,14 +913,20 @@ mod tests {
             facts.owners,
             [
                 OwnerCount {
-                    name: "smoke".to_owned(),
+                    player: Player {
+                        id: "u1".to_owned(),
+                        name: "smoke".to_owned()
+                    },
                     own: true,
                     creeps: 2,
                     structures: 3,
                     sites: 1
                 },
                 OwnerCount {
-                    name: "Invader".to_owned(),
+                    player: Player {
+                        id: "2".to_owned(),
+                        name: "Invader".to_owned()
+                    },
                     own: false,
                     creeps: 1,
                     structures: 0,

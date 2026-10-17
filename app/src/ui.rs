@@ -12,6 +12,7 @@ mod hover;
 mod icon;
 mod inspector;
 mod objects;
+mod player;
 mod profile;
 mod rate_limits;
 mod register;
@@ -68,6 +69,8 @@ enum Page {
     UnknownShard(String),
     /// The signed-in account.
     Profile,
+    /// The public profile of the player with this name.
+    User(String),
     /// The world of a shard.
     World {
         url: String,
@@ -151,6 +154,7 @@ pub fn App(
         Page::Session(screen) => session_page(state, screen),
         Page::Resolving => starting("Opening the world…".to_owned()),
         Page::Profile => view! { <profile::Profile /> }.into_any(),
+        Page::User(name) => view! { <player::PlayerPage name /> }.into_any(),
         Page::World { url, shard, .. } => {
             let (Some(server), Some(session)) = (state.server(&url), state.session.get_untracked())
             else {
@@ -227,6 +231,7 @@ fn page(state: AppState) -> Page {
     match route {
         Route::Servers => Page::Servers,
         Route::Profile { .. } => Page::Profile,
+        Route::User { name, .. } => Page::User(name),
         Route::World {
             shard: Some(shard), ..
         } if known(&shard) => Page::World {
@@ -272,6 +277,7 @@ fn follow_title(state: AppState, map: MapState) {
         let title = match (&route, server) {
             (Route::Servers, _) | (_, None) => "Overseer".to_owned(),
             (Route::Profile { .. }, Some(server)) => format!("Account · {server} — Overseer"),
+            (Route::User { name, .. }, Some(_)) => format!("{name} — Overseer"),
             (_, Some(server)) => {
                 let shard = map
                     .shard

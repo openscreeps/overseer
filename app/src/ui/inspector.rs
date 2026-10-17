@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use overseer::map::PortalDestination;
 use overseer::model::world::{GameRoomObject, RoomUser};
 
+use crate::ui::player::Player;
 use crate::ui::style;
 
 mod colours;
@@ -43,6 +44,14 @@ impl Context<'_> {
             "2" => "Invader".to_owned(),
             "3" => "Source Keeper".to_owned(),
             _ => id.to_owned(),
+        }
+    }
+
+    /// The user `id` with its [`name`](Self::name).
+    pub fn player(&self, id: &str) -> Player {
+        Player {
+            id: id.to_owned(),
+            name: self.name(id),
         }
     }
 
@@ -140,8 +149,8 @@ pub struct Inspected {
     pub title: String,
     /// What it is (`Creep`, `Construction site`, …).
     pub kind: String,
-    /// The owner's name.
-    pub owner: Option<String>,
+    /// The owner.
+    pub owner: Option<Player>,
     /// Owned by the signed-in user.
     pub own: bool,
     /// The typed fields.

@@ -8,6 +8,7 @@ use serde_json::{Value as Json, json};
 use super::colours::{PART, part_class, resource_class};
 use super::fields::inspect;
 use super::{Context, Field, Part, Tone, Value, kind_label, title};
+use crate::ui::player::Player;
 
 fn object(value: Json) -> GameRoomObject {
     serde_json::from_value(value).unwrap()
@@ -60,7 +61,13 @@ fn creep_fields() {
     let inspected = inspect(&creep, &context);
     assert_eq!(inspected.title, "w16");
     assert_eq!(inspected.kind, "Creep");
-    assert_eq!(inspected.owner.as_deref(), Some("alice"));
+    assert_eq!(
+        inspected.owner,
+        Some(Player {
+            id: "u1".to_owned(),
+            name: "alice".to_owned()
+        })
+    );
     assert!(inspected.own);
     let fields = &inspected.fields;
     assert_eq!(
@@ -109,7 +116,13 @@ fn creep_fields() {
     }));
     let inspected = inspect(&spawning, &context);
     assert!(!inspected.own);
-    assert_eq!(inspected.owner.as_deref(), Some("bob"));
+    assert_eq!(
+        inspected.owner,
+        Some(Player {
+            id: "u2".to_owned(),
+            name: "bob".to_owned()
+        })
+    );
     assert_eq!(field(&inspected.fields, "Ticks to live"), &text("Spawning"));
 }
 

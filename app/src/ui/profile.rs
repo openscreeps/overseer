@@ -53,20 +53,20 @@ const DEFAULT_INTERVAL: u64 = 60;
 const DEFAULT_ERROR_INTERVAL: u64 = 30;
 
 /// The profile's head: badge, name and server.
-const HEAD: &str = "flex items-center gap-4 mb-5";
+pub const HEAD: &str = "flex items-center gap-4 mb-5";
 /// The account's badge.
-const BADGE: &str = "flex-none size-[64px] rounded-full bg-panel-2";
+pub const BADGE: &str = "flex-none size-[64px] rounded-full bg-panel-2";
 /// The badge's placeholder while it loads.
-const BADGE_SKELETON: &str = "flex-none size-[64px] rounded-full bg-linear-90 from-panel-2 \
+pub const BADGE_SKELETON: &str = "flex-none size-[64px] rounded-full bg-linear-90 from-panel-2 \
     from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] animate-shimmer \
     motion-reduce:animate-none";
 /// The account's figures: names beside their values, stacked on phones.
-const STATS: &str = "grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 max-xs:grid-cols-1 \
+pub const STATS: &str = "grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 max-xs:grid-cols-1 \
     max-xs:gap-x-4 max-xs:gap-y-0";
 /// The name of a figure of [`STATS`].
-const STAT_NAME: &str = "text-muted";
+pub const STAT_NAME: &str = "text-muted";
 /// The value of a figure of [`STATS`].
-const STAT_VALUE: &str = "flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums max-xs:mb-2";
+pub const STAT_VALUE: &str = "flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums max-xs:mb-2";
 /// A placeholder line of [`STATS`] while the profile loads, as tall as a figure.
 const STAT_SKELETON: &str = "inline-block w-24 h-[1.1em] align-middle rounded-sm bg-linear-90 \
     from-panel-2 from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] \
@@ -125,6 +125,7 @@ pub fn Profile() -> impl IntoView {
     view! {
         <div class=style::PAGE>
             <Summary overseer=overseer.clone() me />
+            <super::player::OwnRooms overseer=overseer.clone() />
             <div class="grid grid-cols-[repeat(auto-fit,minmax(17rem,1fr))] items-start gap-4">
                 <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
                 <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
@@ -336,7 +337,7 @@ fn pending_text(value: Option<String>) -> AnyView {
 }
 
 /// Opens the world of the signed-in server.
-fn open_map(state: AppState) {
+pub fn open_map(state: AppState) {
     if let Some(server) = state.session_server() {
         state.open_server(&server.url);
     }
@@ -344,7 +345,7 @@ fn open_map(state: AppState) {
 
 /// A level with a progress bar towards the next one.
 #[component]
-fn LevelBar(label: &'static str, level: LevelProgress) -> impl IntoView {
+pub fn LevelBar(label: &'static str, level: LevelProgress) -> impl IntoView {
     let percent = level.fraction() * 100.0;
     let text = format!(
         "{} / {}",

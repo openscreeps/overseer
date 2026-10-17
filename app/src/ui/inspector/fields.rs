@@ -412,7 +412,7 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
     Inspected {
         title: title(object),
         kind: kind_label(kind_key(object)),
-        owner: user.map(|user| context.name(user)),
+        owner: user.map(|user| context.player(user)),
         own: context.is_me(user),
         fields: fields.fields,
     }

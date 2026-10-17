@@ -9,11 +9,12 @@
 //! | `#/<server>/<shard>/<room>/window` | [`Route::Window`]: the room control alone (pop-out) |
 //! | `#/<server>/<shard>/console/window` | [`Route::Window`]: the console alone (pop-out) |
 //! | `#/<server>/@profile` | [`Route::Profile`]: the signed-in account |
+//! | `#/<server>/@user/<name>` | [`Route::User`]: a player's public profile |
 //!
 //! `<server>` is the stable slug of a saved server ([`crate::profiles::Profiles::slug`]),
 //! `<shard>` a shard name or `-` on single-world servers ([`Shard::Single`]), `<room>` a world
-//! room name (any case; written upper-case; `console` is none). `@` starts the server's own
-//! pages, so it never begins a shard name.
+//! room name (any case; written upper-case; `console` is none), `<name>` a player name,
+//! percent-encoded. `@` starts the server's own pages, so it never begins a shard name.
 
 use std::fmt;
 
@@ -71,6 +72,13 @@ pub enum Route {
         /// Server slug.
         server: String,
     },
+    /// The public profile of a player of a server.
+    User {
+        /// Server slug.
+        server: String,
+        /// The player's name, as the user typed or a link gave it (never empty).
+        name: String,
+    },
     /// The world map of a server.
     World {
         /// Server slug.
@@ -121,6 +129,10 @@ impl Route {
                 room: None,
             }),
             ["@profile"] => Some(Self::Profile { server }),
+            ["@user", name] => Some(Self::User {
+                server,
+                name: decode(name).filter(|name| !name.trim().is_empty())?,
+            }),
             [shard] => Some(Self::World {
                 server,
                 shard: Some(Shard::parse(shard)?),
@@ -154,9 +166,10 @@ impl Route {
     pub fn server(&self) -> Option<&str> {
         match self {
             Self::Servers => None,
-            Self::Profile { server } | Self::World { server, .. } | Self::Window { server, .. } => {
-                Some(server)
-            }
+            Self::Profile { server }
+            | Self::User { server, .. }
+            | Self::World { server, .. }
+            | Self::Window { server, .. } => Some(server),
         }
     }
 }
@@ -166,6 +179,7 @@ impl fmt::Display for Route {
         match self {
             Self::Servers => f.write_str("#/"),
             Self::Profile { server } => write!(f, "#/{server}/@profile"),
+            Self::User { server, name } => write!(f, "#/{server}/@user/{}", encode(name)),
             Self::World {
                 server,
                 shard: None,
@@ -208,6 +222,50 @@ pub fn parse_room(name: &str) -> Option<RoomCoord> {
     name.trim().to_ascii_uppercase().parse().ok()
 }
 
+/// The digits of `%XX`.
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// `text` with every byte other than ASCII letters, digits, `-`, `.`, `_` and `~` written as
+/// `%XX`.
+fn encode(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0xF)]));
+        }
+    }
+    encoded
+}
+
+/// `segment` with each `%XX` read as a byte; `None` for a bad `%` sequence or bytes that are
+/// not UTF-8.
+fn decode(segment: &str) -> Option<String> {
+    let digit = |byte: u8| {
+        char::from(byte)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
+    let mut bytes = Vec::with_capacity(segment.len());
+    let mut rest = segment.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let [high, low, ..] = *tail else {
+                return None;
+            };
+            bytes.push((digit(high)? << 4) | digit(low)?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use overseer::map::RoomCoord;
@@ -226,6 +284,20 @@ mod tests {
                 "#/screeps.com/@profile",
                 Route::Profile {
                     server: "screeps.com".to_owned(),
+                },
+            ),
+            (
+                "#/screeps.com/@user/Tigga",
+                Route::User {
+                    server: "screeps.com".to_owned(),
+                    name: "Tigga".to_owned(),
+                },
+            ),
+            (
+                "#/localhost-21025/@user/a%20b%2F%25%C3%A9_x-1.~",
+                Route::User {
+                    server: "localhost-21025".to_owned(),
+                    name: "a b/%é_x-1.~".to_owned(),
                 },
             ),
             (
@@ -318,6 +390,14 @@ mod tests {
             Route::parse("#/a/-/W8N3"),
             "a trailing slash after the room"
         );
+        assert_eq!(
+            Route::parse("#/a/@user/%c3%a9/"),
+            Some(Route::User {
+                server: "a".to_owned(),
+                name: "é".to_owned(),
+            }),
+            "lower-case escapes and a trailing slash"
+        );
     }
 
     #[test]
@@ -332,6 +412,15 @@ mod tests {
             "#/a/-/sim",
             "#/a/-/W8N3/other",
             "#/a/-/W8N3/window/x",
+            "#/a/@user",
+            "#/a/@user/",
+            "#/a/@user/%20",
+            "#/a/@user/%",
+            "#/a/@user/%4",
+            "#/a/@user/%zz",
+            "#/a/@user/%+1",
+            "#/a/@user/%FF",
+            "#/a/@user/b/c",
         ] {
             assert_eq!(Route::parse(hash), None, "{hash}");
         }
