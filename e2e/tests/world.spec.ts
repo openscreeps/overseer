@@ -243,6 +243,32 @@ test.describe('world', () => {
     await expect(page.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(0);
   });
 
+  test('opens on a room entered while the world opens, not on the start room @openscreeps', async ({
+    page,
+    server,
+    account,
+  }) => {
+    const start = await startRoom(server, account);
+    const other = start === 'W1N1' ? 'W2N2' : 'W1N1';
+    // The start room is answered only after the route names another room.
+    const { promise: entered, resolve: enter } = Promise.withResolvers<void>();
+    let asked = false;
+    await page.route('**/api/user/world-start-room**', async (route) => {
+      asked = true;
+      await entered;
+      await route.continue();
+    });
+    await signIn(page, server, account);
+    await expect.poll(() => asked).toBe(true);
+    await page.goto(`/#/${server.slug}/-/${other}`);
+    const answered = page.waitForResponse('**/api/user/world-start-room**');
+    enter();
+    await answered;
+    await expect(level(page)).toHaveText('Room', { timeout: 30_000 });
+    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/${other}$`));
+    await expect(breadcrumb(page)).toContainText(other);
+  });
+
   test('shows the whole world from the button and the breadcrumb', async ({
     signedInPage: page,
     server,

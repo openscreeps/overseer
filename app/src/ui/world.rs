@@ -521,16 +521,7 @@ pub fn WorldScreen(
             }
         });
     });
-    Effect::new(move |_| {
-        if let Route::World {
-            room: Some(room), ..
-        } = state.route.get()
-            && map.room.get_untracked() != Some(room)
-            && map.feed.with(Option::is_some)
-        {
-            map.go_to(room);
-        }
-    });
+    follow_route_room(state, map, opening);
     Effect::new(move |_| {
         let tile = map.tile.get();
         surface.with_viewer(|viewer| viewer.select(tile));
@@ -555,6 +546,26 @@ pub fn WorldScreen(
             <Drawer server=server.clone() />
         </div>
     }
+}
+
+/// Follows the room the route names (the address bar, the back button): flies there once the
+/// world is open. While the world opens, it opens on that room, not on a first visit's start
+/// room that arrives later (`opening`).
+fn follow_route_room(state: AppState, map: MapState, opening: StoredValue<Option<RoomCoord>>) {
+    Effect::new(move |_| {
+        if let Route::World {
+            room: Some(room), ..
+        } = state.route.get()
+            && map.room.get_untracked() != Some(room)
+        {
+            if map.feed.with(Option::is_some) {
+                map.go_to(room);
+            } else {
+                opening.set_value(Some(room));
+                map.room.set(Some(room));
+            }
+        }
+    });
 }
 
 /// Zoom in, zoom out and the whole world, over the map's bottom right corner.
