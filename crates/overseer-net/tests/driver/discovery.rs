@@ -443,6 +443,8 @@ async fn a_forced_kind_skips_telling_it_and_still_reads_the_version() {
     let api = client.api().await.unwrap();
     assert_eq!(api.subsystems(), world.subsystems());
     assert!(!api.supports(Subsystem::RoomHistory));
+    // A private address forced to a private contract: no limit until the server reports one.
+    assert!(!client.has_rate_limits());
 
     // A private address forced official: read with the official contract, no plugin probe.
     let server = Server::start(routes(STOCK_VERSION, Some(AUTHMOD)), |_| true).await;
@@ -467,6 +469,8 @@ async fn a_forced_kind_skips_telling_it_and_still_reads_the_version() {
     assert!(!world.is_sharded());
     assert_eq!(paths(&server), ["/api/version"]);
     assert!(client.api().await.unwrap().account_website().is_some());
+    // Only screeps.com speaks the official contract: assume its server-wide limit.
+    assert!(client.has_rate_limits());
     // A fully forced kind needs no request for its operations, even before discovery.
     let fresh = Client::builder(server.url())
         .server_kind(ServerKind::Official)
@@ -491,6 +495,8 @@ async fn a_forced_kind_skips_telling_it_and_still_reads_the_version() {
     assert_eq!(world.connection().kind, ServerKind::OpenScreeps);
     assert!(world.connection().forced);
     assert!(world.supports(Subsystem::PasswordAccounts));
+    // The address is screeps.com, so the limit stays.
+    assert!(client.has_rate_limits());
 }
 
 #[tokio::test]

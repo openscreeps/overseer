@@ -224,13 +224,19 @@ impl Client {
         lock(&self.inner.budget).count(Instant::now())
     }
 
-    /// Whether the server limits request rates: it is official ([`ServerUrl::is_official`]:
-    /// screeps.com and its season, whose server-wide limit of 120 requests per minute per token
-    /// sends no headers), or a response carried `X-RateLimit-*` headers or was refused with
-    /// HTTP 429.
+    /// Whether the server limits request rates. Three things tell it:
+    ///
+    /// - The server is official: its address is screeps.com ([`ServerUrl::is_official`],
+    ///   the persistent world and the season), or [`ClientBuilder::server_kind`] forced the
+    ///   official contract. Only screeps.com speaks that contract, so a forced official
+    ///   server on another address is screeps.com behind something. Its server-wide limit of
+    ///   120 requests per minute per token sends no headers.
+    /// - A response carried `X-RateLimit-*` headers.
+    /// - A response was refused with HTTP 429.
     #[must_use]
     pub fn has_rate_limits(&self) -> bool {
         self.inner.server.is_official()
+            || self.inner.forced_kind == Some(ServerKind::Official)
             || self.rate_limited_count() > 0
             || !self.rate_limits().is_empty()
     }

@@ -202,9 +202,10 @@ impl WorldProgress {
 ///
 /// # Pacing per server
 ///
-/// A server shows rate limits when it is official (screeps.com and its seasonal server:
-/// their server-wide limit of 120 requests per minute per token sends no headers) or once any
-/// response carried `X-RateLimit-*` headers or was refused with HTTP 429
+/// A server shows rate limits when it is official (screeps.com and its seasonal server, by
+/// address or by a forced official contract: their server-wide limit of 120 requests per
+/// minute per token sends no headers) or once any response carried `X-RateLimit-*` headers
+/// or was refused with HTTP 429
 /// ([`net::Client::has_rate_limits`](crate::net::Client::has_rate_limits)). There every
 /// request of every kind first asks the session's request budget
 /// ([`net::Client::budget_ready_at`](crate::net::Client::budget_ready_at)), shared with the
