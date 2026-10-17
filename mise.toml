@@ -46,7 +46,7 @@ dir = "app/src-tauri"
 run = "cargo tauri build"
 
 [tasks.e2e]
-description = "Live feature tests and Playwright UI tests against a disposable OpenScreeps world in Docker (image built from e2e/server.lock, cached; $OPENSCREEPS_SERVER_DIR builds a checkout instead); --rust-only, --ui-only, --no-build, --screens[=<set>]"
+description = "Live feature tests and Playwright UI tests against a disposable OpenScreeps world in Docker (image built from the latest commit of openscreeps/server main, cached; $OPENSCREEPS_SERVER_COMMIT builds another commit, $OPENSCREEPS_SERVER_DIR a checkout); --rust-only, --ui-only, --no-build, --screens[=<set>]"
 run = "cargo xtask e2e"
 
 [tasks.e2e-official]

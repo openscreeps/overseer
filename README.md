@@ -129,7 +129,7 @@ cd e2e && npm ci && npx playwright install chromium
 
 | Command | Server under test |
 |---|---|
-| `cargo xtask e2e` | an OpenScreeps world, built from the commit in `e2e/server.lock` |
+| `cargo xtask e2e` | an OpenScreeps world, built from the latest commit of the server's `main` branch (`OPENSCREEPS_SERVER_COMMIT` builds another commit) |
 | `cargo xtask e2e --target community` | a community world: screeps-launcher with screepsmod-auth and screepsmod-admin-utils (`e2e/community/`) |
 | `cargo xtask e2e --target official` | screeps.com, read-only, with `SCREEPS_TOKEN` |
 
@@ -139,9 +139,10 @@ Add `--rust-only` or `--ui-only` to run one of the two suites. Put Playwright ar
 Each run writes its files to its own directory below `target/e2e/`: the web app bundle, the
 proxy binary, the logs, and the Playwright results and report. A run that passes removes its
 directory. A run that fails keeps it and prints its path. Runs share only the build in
-`target/`, so you can run the `openscreeps` and `community` targets at the same time. The
-`official` and `--desktop` runs keep one directory each, and only one run of each goes at a
-time.
+`target/`, so you can run the `openscreeps` and `community` targets at the same time. Their web
+app builds go one at a time, and a build of the live tests waits while another run executes
+them. The `official` and `--desktop` runs keep one directory each, and only one run of each
+goes at a time.
 
 On Windows, do not change `xtask/` while a run goes on: Windows locks the running `xtask.exe`,
 so `cargo xtask` cannot rebuild it.

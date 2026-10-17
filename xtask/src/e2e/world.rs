@@ -1,11 +1,16 @@
 //! The disposable `openscreeps/server` world of the `openscreeps` target, in Docker.
 //!
-//! The server image is built once per pinned commit and cached by tag
-//! (`overseer-e2e-server:<commit>`): Docker builds it straight from
-//! `https://github.com/openscreeps/server.git#<commit>`, so no checkout is needed. With
-//! `OPENSCREEPS_SERVER_DIR`, the image is built from that checkout instead (tag
-//! `overseer-e2e-server:local`, rebuilt every run; Docker's layer cache keeps that quick), to
-//! test server changes before they are pinned.
+//! The server image comes from the latest commit of the server's `main` branch: each run
+//! resolves that commit (`git ls-remote`), and Docker builds the image straight from
+//! `https://github.com/openscreeps/server.git#<commit>`, so no checkout is needed. The image is
+//! cached by tag (`overseer-e2e-server:<commit>`), so a run builds it only when `main` moved.
+//! The summary names the commit, so a failure can be run again on the same server.
+//!
+//! - `OPENSCREEPS_SERVER_COMMIT=<sha>` builds that commit instead (to run again on a known
+//!   server, or to bisect).
+//! - `OPENSCREEPS_SERVER_DIR=<checkout>` builds the image from that checkout (tag
+//!   `overseer-e2e-server:local`, rebuilt every run; Docker's layer cache keeps that quick),
+//!   to test server changes before they are pushed.
 //!
 //! Each world lives in its own named volume and container (`overseer-e2e-<nonce>`, labelled
 //! `overseer-e2e`), published on a free loopback port, and is removed with its volume by
@@ -36,6 +41,8 @@ const PORT: &str = "21025/tcp";
 pub(super) const LABEL: &str = "overseer-e2e";
 /// Where the server's image is built from when no checkout is given.
 const REPOSITORY: &str = "https://github.com/openscreeps/server.git";
+/// The branch whose latest commit the image is built from.
+const BRANCH: &str = "main";
 
 /// The running world and what the tests need to reach it.
 pub struct World {
@@ -47,30 +54,36 @@ pub struct World {
     pub admin_token: String,
 }
 
-/// The server image: built from the commit in `e2e/server.lock` unless cached (or from
-/// `OPENSCREEPS_SERVER_DIR`, see the module docs). Returns its tag.
-pub fn image(root: &Path) -> Result<String, Error> {
+/// The server image (see the module docs). Returns its tag and, for the summary, what it was
+/// built from.
+pub fn image() -> Result<(String, String), Error> {
     docker_available()?;
     if let Some(dir) = std::env::var_os("OPENSCREEPS_SERVER_DIR") {
         let tag = "overseer-e2e-server:local".to_owned();
         status(
-            docker().args(["build", "--tag", &tag]).arg(dir),
+            docker().args(["build", "--tag", &tag]).arg(&dir),
             "docker build",
         )?;
-        return Ok(tag);
+        let source = format!("OpenScreeps server: checkout {}", dir.to_string_lossy());
+        return Ok((tag, source));
     }
-    let lock = root.join("e2e").join("server.lock");
-    let commit = fs::read_to_string(&lock)
-        .map_err(|error| format!("cannot read {}: {error}", lock.display()))?
-        .trim()
-        .to_owned();
+    let (commit, source) = if let Ok(commit) = std::env::var("OPENSCREEPS_SERVER_COMMIT") {
+        let commit = commit.trim().to_owned();
+        let source = format!("OpenScreeps server: {commit} (OPENSCREEPS_SERVER_COMMIT)");
+        (commit, source)
+    } else {
+        let commit = latest_commit()?;
+        let source = format!("OpenScreeps server: {commit} (latest {BRANCH})");
+        (commit, source)
+    };
     if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("{} holds no commit SHA", lock.display()).into());
+        return Err(format!("`{commit}` is no full commit SHA of {REPOSITORY}").into());
     }
     let tag = format!("overseer-e2e-server:{commit}");
+    println!("    {source}");
     if docker_output(&["image", "inspect", "--format", "{{.Id}}", &tag]).is_ok() {
         println!("    cached image {tag}");
-        return Ok(tag);
+        return Ok((tag, source));
     }
     status(
         docker()
@@ -78,7 +91,25 @@ pub fn image(root: &Path) -> Result<String, Error> {
             .arg(format!("{REPOSITORY}#{commit}")),
         "docker build",
     )?;
-    Ok(tag)
+    Ok((tag, source))
+}
+
+/// The latest commit of [`BRANCH`] (`git ls-remote`).
+fn latest_commit() -> Result<String, Error> {
+    let output = Command::new("git")
+        .args(["ls-remote", REPOSITORY, &format!("refs/heads/{BRANCH}")])
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|error| format!("cannot run git ls-remote: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    match text.split_whitespace().next() {
+        Some(commit) if output.status.success() => Ok(commit.to_owned()),
+        _ => Err(format!(
+            "cannot find the latest commit of {BRANCH} in {REPOSITORY}; set \
+             OPENSCREEPS_SERVER_COMMIT to build a known commit"
+        )
+        .into()),
+    }
 }
 
 /// Fails early, with a clear message, when Docker is not running.

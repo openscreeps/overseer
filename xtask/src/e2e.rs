@@ -50,7 +50,9 @@
 //! Each run writes its files to its own directory below `<target>/e2e/` ([`RunDir`]): the web
 //! app, the proxy binary, the world caches, the results (`test-results/`) and report
 //! (`playwright-report/`) of Playwright, and the logs. Runs at the same time share only the
-//! build in Cargo's target directory.
+//! build in Cargo's target directory. Their web app builds go one at a time ([`build_app`]),
+//! and a build of the live tests waits while another run executes them (Windows locks a
+//! running executable; see [`wait_for_lock`]).
 //!
 //! - `openscreeps` and `community`: a fresh directory for each run (`<target>-<nonce>`). A run
 //!   that passes removes it. A run that fails keeps it and names it in the summary.
@@ -410,9 +412,12 @@ fn suites(root: &Path, options: &Options, run: &Path, summary: &mut Summary) -> 
         Target::OpenScreeps | Target::Community => None,
     };
     let mut image = None;
+    let mut server = None;
     let mut ready = match options.target {
         Target::OpenScreeps => summary.step("server image (docker build)", || {
-            image = Some(world::image(root)?);
+            let (tag, source) = world::image()?;
+            image = Some(tag);
+            server = Some(source);
             Ok(())
         }),
         Target::Community => summary.step("community server image (docker build)", || {
@@ -421,10 +426,13 @@ fn suites(root: &Path, options: &Options, run: &Path, summary: &mut Summary) -> 
         }),
         Target::Official => true,
     };
+    summary.notes.extend(server);
     if options.ui || options.desktop {
         if options.build {
-            ready =
-                ready && summary.step("web app (trunk build)", || build_app(root, &prepared.dist));
+            ready = ready
+                && summary.step("web app (trunk build)", || {
+                    build_app(root, &target, &prepared.dist)
+                });
         } else if prepared.dist.join("index.html").is_file() {
             summary.skip("web app (trunk build)", "--no-build");
         } else {
@@ -472,6 +480,7 @@ fn suites(root: &Path, options: &Options, run: &Path, summary: &mut Summary) -> 
     if options.rust {
         ready = ready
             && summary.step("live tests (build)", || {
+                let _held = wait_for_lock(&target, "live", Hold::Exclusive, "the live tests")?;
                 status(
                     cargo(root).args(["test", "--workspace", "--test", "live", "--no-run"]),
                     "cargo test --no-run",
@@ -554,19 +563,27 @@ fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summ
     }
     // Each suite gets a fresh world: players and their bots slow a world down as they add up.
     if options.rust {
-        on_world(
-            prepared,
-            worlds,
-            summary,
-            "live Rust tests",
-            "server-live.log",
-            || {
-                let mut test = cargo(&prepared.root);
-                test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"]);
-                test.args(["--", "--ignored"]);
-                test
-            },
-        );
+        // Windows locks a running executable: a build of the live tests in another run waits
+        // until these finish.
+        let target = target_dir(&prepared.root);
+        match wait_for_lock(&target, "live", Hold::Shared, "a build of the live tests") {
+            Ok(_held) => on_world(
+                prepared,
+                worlds,
+                summary,
+                "live Rust tests",
+                "server-live.log",
+                || {
+                    let mut test = cargo(&prepared.root);
+                    test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"]);
+                    test.args(["--", "--ignored"]);
+                    test
+                },
+            ),
+            Err(error) => {
+                summary.step("live Rust tests", move || Err(error));
+            }
+        }
     } else {
         summary.skip("live Rust tests", "--ui-only");
     }
@@ -631,6 +648,8 @@ fn official_suites(prepared: &Prepared, options: &Options, token: &str, summary:
     }
     if options.rust {
         summary.step("live Rust tests (read-only)", || {
+            let target = target_dir(&prepared.root);
+            let _held = wait_for_lock(&target, "live", Hold::Shared, "a build of the live tests")?;
             let mut test = cargo(&prepared.root);
             test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"])
                 .args(["--", "--ignored", "read_only::"]);
@@ -778,9 +797,46 @@ fn npm_ci_if_missing(dir: &Path) -> Result<(), Error> {
     )
 }
 
+/// How a run holds a lock of [`wait_for_lock`].
+#[derive(Clone, Copy)]
+enum Hold {
+    /// With other runs that hold it shared.
+    Shared,
+    /// Alone.
+    Exclusive,
+}
+
+/// Takes the lock `<target>/e2e/<name>.lock`, which runs at the same time share. Waits, and
+/// says that it waits for `what` of another run, while another run holds it in a way that
+/// excludes `hold`. The lock is released when the returned file is dropped.
+fn wait_for_lock(target: &Path, name: &str, hold: Hold, what: &str) -> Result<fs::File, Error> {
+    let file = fs::File::create(target.join("e2e").join(format!("{name}.lock")))?;
+    let tried = match hold {
+        Hold::Shared => file.try_lock_shared(),
+        Hold::Exclusive => file.try_lock(),
+    };
+    match tried {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            println!("waiting for {what} of another run");
+            match hold {
+                Hold::Shared => file.lock_shared()?,
+                Hold::Exclusive => file.lock()?,
+            }
+        }
+        Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
+    Ok(file)
+}
+
 /// `trunk build --release` of `app/` into `dist`. Trunk rejects the `NO_COLOR=1` some shells
 /// export, so it runs without it.
-fn build_app(root: &Path, dist: &Path) -> Result<(), Error> {
+///
+/// Trunk writes the output of `wasm-bindgen` below Cargo's target directory (`target`) before
+/// it copies it to `dist`. Two builds at the same time overwrite each other's files there, so
+/// one build goes at a time.
+fn build_app(root: &Path, target: &Path, dist: &Path) -> Result<(), Error> {
+    let _held = wait_for_lock(target, "trunk", Hold::Exclusive, "the web app build")?;
     status(
         Command::new("trunk")
             .args(["build", "--release", "--dist"])

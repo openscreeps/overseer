@@ -15,10 +15,11 @@
 //! - `e2e [--target openscreeps|official|community] [--rust-only | --ui-only | --desktop]
 //!   [--screens[=<set>]] [--no-build] [-- <playwright args>]` runs the live feature tests and the
 //!   Playwright UI tests against a disposable `openscreeps/server` world in Docker (the server
-//!   image is built from the commit in `e2e/server.lock`), with `--target community` against a
-//!   disposable world of the community private server in Docker (built from `e2e/community/`)
-//!   or, with `--target official`, their read-only subset against screeps.com with
-//!   `SCREEPS_TOKEN`; `--desktop` runs the desktop app's suite instead (Windows); see `e2e.rs`.
+//!   image is built from the latest commit of the server's `main`), with `--target community`
+//!   against a disposable world of the community private server in Docker (built from
+//!   `e2e/community/`) or, with `--target official`, their read-only subset against screeps.com
+//!   with `SCREEPS_TOKEN`; `--desktop` runs the desktop app's suite instead (Windows); see
+//!   `e2e.rs`.
 
 mod codegen;
 mod e2e;
