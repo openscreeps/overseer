@@ -18,6 +18,13 @@ import {
   tab,
 } from './support/room';
 
+declare global {
+  interface Window {
+    /** The tombstone rows the Objects list showed since the test began to watch it. */
+    e2eTombstones?: string[];
+  }
+}
+
 /** The number a group heading or tab ends with (`Sources 2`). */
 const count = (text: string | null) => Number(text?.match(/(\d+)\s*$/)?.[1] ?? Number.NaN);
 
@@ -389,15 +396,26 @@ test.describe('objects', () => {
       await list.getByRole('button', { name: new RegExp(`^${creep} at`) }).click();
       await expect(inspector(page).getByRole('heading')).toHaveText(creep);
 
+      // A creep of one body part leaves a tombstone for 5 ticks, about a second: note each
+      // tombstone row the list shows, so that a short one is not missed between two checks.
+      await list.evaluate((element) => {
+        const seen: string[] = [];
+        window.e2eTombstones = seen;
+        new MutationObserver(() => {
+          for (const row of element.querySelectorAll('button[aria-label^="Tombstone of "]')) {
+            seen.push(row.getAttribute('aria-label') ?? '');
+          }
+        }).observe(element, { subtree: true, childList: true, attributes: true });
+      });
       const session = await Session.signIn(server.url, player.username, player.password);
       await session.call('api/user/console', { expression: `Game.creeps.${creep}.suicide()` });
       await expect(inspector(page).getByRole('status')).toHaveText('The object is gone.', {
         timeout: 30_000,
       });
       await expect(list.getByRole('button', { name: new RegExp(`^${creep} at`) })).toHaveCount(0);
-      await expect(
-        list.getByRole('button', { name: new RegExp(`^Tombstone of ${creep} at`) }),
-      ).toBeVisible();
+      await expect
+        .poll(() => page.evaluate(() => window.e2eTombstones ?? []))
+        .toContainEqual(expect.stringMatching(new RegExp(`^Tombstone of ${creep} at`)));
     });
   });
 });
