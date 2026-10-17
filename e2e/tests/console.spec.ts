@@ -183,6 +183,9 @@ test.describe('console', { tag: '@transport' }, () => {
         log.evaluate((element) => element.scrollTop + element.clientHeight >= element.scrollHeight - 8);
 
       await page.getByRole('button', { name: 'Pause auto-scroll' }).click();
+      // The scroll event of the app's own last scroll to the bottom may come after the click:
+      // the log stays paused.
+      await log.dispatchEvent('scroll');
       const resume = page.getByRole('button', { name: 'Resume auto-scroll' });
       await expect(resume).toBeVisible();
       const paused = page.getByRole('button', { name: /^Paused · / });

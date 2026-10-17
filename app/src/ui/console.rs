@@ -351,24 +351,25 @@ pub fn ConsolePanel(
         }
         last
     });
-    // Only scrolling up pauses: lines added under the view and our own scrolls to the bottom
-    // never lower `scrollTop`, but a scroll event can arrive after the next line made the log
-    // taller, which a bottom check alone would read as the user leaving the bottom.
+    // Scrolling up pauses; scrolling down to the bottom follows again. Only the direction counts:
+    // a scroll event can arrive after the next line made the log taller (a bottom check alone
+    // would read that as the user leaving the bottom), or after the user paused with the button
+    // (the event of our own last scroll to the bottom must not undo that pause).
     let last_top = StoredValue::new(0);
     let on_scroll = move |_| {
         let Some(output) = output.get_untracked() else {
             return;
         };
         let top = output.scroll_top();
-        let up = top < last_top.get_value();
+        let previous = last_top.get_value();
         last_top.set_value(top);
         let bottom = top + output.client_height() >= output.scroll_height() - BOTTOM_SLACK;
-        if bottom {
+        if top > previous && bottom {
             if !following.get_untracked() {
                 following.set(true);
             }
             unseen.set(0);
-        } else if up && following.get_untracked() {
+        } else if top < previous && !bottom && following.get_untracked() {
             following.set(false);
         }
     };
@@ -462,6 +463,11 @@ pub fn ConsolePanel(
                     data-tip=move || if following.get() { "Pause auto-scroll" } else { "Resume auto-scroll" }
                     on:click=move |_| {
                         if following.get_untracked() {
+                            // Where the log is now: a scroll event of our last scroll to the
+                            // bottom may still come, and it is no move of the user's.
+                            if let Some(output) = output.get_untracked() {
+                                last_top.set_value(output.scroll_top());
+                            }
                             following.set(false);
                         } else {
                             resume();
