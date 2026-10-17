@@ -235,6 +235,12 @@ impl OverlayGpu {
         }
     }
 
+    /// The badge atlas' group (the tokens of creeps draw their owner's badge from it); `None`
+    /// before the first [`Self::sync`].
+    pub const fn badges_group(&self) -> Option<&wgpu::BindGroup> {
+        self.badges_group.as_ref()
+    }
+
     /// Draws the overlay (group 0 is bound; `atlas` is the glyph atlas' group).
     pub fn draw(
         &self,

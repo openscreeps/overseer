@@ -118,6 +118,29 @@ fn target(entry: &GameRoomObjectActionLogEntry) -> Option<Vec2> {
     Some(Vec2::new(coordinate(entry.x)?, coordinate(entry.y)?))
 }
 
+/// Actions done to a target, in the order an actor faces them when it does more than one.
+const AIMED: [&str; 10] = [
+    "attack",
+    "rangedAttack",
+    "heal",
+    "rangedHeal",
+    "attackController",
+    "harvest",
+    "build",
+    "repair",
+    "upgradeController",
+    "reserveController",
+];
+
+/// The target tile that an actor with action log `log` faces: the target of its first
+/// [`AIMED`] action; `None` without one.
+pub fn aim(log: &GameRoomObjectActionLog) -> Option<Vec2> {
+    AIMED.iter().find_map(|action| match log.get(*action) {
+        Some(Some(GameRoomObjectActionLogValue::Entry(entry))) => target(entry),
+        _ => None,
+    })
+}
+
 /// The effects of `log`, the action log of the object at index `actor` standing on `tile`,
 /// for a snapshot that arrived at `now` with ticks of `tick_ms`; appended to `out` in
 /// action order.

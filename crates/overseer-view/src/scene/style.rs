@@ -367,10 +367,13 @@ impl Gauges {
                 gauges.level = u8::try_from(factory.level.unwrap_or(0).min(5)).unwrap_or(0);
             }
             O::Lab(lab) => {
-                let capacity = lab
-                    .store_capacity
-                    .unwrap_or_else(|| capacity(&lab.store_capacity_resource));
-                gauges.store = store(&lab.store, capacity);
+                // The mineral or compound a lab holds, else the energy that powers it.
+                gauges.store = lab_mineral(&lab.store).or_else(|| {
+                    let capacity = lab
+                        .store_capacity
+                        .unwrap_or_else(|| capacity(&lab.store_capacity_resource));
+                    store(&lab.store, capacity)
+                });
                 gauges.hits = hits(lab.hits, lab.hits_max);
             }
             O::PowerSpawn(spawn) => {
@@ -494,6 +497,26 @@ fn store(store: &GameRoomObjectStore, capacity: u64) -> Option<(f32, u32)> {
         ratio(total.min(capacity), capacity)
     };
     Some((fill, resource_color(kind)))
+}
+
+/// Most of a mineral or compound a lab holds (`LAB_MINERAL_CAPACITY`).
+const LAB_MINERAL_CAPACITY: u64 = 3000;
+
+/// How full a lab is of the one mineral or compound it holds (not energy), and its colour;
+/// `None` when it holds none.
+fn lab_mineral(store: &GameRoomObjectStore) -> Option<(f32, u32)> {
+    store
+        .iter()
+        .filter(|(kind, _)| *kind != "energy")
+        .filter_map(|(kind, amount)| Some((kind, u64::try_from((*amount)?).ok()?)))
+        .filter(|(_, amount)| *amount > 0)
+        .max_by_key(|(_, amount)| *amount)
+        .map(|(kind, amount)| {
+            (
+                ratio(amount.min(LAB_MINERAL_CAPACITY), LAB_MINERAL_CAPACITY),
+                resource_color(kind),
+            )
+        })
 }
 
 /// The colour (sRGB) of a resource: energy amber, power crimson, each base mineral its own

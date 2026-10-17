@@ -22,6 +22,7 @@ mod camera;
 mod camera_motion;
 mod effects;
 mod gestures;
+mod heading;
 mod kinds;
 mod lod;
 mod look;

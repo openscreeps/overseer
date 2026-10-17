@@ -4,6 +4,7 @@ use crate::mesh::{
     ArcInstance, EffectInstance, FillVertex, GlyphInstance, Instance, LabelGlyph, MarkInstance,
     PointInstance, RoomInstance, ShapeVertex, TerrainVertex, Token, VisualInstance,
 };
+use crate::overlay::badges::{CELLS_PER_LAYER, COLUMNS, ROWS};
 
 use super::DEPTH;
 
@@ -297,10 +298,16 @@ impl Pipelines {
             })
         };
         let world_shader = module("world", &[include_str!("../world.wgsl")]);
+        // The token shader finds a badge's cell in the atlas as `overlay/badges.rs` places it.
+        let badge_cells = format!(
+            "const BADGE_COLUMNS: u32 = {COLUMNS}u;\nconst BADGE_ROWS: u32 = {ROWS}u;\n\
+             const BADGE_CELLS_PER_LAYER: u32 = {CELLS_PER_LAYER}u;\n"
+        );
         let detail_shader = module(
             "detail",
             &[
                 include_str!("../shader.wgsl"),
+                badge_cells.as_str(),
                 include_str!("../objects.wgsl"),
                 include_str!("../effects.wgsl"),
                 include_str!("../visuals.wgsl"),
@@ -431,14 +438,25 @@ impl Pipelines {
         let overlay = prism("overlay", Depth::Ignore, None);
         let token_attributes = wgpu::vertex_attr_array![
             0 => Float32x3, 1 => Float32, 2 => Uint32, 3 => Unorm8x4, 4 => Unorm8x4,
-            5 => Uint8x4, 6 => Uint8x4, 7 => Uint8x4, 8 => Float32, 9 => Float32
+            5 => Uint8x4, 6 => Uint8x4, 7 => Uint8x4, 8 => Float32, 9 => Float32, 10 => Uint32
         ];
         let token_buffers = [Some(instances(size_of::<Token>(), &token_attributes))];
+        // Group 2 is the glyph atlas of the same shader module's text; tokens sample the
+        // badge atlas of group 3.
+        let tokens_layout = pipeline_layout(
+            "tokens",
+            &[
+                Some(&globals_layout),
+                Some(&locals_layout),
+                Some(&atlas_layout),
+                Some(&overlays.badges_layout),
+            ],
+        );
         let token = |label, entry| {
             builder.build(
                 &Stage {
                     label,
-                    layout: &detail,
+                    layout: &tokens_layout,
                     shader: &detail_shader,
                     entry,
                     buffers: &token_buffers,

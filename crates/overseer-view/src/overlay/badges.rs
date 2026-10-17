@@ -4,7 +4,9 @@
 //! [`ROWS`] cells (never square, at least two layers: see `world/terrain.rs` for why);
 //! when every cell is taken the layers double (up to the device's limit), the texture is
 //! created again and every badge uploaded again from the copy kept here. A user's badge
-//! keeps its cell; giving it again rewrites the cell.
+//! keeps its cell; giving it again rewrites the cell. The overlay draws badges on rooms; the
+//! tokens of creeps and power creeps draw their owner's badge from the same texture, by cell
+//! ([`Badges::index`]).
 
 use std::collections::HashMap;
 
@@ -128,6 +130,12 @@ impl Badges {
         self.cells.push(texels);
         self.dirty.mark(next);
         true
+    }
+
+    /// The cell of a user's badge (the token shader finds its place with [`COLUMNS`] and
+    /// [`CELLS_PER_LAYER`]).
+    pub fn index(&self, user: &str) -> Option<u32> {
+        self.by_user.get(user).copied()
     }
 
     /// The atlas rectangle of a user's badge: corner and size (`0..1`), and the layer.

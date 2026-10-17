@@ -1,7 +1,12 @@
-// Object tokens and their shadows (appended to common.wgsl and shader.wgsl): every object is
-// a square on top of its tile (or of its prism) whose fragment shader draws its emblem with
-// signed distance fields, antialiased by the pixel footprint. Colours are composed
-// premultiplied.
+// Object tokens and their shadows (appended to common.wgsl, shader.wgsl and the badge atlas
+// constants `BADGE_*`): every object is a square on top of its tile (or of its prism) whose
+// fragment shader draws its emblem with signed distance fields, antialiased by the pixel
+// footprint. Colours are composed premultiplied.
+
+// The badge atlas (`overlay/badges.rs`): creeps and power creeps carry their owner's badge.
+// Group 2 is the glyph atlas of the visuals in the same module.
+@group(3) @binding(0) var badge_atlas: texture_2d_array<f32>;
+@group(3) @binding(1) var badge_sampler: sampler;
 
 struct TokenIn {
     @location(0) position: vec3<f32>,
@@ -14,6 +19,7 @@ struct TokenIn {
     @location(7) parts_b: vec4<u32>,
     @location(8) fade: f32,
     @location(9) base: f32,
+    @location(10) badge: u32,
 }
 
 struct TokenOut {
@@ -29,6 +35,7 @@ struct TokenOut {
     @location(7) @interpolate(flat) parts_b: vec4<u32>,
     @location(8) @interpolate(flat) fade: f32,
     @location(9) @interpolate(flat) lift: f32,
+    @location(10) @interpolate(flat) badge: u32,
 }
 
 const PI: f32 = 3.14159265;
@@ -63,6 +70,7 @@ fn token_out(in: TokenIn, corner: vec2<f32>, half: f32, world: vec3<f32>) -> Tok
     out.parts_b = in.parts_b;
     out.fade = in.fade * locals.offset.w;
     out.lift = in.position.y - in.base;
+    out.badge = in.badge;
     return out;
 }
 
@@ -259,7 +267,7 @@ fn body(sd: f32, px: f32, rim: vec3<f32>, panel: f32) -> vec4<f32> {
     var acc = vec4<f32>(0.0);
     acc = over(acc, rgb8(24.0, 26.0, 31.0), cover(sd, px));
     acc = over(acc, rim, cover(sd + 0.025, px));
-    acc = over(acc, rgb8(58.0, 63.0, 73.0), cover(sd + 0.085, px));
+    acc = over(acc, rgb8(58.0, 63.0, 73.0), cover(sd + 0.068, px));
     acc = over(acc, rgb8(40.0, 44.0, 51.0), cover(sd + panel, px));
     return acc;
 }
@@ -309,8 +317,20 @@ fn pips(acc: vec4<f32>, p: vec2<f32>, lit: u32, count: u32, radius: f32, size: f
     return over(acc, on, cover(d, px));
 }
 
-// The creep's body-part ring: one segment per part, grouped by type.
-fn parts_ring(acc: vec4<f32>, p: vec2<f32>, parts_a: vec4<u32>, parts_b: vec4<u32>, inner: f32, outer: f32, px: f32) -> vec4<f32> {
+// The heading of a token (`gauges.w`: 256ths of a turn clockwise from north) as a turn
+// fraction.
+fn heading_of(gauges: vec4<u32>) -> f32 {
+    return f32(gauges.w) / 256.0;
+}
+
+// How far `p` is round from the back (0) to the front (1, the `heading`), on either side.
+fn from_back(p: vec2<f32>, heading: f32) -> f32 {
+    return abs(wrap(turn(p) - heading, 1.0) - 0.5) * 2.0;
+}
+
+// The creep's body-part ring: one segment per part, grouped by type and mirrored about the
+// heading, front to back: attack, ranged attack, heal, claim, work, tough, carry, move.
+fn parts_ring(acc: vec4<f32>, p: vec2<f32>, parts_a: vec4<u32>, parts_b: vec4<u32>, heading: f32, inner: f32, outer: f32, px: f32) -> vec4<f32> {
     var counts = array<u32, 8>(parts_a.x, parts_a.y, parts_a.z, parts_a.w, parts_b.x, parts_b.y, parts_b.z, parts_b.w);
     var total = 0u;
     for (var i = 0u; i < 8u; i = i + 1u) {
@@ -324,9 +344,9 @@ fn parts_ring(acc: vec4<f32>, p: vec2<f32>, parts_a: vec4<u32>, parts_b: vec4<u3
     if ring <= 0.0 {
         return acc;
     }
-    // Parts drawn from north, clockwise: tough, attack, ranged, heal, claim, work, carry, move.
-    var order = array<u32, 8>(7u, 3u, 4u, 5u, 6u, 1u, 2u, 0u);
-    let position = turn(p) * f32(total);
+    var order = array<u32, 8>(3u, 4u, 5u, 6u, 1u, 7u, 2u, 0u);
+    // Each part takes a `1 / total` share of either side of the ring.
+    let position = min((1.0 - from_back(p, heading)) * f32(total), f32(total) - 1e-3);
     var start = 0u;
     var color = part_color(0u);
     for (var i = 0u; i < 8u; i = i + 1u) {
@@ -337,13 +357,58 @@ fn parts_ring(acc: vec4<f32>, p: vec2<f32>, parts_a: vec4<u32>, parts_b: vec4<u3
         }
         start = start + count;
     }
-    // Thin gaps between parts, when they are wide enough to show.
-    let width = TAU * (inner + outer) * 0.5 / f32(total);
-    let gap = abs(fract(position + 0.5) - 0.5) * width;
-    let gaps = select(1.0, smoothstep(0.0, px * 1.2, gap - px * 0.25), width > px * 4.0);
+    // Thin gaps between parts, when they are wide enough to show; none across the front and
+    // the back, where a part meets its mirror image.
+    let width = PI * (inner + outer) * 0.5 / f32(total);
+    let nearest = round(position);
+    let inside = nearest >= 1.0 && nearest <= f32(total) - 1.0;
+    let gap = abs(position - nearest) * width;
+    let gaps = select(1.0, smoothstep(0.0, px * 1.2, gap - px * 0.25), inside && width > px * 4.0);
     var out = over(acc, rgb8(18.0, 20.0, 24.0), ring);
     out = over(out, color, ring * gaps);
     return out;
+}
+
+// A creep's store as a ring between `inner` and `outer` that fills from the back towards
+// the heading on both sides: dim where empty while the creep has `carry` parts.
+fn store_ring(acc: vec4<f32>, p: vec2<f32>, heading: f32, fill: vec4<f32>, carry: u32, inner: f32, outer: f32, px: f32) -> vec4<f32> {
+    if fill.a <= 0.0 && carry == 0u {
+        return acc;
+    }
+    let ring = band(length(p), inner, outer, px);
+    let amount = clamp((fill.a * 255.0 - 1.0) / 254.0, 0.0, 1.0) * step(0.001, fill.a);
+    // The lit edge, antialiased: a pixel is about this share of half the ring.
+    let edge = px / (PI * (inner + outer) * 0.5);
+    let lit = clamp((amount - from_back(p, heading)) / edge + 0.5, 0.0, 1.0) * step(0.001, amount);
+    var out = over(acc, rgb8(46.0, 50.0, 58.0), ring);
+    out = over(out, fill.rgb, ring * lit);
+    return out;
+}
+
+// The owner's badge (`TokenOut::badge`: its atlas cell plus one) on the disc of `radius`
+// round the token's centre, premultiplied. `dx` and `dy` are the screen derivatives of `p`
+// (sampled with explicit gradients: emblems run in non-uniform control flow).
+fn badge_disc(badge: u32, p: vec2<f32>, radius: f32, dx: vec2<f32>, dy: vec2<f32>, px: f32) -> vec4<f32> {
+    let cell = badge - 1u;
+    let block = cell % BADGE_CELLS_PER_LAYER;
+    let corner = vec2<f32>(f32(block % BADGE_COLUMNS), f32(block / BADGE_COLUMNS));
+    let scale = vec2<f32>(1.0 / f32(BADGE_COLUMNS), 1.0 / f32(BADGE_ROWS));
+    let unit = clamp(p / (2.0 * radius) + vec2<f32>(0.5), vec2<f32>(0.02), vec2<f32>(0.98));
+    let k = scale / (2.0 * radius);
+    let color = textureSampleGrad(
+        badge_atlas,
+        badge_sampler,
+        (corner + unit) * scale,
+        i32(cell / BADGE_CELLS_PER_LAYER),
+        dx * k,
+        dy * k,
+    );
+    return color * cover(length(p) - radius, px);
+}
+
+// Premultiplied `top` over `acc`.
+fn over_premultiplied(acc: vec4<f32>, top: vec4<f32>) -> vec4<f32> {
+    return acc * (1.0 - top.a) + top;
 }
 
 fn hits_bar(acc: vec4<f32>, p: vec2<f32>, hits: u32, px: f32) -> vec4<f32> {
@@ -361,7 +426,7 @@ fn hits_bar(acc: vec4<f32>, p: vec2<f32>, hits: u32, px: f32) -> vec4<f32> {
     return out;
 }
 
-fn emblem(in: TokenOut, p: vec2<f32>, px: f32) -> Emblem {
+fn emblem(in: TokenOut, p: vec2<f32>, px: f32, dx: vec2<f32>, dy: vec2<f32>) -> Emblem {
     let glyph = in.kind & 255u;
     let links = (in.kind >> 8u) & 255u;
     let shape = (in.kind >> 16u) & 255u;
@@ -378,20 +443,32 @@ fn emblem(in: TokenOut, p: vec2<f32>, px: f32) -> Emblem {
     }
     var acc = vec4<f32>(0.0);
     switch glyph {
-        // Creep.
+        // Creep: owner rim, body parts mirrored about the heading, the store ring and the
+        // owner's badge (a dark core with the store's glow until the badge is there).
         case 0u: {
+            let d = length(p);
+            let heading = heading_of(in.gauges);
             acc = over(acc, rgb8(18.0, 20.0, 24.0), cover(sd, px));
-            acc = over(acc, rim, band(length(p), r - 0.075, r - 0.012, px));
-            acc = parts_ring(acc, p, in.parts_a, in.parts_b, r * 0.56, r * 0.8, px);
-            acc = over(acc, rgb8(30.0, 33.0, 39.0), cover(length(p) - r * 0.52, px));
-            acc = core(acc, p, r * 0.42, in.fill, px);
+            acc = over(acc, rim, band(d, r - 0.045, r - 0.01, px));
+            acc = parts_ring(acc, p, in.parts_a, in.parts_b, heading, r * 0.64, r * 0.86, px);
+            if in.badge > 0u {
+                acc = store_ring(acc, p, heading, in.fill, in.parts_a.z, r * 0.5, r * 0.59, px);
+                acc = over_premultiplied(acc, badge_disc(in.badge, p, r * 0.46, dx, dy, px));
+            } else {
+                acc = over(acc, mix(rgb8(30.0, 33.0, 39.0), rim, 0.15), cover(d - r * 0.6, px));
+                acc = core(acc, p, r * 0.48, in.fill, px);
+            }
         }
-        // Power creep.
+        // Power creep: a pentagon with a crimson ring round the owner's badge.
         case 1u: {
-            acc = body(sd, px, rim, 0.12);
-            let star = sd_ngon(p, 5.0, PI, r * 0.32, 0.02);
-            acc = over(acc, rgb8(255.0, 61.0, 110.0), band(star, -0.035, 0.0, px));
-            acc = core(acc, p, r * 0.3, in.fill, px);
+            acc = body(sd, px, rim, 0.1);
+            let ring = sd_ngon(p, 5.0, PI, r * 0.6, 0.03);
+            acc = over(acc, rgb8(255.0, 61.0, 110.0), band(ring, -0.03, 0.0, px));
+            if in.badge > 0u {
+                acc = over_premultiplied(acc, badge_disc(in.badge, p, r * 0.44, dx, dy, px));
+            } else {
+                acc = core(acc, p, r * 0.36, in.fill, px);
+            }
         }
         // Spawn.
         case 2u: {
@@ -408,13 +485,18 @@ fn emblem(in: TokenOut, p: vec2<f32>, px: f32) -> Emblem {
             acc = body(sd, px, rim, 0.09);
             acc = core(acc, p, r * 0.5, in.fill, px);
         }
-        // Tower.
+        // Tower: a turret whose barrel points at its last target.
         case 4u: {
             acc = body(sd, px, rim, 0.12);
-            let turret = length(p) - r * 0.55;
-            acc = over(acc, rgb8(24.0, 26.0, 31.0), cover(turret, px));
+            let angle = heading_of(in.gauges) * TAU;
+            let aim = vec2<f32>(sin(angle), -cos(angle));
+            let barrel = sd_segment(p, aim * r * 0.2, aim * r * 0.95) - r * 0.12;
+            let turret = length(p) - r * 0.52;
+            let gun = min(turret, barrel);
+            acc = over(acc, rgb8(20.0, 22.0, 26.0), cover(gun, px));
             acc = over(acc, rgb8(70.0, 76.0, 88.0), cover(turret + 0.03, px));
-            acc = core(acc, p, r * 0.42, in.fill, px);
+            acc = over(acc, rgb8(118.0, 126.0, 140.0), cover(barrel + 0.025, px));
+            acc = core(acc, p, r * 0.4, in.fill, px);
         }
         // Storage.
         case 5u: {
@@ -625,12 +707,15 @@ fn emblem(in: TokenOut, p: vec2<f32>, px: f32) -> Emblem {
 @fragment
 fn token_fragment(in: TokenOut) -> @location(0) vec4<f32> {
     let p = in.local;
+    // Screen derivatives in uniform control flow: badges sample with them.
+    let dx = dpdx(p);
+    let dy = dpdy(p);
     // Tiles per pixel.
-    let px = max(length(fwidth(p)) * 0.75, 1e-4);
-    let e = emblem(in, p, px);
+    let px = max(length(abs(dx) + abs(dy)) * 0.75, 1e-4);
+    let e = emblem(in, p, px, dx, dy);
     var color = e.color;
     // Zoomed out (tiles of a few pixels): the silhouette in one summary colour.
-    let simple = smoothstep(0.035, 0.1, px);
+    let simple = smoothstep(0.045, 0.12, px);
     if simple > 0.0 {
         let summary = vec4<f32>(e.summary, 1.0) * cover(e.sd, px) * color.a;
         color = mix(color, summary, simple);

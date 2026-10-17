@@ -1,6 +1,8 @@
 //! Timing of tick-to-tick motion: the server's tick duration, measured from snapshot
-//! arrival times, and the eased glide of an object over most of a tick.
+//! arrival times, the eased glide of an object over most of a tick, and its turn towards a
+//! new heading.
 
+use glam::Vec2;
 use overseer::map::RoomCoord;
 
 use crate::{MAX_TICK_MS, MIN_TICK_MS, MOVE_DURATION_MS};
@@ -9,6 +11,11 @@ use crate::{MAX_TICK_MS, MIN_TICK_MS, MOVE_DURATION_MS};
 pub const DEFAULT_TICK_MS: f64 = 1000.0;
 /// Share of a tick an object glides for: it arrives just before the next tick.
 pub const GLIDE_SHARE: f64 = 0.82;
+/// How long an object turns to a new heading, in milliseconds.
+pub const TURN_MS: f64 = 200.0;
+/// The heading of objects that have not moved or aimed yet: south, towards the viewer of
+/// the top-down view.
+pub const DEFAULT_HEADING: f32 = 0.5;
 /// Intervals kept for the estimate.
 const SAMPLES: usize = 9;
 /// Snapshots further apart (in ticks) say nothing about the tick rate (a lost connection).
@@ -103,4 +110,21 @@ pub fn progress(now: f64, start: f64, duration: f64) -> f32 {
         return 1.0;
     }
     ((now - start) / duration).clamp(0.0, 1.0) as f32
+}
+
+/// The heading from `from` to `to` (tile coordinates): a turn fraction `0..1` clockwise
+/// from north; `None` when they are the same point.
+pub fn heading(from: Vec2, to: Vec2) -> Option<f32> {
+    let delta = to - from;
+    if delta.length_squared() < 1e-6 {
+        return None;
+    }
+    Some((delta.x.atan2(-delta.y) / std::f32::consts::TAU).rem_euclid(1.0))
+}
+
+/// The heading `t` (`0..=1`) of the way from heading `from` to heading `to`, turning the
+/// short way round.
+pub fn turn(from: f32, to: f32, t: f32) -> f32 {
+    let delta = (to - from + 0.5).rem_euclid(1.0) - 0.5;
+    (from + delta * t).rem_euclid(1.0)
 }

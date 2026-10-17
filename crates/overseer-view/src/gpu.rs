@@ -817,8 +817,12 @@ impl Gpu {
                     }
                 }
             }
-            if gpu.tokens.len > 0 {
+            if gpu.tokens.len > 0
+                && let Some(badges) = self.overlay.badges_group()
+            {
                 pass.set_vertex_buffer(0, gpu.tokens.slice(0..gpu.tokens.len));
+                pass.set_bind_group(2, &self.atlas_group, &[]);
+                pass.set_bind_group(3, badges, &[]);
                 pass.set_pipeline(&self.pipelines.shadows);
                 pass.draw(0..6, 0..gpu.tokens.len);
                 pass.set_pipeline(&self.pipelines.tokens);

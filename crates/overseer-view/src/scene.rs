@@ -21,7 +21,7 @@ use crate::mesh::{self, EffectInstance, Instance, Mesh, Shape, TerrainVertex, To
 use crate::text::Atlas;
 use connect::Grid;
 use effects::{Anchor, Effect};
-use motion::{ease, progress};
+use motion::{DEFAULT_HEADING, TURN_MS, ease, progress};
 use style::{Gauges, Glyph, Join, Look, flag};
 use visuals::Visuals;
 
@@ -54,6 +54,14 @@ struct Object {
     dying: Option<f64>,
     /// Owner colour (sRGB, alpha 0 when unowned).
     accent: [u8; 4],
+    /// The owner's badge (`Token::badge`: its atlas cell plus one, 0: none); creeps and
+    /// power creeps only ([`Scene::set_badges`]).
+    badge: u32,
+    /// Heading (a turn fraction clockwise from north: a creep's direction of travel, a
+    /// tower's aim), turned the short way from `heading_from` since `turned` (ms).
+    heading: f32,
+    heading_from: f32,
+    turned: f64,
 }
 
 impl Object {
@@ -65,6 +73,15 @@ impl Object {
             return to;
         }
         self.from.lerp(to, ease(progress))
+    }
+
+    /// Heading at `now` (ms): turning from `heading_from` to `heading`.
+    fn heading(&self, now: f64) -> f32 {
+        motion::turn(
+            self.heading_from,
+            self.heading,
+            ease(progress(now, self.turned, TURN_MS)),
+        )
     }
 
     /// Opacity and scale at `now`: fading in after birth, out after removal.
@@ -80,6 +97,7 @@ impl Object {
     fn animating(&self, now: f64) -> bool {
         progress(now, self.start, self.duration) < 1.0
             || progress(now, self.born, FADE_MS) < 1.0
+            || progress(now, self.turned, TURN_MS) < 1.0
             || self.dying.is_some()
     }
 }
@@ -254,6 +272,14 @@ impl Scene {
                 None if same_room => (tile_vec(tile), f64::NEG_INFINITY, 0.0, now),
                 None => (tile_vec(tile), f64::NEG_INFINITY, 0.0, f64::NEG_INFINITY),
             };
+            let (heading_from, heading, turned) = headings(
+                previous.get(object.id()).copied(),
+                object,
+                look.glyph,
+                tile,
+                now,
+                self.features.motion,
+            );
             let grid = match (look.glyph, look.join) {
                 (_, Join::None) => None,
                 (Glyph::Road, _) => Some(0),
@@ -295,6 +321,10 @@ impl Scene {
                 born,
                 dying: None,
                 accent: [0; 4],
+                badge: 0,
+                heading,
+                heading_from,
+                turned,
             });
         }
         // Removed objects fade out where they are drawn.
@@ -365,6 +395,19 @@ impl Scene {
         }
     }
 
+    /// Gives every creep and power creep its owner's badge: `cell` is the badge atlas cell
+    /// of a user, `None` while the user's badge is not there.
+    pub fn set_badges(&mut self, cell: impl Fn(&str) -> Option<u32>) {
+        for object in self.objects.iter_mut().chain(&mut self.ghosts) {
+            object.badge = match (object.look.glyph, object.user.as_deref()) {
+                (Glyph::Creep | Glyph::PowerCreep, Some(user)) => {
+                    cell(user).map_or(0, |cell| cell + 1)
+                }
+                _ => 0,
+            };
+        }
+    }
+
     /// Sets the feature switches (they apply from the next snapshot; effects and visuals
     /// switched off disappear at once).
     pub fn set_features(&mut self, features: Features) {
@@ -424,8 +467,9 @@ impl Scene {
             }
             let position = object.position(now);
             let base = self.height_at(position);
+            let heading = object.heading(now);
             self.tokens
-                .push(token(object, position, base, opacity, scale));
+                .push(token(object, position, base, heading, (opacity, scale)));
         }
         // Far to near: the blended tops overlap correctly.
         let depth = |token: &Token| (Vec3::from(token.position) - eye.position).dot(eye.forward);
@@ -558,8 +602,10 @@ impl Scene {
     }
 }
 
-/// The token of `object` drawn at `position` on ground `base`.
-fn token(object: &Object, position: Vec2, base: f32, opacity: f32, scale: f32) -> Token {
+/// The token of `object` drawn at `position` on ground `base`, turned to `heading`, at
+/// `(opacity, scale)` of its fade.
+fn token(object: &Object, position: Vec2, base: f32, heading: f32, fade: (f32, f32)) -> Token {
+    let (opacity, scale) = fade;
     let gauges = &object.gauges;
     let shape = object.look.shape.map_or(NO_SHAPE, Shape::index);
     let kind = u32::from(object.look.glyph as u8)
@@ -584,12 +630,58 @@ fn token(object: &Object, position: Vec2, base: f32, opacity: f32, scale: f32) -
             gauges.hits.map_or(0, gauge),
             gauges.progress.map_or(0, gauge),
             gauges.level,
-            0,
+            heading_byte(heading),
         ],
         parts_a,
         parts_b,
         fade: opacity,
         base,
+        badge: object.badge,
+    }
+}
+
+/// A heading (a turn fraction) as a byte: 256ths of a turn, `1.0` wrapping to 0.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "0..=256 after the wrap"
+)]
+fn heading_byte(heading: f32) -> u8 {
+    u8::try_from((heading.rem_euclid(1.0) * 256.0).round() as u32 % 256).unwrap_or(0)
+}
+
+/// Heading from, heading and turn start (ms) of `object`, a `glyph` on `tile`, in a
+/// snapshot that arrives at `now`; `old` is the object as shown before. Creeps and power
+/// creeps that moved head where they went; creeps that act on a target and towers face it;
+/// others keep their heading. `motion` off: no turn.
+fn headings(
+    old: Option<&Object>,
+    object: &GameRoomObject,
+    glyph: Glyph,
+    tile: (u8, u8),
+    now: f64,
+    motion: bool,
+) -> (f32, f32, f64) {
+    let at = tile_vec(tile);
+    let moved = old
+        .filter(|old| old.tile != tile && matches!(glyph, Glyph::Creep | Glyph::PowerCreep))
+        .and_then(|old| motion::heading(tile_vec(old.tile), at));
+    let aimed = || match glyph {
+        Glyph::Creep | Glyph::Tower => action_log(object)
+            .and_then(effects::aim)
+            .and_then(|target| motion::heading(at, target)),
+        _ => None,
+    };
+    let new = moved.or_else(aimed);
+    match (old, new) {
+        // Facing the same way again: the turn under way goes on.
+        (Some(old), Some(new)) if (new - old.heading).abs() < 1e-4 => {
+            (old.heading_from, old.heading, old.turned)
+        }
+        (Some(old), Some(new)) if motion => (old.heading(now), new, now),
+        (_, Some(new)) => (new, new, f64::NEG_INFINITY),
+        (Some(old), None) => (old.heading_from, old.heading, old.turned),
+        (None, None) => (DEFAULT_HEADING, DEFAULT_HEADING, f64::NEG_INFINITY),
     }
 }
 

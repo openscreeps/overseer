@@ -156,6 +156,23 @@ fn gauges_show_stores_hits_progress_and_body_parts() {
     let gauges = Gauges::of(&controller, Some(1));
     assert_eq!((gauges.level, gauges.progress), (4, Some(0.25)));
 
+    // A lab shows the compound it holds (of 3000), not the energy that powers it.
+    let lab = |store: serde_json::Value| {
+        object(json!({
+            "_id": "l", "type": "lab", "room": "W1N1", "x": 1, "y": 1, "user": ME,
+            "hits": 500, "hitsMax": 500, "notifyWhenAttacked": true, "cooldown": 0,
+            "store": store, "storeCapacity": 5000, "storeCapacityResource": {"energy": 2000},
+        }))
+    };
+    let gauges = Gauges::of(&lab(json!({"energy": 2000, "XGH2O": 1500})), None);
+    assert_eq!(gauges.store, Some((0.5, resource_color("XGH2O"))));
+    let gauges = Gauges::of(&lab(json!({"energy": 1000})), None);
+    assert_eq!(
+        gauges.store.unwrap().1,
+        resource_color("energy"),
+        "energy alone"
+    );
+
     let small = Gauges::of(&super::energy("e", 1, 1), None).size.unwrap();
     let big = object(json!({
         "_id": "e", "type": "energy", "room": "W1N1", "x": 1, "y": 1, "energy": 5000,

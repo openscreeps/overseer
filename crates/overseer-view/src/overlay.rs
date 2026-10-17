@@ -219,11 +219,12 @@ impl Overlay {
         }
     }
 
-    /// Stores a user's badge (see [`Badges::set`]).
-    pub fn set_badge(&mut self, user: &str, rgba: &[u8], size: u32) {
-        if self.badges.set(user, rgba, size) {
-            self.marks_stale = true;
-        }
+    /// Stores a user's badge (see [`Badges::set`]); returns whether the user had none
+    /// before.
+    pub fn set_badge(&mut self, user: &str, rgba: &[u8], size: u32) -> bool {
+        let new = self.badges.set(user, rgba, size);
+        self.marks_stale |= new;
+        new
     }
 
     /// Sets a room's portals; returns whether anything changed.

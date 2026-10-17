@@ -70,7 +70,8 @@ pub struct Token {
     pub accent: [u8; 4],
     /// Colour of the stored resource (sRGB); alpha: how full the store is.
     pub fill: [u8; 4],
-    /// Hits (255: undamaged, no bar), progress, controller level, a spare byte.
+    /// Hits (255: undamaged, no bar), progress, controller level and heading (a creep's
+    /// direction of travel, a tower's aim: a 256th of a turn clockwise from north).
     pub gauges: [u8; 4],
     /// Body part counts of a creep: move, work, carry, attack.
     pub parts_a: [u8; 4],
@@ -80,6 +81,8 @@ pub struct Token {
     pub fade: f32,
     /// Height of the ground under the object (its shadow falls there).
     pub base: f32,
+    /// The owner's badge: its badge atlas cell plus one (`overlay/badges.rs`); 0: none.
+    pub badge: u32,
 }
 
 /// An action effect: a beam, bolt or burst between two room-local points.

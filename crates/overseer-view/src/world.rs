@@ -314,6 +314,16 @@ impl World {
         }
     }
 
+    /// Stores a user's badge (see `Badges::set`); the creeps of a new user show it.
+    pub fn set_badge(&mut self, user: &str, rgba: &[u8], size: u32) {
+        if self.overlay.set_badge(user, rgba, size) {
+            let badges = &self.overlay.badges;
+            for detail in self.details.iter_mut().flatten() {
+                detail.scene.set_badges(|user| badges.index(user));
+            }
+        }
+    }
+
     /// Brings the overlay up to date for `frame` (labels for the view, badges and portal
     /// marks for what changed).
     pub fn update_overlay(&mut self, frame: &overlay::Frame) {
@@ -383,6 +393,8 @@ impl World {
         };
         if let Some(detail) = slot {
             detail.scene.set_room(snapshot, timing, &mut self.atlas);
+            let badges = &self.overlay.badges;
+            detail.scene.set_badges(|user| badges.index(user));
         }
         true
     }

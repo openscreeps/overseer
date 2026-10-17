@@ -91,17 +91,28 @@
 //!   has its own silhouette (disc, rounded square, diamond, hexagon, octagon, triangle,
 //!   pentagon, rings and joined blocks) and emblem. Owned objects carry their owner's colour
 //!   as a rim (own green, other players red, Invaders orange, Source Keepers purple; a
-//!   reserved controller its reserver's); structures are slate. Creeps show a ring of body
-//!   parts (one segment per part, a colour per type) around their carried resource. Stores
-//!   (creeps, spawns, extensions, towers, links, labs, nukers, power spawns) show as a
-//!   glowing core of radius ∝ √fill in the main resource's colour, tanks (storage,
+//!   reserved controller its reserver's); structures are slate.
+//! - **Creeps** carry their owner's badge ([`Viewer::set_badge`]) in the middle, inside a
+//!   ring of body parts (one segment per part, a colour per type). The parts are mirrored
+//!   about the creep's heading, front to back: attack, ranged attack, heal, claim, work,
+//!   tough, carry, move. A thin ring between the badge and the parts shows the carried
+//!   resource, filling from the back towards the front (dim while empty, for creeps with
+//!   carry parts). Until the owner's badge is there (and for the NPCs, which have none), a
+//!   dark core shows the carried resource as a glow instead. Power creeps carry the badge in
+//!   a crimson ring. A creep heads where it last moved, else at the target of its action
+//!   (attack, heal, harvest, build, repair, upgrade, reserve); a tower's barrel points at
+//!   the target of its last attack, heal or repair. Both turn the short way round over
+//!   200 ms; objects seen first face south.
+//! - **Structures**: stores (spawns, extensions, towers, links, labs, nukers, power spawns)
+//!   show as a glowing core of radius ∝ √fill in the main resource's colour, tanks (storage,
 //!   terminal, container, factory) as a level; damaged objects get a hits bar (not walls
 //!   and ramparts); controllers show their level as pips and their progress as an arc,
 //!   spawns their spawning progress, construction sites theirs. Ramparts are translucent
 //!   blocks over what they protect; roads link to neighbouring roads (diagonals only where
 //!   no orthogonal path exists), constructed walls and ramparts merge with neighbours.
-//!   Where tiles are only a few pixels wide each token turns into its silhouette in one
-//!   summary colour (owner or kind), so the room stays readable when zoomed out.
+//! - Where tiles are less than about 24 device pixels wide, each token blends into its
+//!   silhouette in one summary colour (owner or kind), fully so below about 9 pixels, so the
+//!   room stays readable when zoomed out.
 //! - **Perspective** adds prisms under the tokens (lit, darkening towards the ground) and
 //!   a bevel lit from the light's side; tokens with a prism cast a soft shadow in both
 //!   modes. Tokens are blended far to near.
@@ -233,8 +244,10 @@
 //!    16). Set CSS `touch-action: none` on the canvas so touch gestures reach the viewer,
 //!    and suppress `contextmenu` for right-drag.
 //! 3. Feed the world's data as described under Interest, the signed-in user id to
-//!    [`Viewer::set_user`] and users' badges to [`Viewer::set_badge`]. On `pointermove`
-//!    without a pressed button, [`Viewer::room_at`] names what is under the pointer and
+//!    [`Viewer::set_user`] and users' badges to [`Viewer::set_badge`]: the owners and
+//!    reservers of the rooms in view, and the users of each live room
+//!    (`RoomSnapshot::users`), whose creeps carry their badge. On `pointermove` without a
+//!    pressed button, [`Viewer::room_at`] names what is under the pointer and
 //!    [`Viewer::set_hover`] outlines its room.
 //! 4. Request an animation frame after any of the calls above, and call [`Viewer::render`]
 //!    in it; request another while [`FrameStats::animating`] is `true`. Nothing else
@@ -595,10 +608,11 @@ impl Viewer {
 
     /// Stores a user's badge: `rgba` is a `size` × `size` square of premultiplied RGBA
     /// bytes (row major; [`BADGE_SIZE`] needs no resampling). Rooms the user owns show it
-    /// centred, rooms they reserve a small faded copy (see the crate documentation).
-    /// Giving it again replaces it; bytes that do not match `size` are ignored.
+    /// centred, rooms they reserve a small faded copy, and the user's creeps and power
+    /// creeps carry it (see the crate documentation). Giving it again replaces it; bytes
+    /// that do not match `size` are ignored.
     pub fn set_badge(&mut self, user_id: &str, rgba: &[u8], size: u32) {
-        self.view.world.overlay.set_badge(user_id, rgba, size);
+        self.view.world.set_badge(user_id, rgba, size);
     }
 
     /// Sets a room's portals (`WorldEvent::Portals`; empty: none), replacing those given
