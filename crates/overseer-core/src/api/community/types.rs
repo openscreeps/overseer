@@ -62,11 +62,10 @@ pub use crate::api::official::types::{
     GameRoomObjectStrongholdPopulationEntry, GameRoomObjectTerminal, GameRoomObjectTerminalSend,
     GameRoomObjectTombstone, GameRoomObjectTower, GameRoomObjectWallDecay,
     GameRoomOverviewResponse, GameRoomOverviewResponseOwner, GameRoomStatInterval,
-    GameRoomStatName, GameRoomStatus, GameRoomStatusResponse, GameRoomTerrainDocument,
-    GameRoomTerrainEncodedResponse, GameRoomTerrainResponse, GameRoomTerrainTilesResponse,
-    GameRoomsRequest, GameRoomsResponse, GameSetNotifyWhenAttackedRequest, GameShardOnlyRequest,
-    GameStatPoint, GameTerrainTile, GameTerrainTileType, GameTimeResponse, GameWorldSizeResponse,
-    JsonValue, LeaderboardFindAllResponse, LeaderboardFindResponse, LeaderboardFindSeasonResponse,
+    GameRoomStatName, GameRoomStatus, GameRoomStatusResponse, GameRoomTerrainTilesResponse,
+    GameRoomsRequest, GameSetNotifyWhenAttackedRequest, GameShardOnlyRequest, GameStatPoint,
+    GameTerrainTile, GameTerrainTileType, GameTimeResponse, GameWorldSizeResponse, JsonValue,
+    LeaderboardFindAllResponse, LeaderboardFindResponse, LeaderboardFindSeasonResponse,
     LeaderboardListResponse, LeaderboardMode, LeaderboardResult, LeaderboardSeason,
     LeaderboardSeasonId, LeaderboardSeasonsResponse, LeaderboardUser, MarketOrder,
     MarketOrderIndexEntry, MarketOrderType, MarketOrdersIndexResponse, MarketOrdersResponse,
@@ -98,6 +97,45 @@ pub use crate::api::official::types::{
     UserStatInterval, UserStatsResponse, UserTimestampResponse, UserWorldStartRoomResponse,
     UserWorldStatus, UserWorldStatusResponse,
 };
+
+/// Encoded terrain document (`rooms.terrain`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GameRoomTerrainDocument {
+    /// Document id.
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The `room` property.
+    pub room: String,
+    /// 2500 digits indexed by `y * 50 + x`; each digit is a bit mask: 0 plain, 1 wall (`TERRAIN_MASK_WALL`), 2 swamp (`TERRAIN_MASK_SWAMP`), 3 wall.
+    pub terrain: String,
+    /// Absent in documents of rooms that the stock CLI creates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+}
+
+/// Response when `encoded` is non-empty.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GameRoomTerrainEncodedResponse {
+    /// The `terrain` property.
+    pub terrain: Vec<GameRoomTerrainDocument>,
+}
+
+/// Reply of `endpoints::GameRoomTerrain`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GameRoomTerrainResponse {
+    /// A `GameRoomTerrainEncodedResponse`.
+    Encoded(GameRoomTerrainEncodedResponse),
+    /// A `GameRoomTerrainTilesResponse`.
+    Tiles(GameRoomTerrainTilesResponse),
+}
+
+/// The `GameRoomsResponse` schema.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GameRoomsResponse {
+    /// One encoded terrain document per known requested room; the official client reads `room`.
+    pub rooms: Vec<GameRoomTerrainDocument>,
+}
 
 /// The `GameTickResponse` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

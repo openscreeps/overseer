@@ -4,9 +4,9 @@
 //! A [`Terrain`] keeps its tiles packed, 2 bits per tile ([`Terrain::packed`]): 625 bytes per room,
 //! so a whole shard of 182×182 rooms takes about 20 MB.
 
-use crate::api::official::types::{
-    GameRoomTerrainDocument, GameRoomTerrainResponse, GameTerrainTile, GameTerrainTileType,
-};
+use crate::api::community::types as community;
+use crate::api::official::types as official;
+use crate::api::official::types::{GameTerrainTile, GameTerrainTileType};
 
 /// Tiles per room side.
 const SIZE: usize = 50;
@@ -191,31 +191,40 @@ const fn shift(index: usize) -> usize {
     (index % PER_BYTE) * 2
 }
 
-/// Every contract's terrain document (`rooms.terrain`), the item of `POST /api/game/rooms`.
-impl TryFrom<&GameRoomTerrainDocument> for Terrain {
-    type Error = TerrainError;
+/// The terrain document (`rooms.terrain`, the item of `POST /api/game/rooms`) and the
+/// `GET /api/game/room-terrain` reply in either form (the encoded document with `encoded=1`,
+/// or the wall and swamp tiles) of the contract `$module`. `OpenScreeps` shares the official
+/// types; the community contract has its own (its documents can lack `type`).
+macro_rules! terrain_from {
+    ($($module:ident),+) => {$(
+        impl TryFrom<&$module::GameRoomTerrainDocument> for Terrain {
+            type Error = TerrainError;
 
-    fn try_from(document: &GameRoomTerrainDocument) -> Result<Self, TerrainError> {
-        Self::decode(&document.terrain)
-    }
-}
-
-/// Every contract's `GET /api/game/room-terrain` reply, in either form: the encoded document
-/// (`encoded=1`) or the wall and swamp tiles.
-impl TryFrom<GameRoomTerrainResponse> for Terrain {
-    type Error = TerrainError;
-
-    fn try_from(reply: GameRoomTerrainResponse) -> Result<Self, TerrainError> {
-        match reply {
-            GameRoomTerrainResponse::Encoded(encoded) => encoded
-                .terrain
-                .first()
-                .ok_or(TerrainError::Missing)
-                .and_then(Self::try_from),
-            GameRoomTerrainResponse::Tiles(tiles) => Self::from_tiles(&tiles.terrain),
+            fn try_from(document: &$module::GameRoomTerrainDocument) -> Result<Self, TerrainError> {
+                Self::decode(&document.terrain)
+            }
         }
-    }
+
+        impl TryFrom<$module::GameRoomTerrainResponse> for Terrain {
+            type Error = TerrainError;
+
+            fn try_from(reply: $module::GameRoomTerrainResponse) -> Result<Self, TerrainError> {
+                match reply {
+                    $module::GameRoomTerrainResponse::Encoded(encoded) => encoded
+                        .terrain
+                        .first()
+                        .ok_or(TerrainError::Missing)
+                        .and_then(Self::try_from),
+                    $module::GameRoomTerrainResponse::Tiles(tiles) => {
+                        Self::from_tiles(&tiles.terrain)
+                    }
+                }
+            }
+        }
+    )+};
 }
+
+terrain_from!(official, community);
 
 #[cfg(test)]
 mod tests {

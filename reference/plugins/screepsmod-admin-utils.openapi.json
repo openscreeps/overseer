@@ -3116,13 +3116,16 @@
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsHttpClient.ts#L1046-L1052",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/game.ts#L164-L178",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/game.ts#L186-L189",
-          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsRateLimitTracker.ts#L67-L80"
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsRateLimitTracker.ts#L67-L80",
+          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/cli/map.js#L558"
         ],
         "x-profile": {
-          "status": "required",
+          "status": "adapted",
+          "reason": "Terrain documents carry `type` only where the world data sets it: rooms that the stock CLI creates (`map.generateRoom`) are stored as `{room, terrain}` without `type`, and the handler returns the stored documents as they are (override: GameRoomTerrainDocument).",
           "overriddenComponents": [
             "#/components/parameters/ServerPassword",
-            "#/components/parameters/Shard"
+            "#/components/parameters/Shard",
+            "#/components/schemas/GameRoomTerrainDocument"
           ]
         }
       }
@@ -3184,14 +3187,17 @@
         },
         "x-sources": [
           "https://screeps.com/a/app2/main.js?bust=1787842760865#L197506C36",
-          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/game.js#L412-L417"
+          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/api/game.js#L412-L417",
+          "https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/cli/map.js#L558"
         ],
         "x-unverified": "The official client reads only `rooms[].room`; the remaining terrain-document fields follow backend-local.",
         "x-profile": {
-          "status": "required",
+          "status": "adapted",
+          "reason": "Terrain documents carry `type` only where the world data sets it: rooms that the stock CLI creates (`map.generateRoom`) are stored as `{room, terrain}` without `type`, and the handler returns the stored documents as they are (override: GameRoomTerrainDocument).",
           "overriddenComponents": [
             "#/components/parameters/ServerPassword",
-            "#/components/parameters/Shard"
+            "#/components/parameters/Shard",
+            "#/components/schemas/GameRoomTerrainDocument"
           ]
         }
       }
@@ -16565,15 +16571,16 @@
           },
           "type": {
             "type": "string",
-            "const": "terrain"
+            "const": "terrain",
+            "description": "Absent in documents of rooms that the stock CLI creates."
           }
         },
         "required": [
           "room",
-          "terrain",
-          "type"
+          "terrain"
         ],
-        "additionalProperties": true
+        "additionalProperties": true,
+        "x-profile-reason": "Rooms that the stock CLI creates store terrain documents without `type`."
       },
       "GameRoomTerrainEncodedResponse": {
         "allOf": [

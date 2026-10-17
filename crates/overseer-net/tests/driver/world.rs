@@ -5,7 +5,7 @@
 
 use overseer_core::Token;
 use overseer_core::model::platform::Subsystem;
-use overseer_core::model::world::GameRoomObject;
+use overseer_core::model::world::{GameRoomObject, Tile};
 use overseer_net::api::{RoomObjectsSource as _, WorldApi as _};
 use overseer_net::{Client, Error};
 use serde_json::{Value, json};
@@ -236,4 +236,30 @@ async fn map_stats_rankings_read_alike_from_every_contract() {
         body(&official, "/api/game/map-stats"),
         json!({"rooms": ["W1N1"], "shard": "shard0", "statName": "energyHarvested8"})
     );
+}
+
+/// Community servers store the terrain of rooms that the stock CLI creates without `type`
+/// (screeps.newbieland.net, for example): such documents decode.
+#[tokio::test]
+async fn community_terrain_documents_without_a_type_decode() {
+    let server = Server::start(
+        |request: &Request| match request.path.as_str() {
+            "/api/version" => (200, STOCK_VERSION.to_owned()),
+            "/api/game/rooms" => (
+                200,
+                format!(
+                    r#"{{"ok":1,"rooms":[{{"_id":"t1","room":"W1N1","terrain":"1{}"}}]}}"#,
+                    "0".repeat(2499)
+                ),
+            ),
+            _ => (404, "{}".to_owned()),
+        },
+        |_| true,
+    )
+    .await;
+    let client = Client::builder(server.url()).build().unwrap();
+    let terrains = client.terrains(None, ["W1N1"]).await.unwrap();
+    assert_eq!(terrains.len(), 1);
+    assert_eq!(terrains["W1N1"].get(0, 0), Some(Tile::Wall));
+    assert_eq!(terrains["W1N1"].get(1, 0), Some(Tile::Plain));
 }
