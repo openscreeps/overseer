@@ -575,18 +575,36 @@ impl WorldMap {
         self.subscribe_minimaps(held);
     }
 
-    /// Subscribes the live minimaps of the interest, nearest first: up to [`MINIMAP_CAP`],
-    /// or [`HELD_ROOM_MAPS`] while `held` (a detail room waits for its first update).
+    /// Subscribes the live minimaps of the interest, nearest first, up to [`MINIMAP_CAP`].
+    /// While `held` (a detail room waits for its first update) at most [`HELD_ROOM_MAPS`] new
+    /// ones join; the live ones stay live, so the rooms around the map do not blink out when
+    /// another room is opened.
     fn subscribe_minimaps(&mut self, held: bool) {
         self.minimaps_held = held;
         let Some(view) = &mut self.minimaps else {
             return;
         };
-        let cap = if held { HELD_ROOM_MAPS } else { MINIMAP_CAP };
-        let minimaps = unique(&self.interest.minimaps);
-        let live = minimaps.len().min(cap);
-        self.work.portals.set_minimaps(live);
-        let change = view.set_rooms(minimaps[..live].iter().map(ToString::to_string));
+        let wanted = unique(&self.interest.minimaps);
+        let chosen: Vec<RoomCoord> = if held {
+            let live: HashSet<RoomCoord> =
+                view.rooms().filter_map(|room| room.parse().ok()).collect();
+            let mut new = 0;
+            wanted
+                .into_iter()
+                .filter(|room| {
+                    if live.contains(room) {
+                        return true;
+                    }
+                    new += 1;
+                    new <= HELD_ROOM_MAPS
+                })
+                .take(MINIMAP_CAP)
+                .collect()
+        } else {
+            wanted.into_iter().take(MINIMAP_CAP).collect()
+        };
+        self.work.portals.set_minimaps(chosen.len());
+        let change = view.set_rooms(chosen.iter().map(ToString::to_string));
         for room in change.removed {
             if let Ok(room) = room.parse()
                 && self.shown.remove(&room)

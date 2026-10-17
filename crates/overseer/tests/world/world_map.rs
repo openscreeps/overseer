@@ -1815,3 +1815,35 @@ async fn a_detail_room_goes_ahead_of_the_minimaps_until_its_first_update() {
         rooms_of(&minimaps[HELD_ROOM_MAPS..])
     );
 }
+
+#[tokio::test]
+async fn live_minimaps_stay_while_another_room_waits_for_its_first_update() {
+    let fake = Fake::new(12, rect("W10N10", "W0N0"));
+    let (_server, overseer, mut websocket) = connect(fake.routes()).await;
+    let mut world = overseer.map().world(None).await.unwrap();
+    let minimaps = rect("W9N9", "W1N1").iter().collect::<Vec<_>>();
+    let viewing = |room_name: &str| Interest {
+        detail: vec![room(room_name)],
+        terrain: vec![room(room_name)],
+        minimaps: minimaps.clone(),
+        ..Interest::default()
+    };
+    world.set_interest(&viewing("W5N5"));
+    sent_for(&mut world, &mut websocket).await;
+    update(&mut websocket, room("W5N5"), 9).await;
+    while !matches!(world.detail(room("W5N5")), Some(DetailState::Live(_))) {
+        sent_for(&mut world, &mut websocket).await;
+    }
+    sent_for(&mut world, &mut websocket).await;
+
+    // A neighbour is opened: it waits for its first update, and the minimaps around it, all
+    // live already, stay live meanwhile.
+    world.set_interest(&viewing("W6N5"));
+    let sent = sent_for(&mut world, &mut websocket).await;
+    assert!(sent.contains(&"subscribe room:W6N5".to_owned()), "{sent:?}");
+    let dropped: Vec<&String> = sent
+        .iter()
+        .filter(|frame| frame.starts_with("unsubscribe roomMap2:W"))
+        .collect();
+    assert!(dropped.is_empty(), "live minimaps dropped: {dropped:?}");
+}
