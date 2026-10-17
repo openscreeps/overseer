@@ -215,9 +215,11 @@ fn natural(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// How high an object sits on its tile: creeps over structures over sites, containers,
-/// ramparts, dropped resources and ruins, roads at the bottom.
+/// ramparts, dropped resources and ruins, roads at the bottom. A spawning creep is inside its
+/// spawn and the map hides it, so it sits under the spawn.
 fn layer(object: &GameRoomObject) -> u8 {
     match object {
+        GameRoomObject::Creep(creep) if creep.spawning == Some(true) => 2,
         GameRoomObject::Creep(_) | GameRoomObject::PowerCreep(_) => 0,
         GameRoomObject::Resource(_)
         | GameRoomObject::Tombstone(_)
@@ -767,13 +769,23 @@ mod tests {
 
     #[test]
     fn a_tile_selects_its_topmost_object() {
-        let objects = objects();
+        let mut objects = objects();
         assert_eq!(topmost(&objects, 18, 36).map(GameRoomObject::id), Some("s"));
         assert_eq!(
             topmost(&objects, 7, 43).map(GameRoomObject::id),
             Some("c10")
         );
         assert_eq!(topmost(&objects, 0, 0).map(GameRoomObject::id), None);
+        // A creep that is still spawning is inside the spawn: the spawn stays on top.
+        objects.push(
+            serde_json::from_value(json!({
+                "_id": "new", "type": "creep", "room": "W1N1", "x": 18, "y": 36, "name": "w11",
+                "user": "u1", "hits": 100, "hitsMax": 100, "store": {}, "body": [],
+                "spawning": true
+            }))
+            .unwrap(),
+        );
+        assert_eq!(topmost(&objects, 18, 36).map(GameRoomObject::id), Some("s"));
     }
 
     #[test]
