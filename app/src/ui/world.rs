@@ -22,8 +22,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::prelude::*;
+use overseer::Overseer;
 use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent, WorldKnowledge, WorldProgress};
-use overseer::{Overseer, StartRoom};
+use overseer::model::account::StartRoom;
 use overseer_view::{Lod, Scope, ViewMode, Viewer};
 use web_sys::KeyboardEvent;
 
@@ -879,8 +880,8 @@ impl BadgeWants {
 
 #[cfg(test)]
 mod tests {
-    use overseer::StartRoom;
     use overseer::map::{RoomCoord, RoomRect};
+    use overseer::model::account::StartRoom;
 
     use super::start_room_in;
 

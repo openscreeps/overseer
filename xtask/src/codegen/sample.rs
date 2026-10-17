@@ -2,7 +2,7 @@
 
 use serde_json::{Map, Value};
 
-use super::merge::{Components, ObjectShape, ref_name};
+use super::schema::{Components, ObjectShape, ref_name};
 
 /// The sample string of string parameters: needs escaping in queries and paths.
 pub const STRING: &str = "a b/é";

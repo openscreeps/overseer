@@ -5,7 +5,7 @@
 //! | Servers | through the shell's proxy (`proxy_url`) | directly, or the page's own `overseer-proxy` ([`crate::connect`]) |
 //! | Secrets (tokens, server passwords) | OS credential store (`secret_*` commands) | `localStorage` under `overseer.secret.<key>`, readable by anything running on the page's origin |
 //! | External links | system browser (`tauri-plugin-opener`) | new tab |
-//! | screeps.com's rate-limit reset page ([`Platform::open_reset_page`]) | system browser; the app rechecks when its window regains focus | popup that keeps this page as its opener; the app resumes on the page's success message |
+//! | A rate-limit lift page, such as screeps.com's reset page ([`Platform::open_reset_page`]) | system browser; the app rechecks when its window regains focus | popup that keeps this page as its opener; the app resumes on the page's success message |
 //! | Popped-out rooms | a native window per route (`open_window`, size and position remembered) | `window.open` popup per route |
 //!
 //! Saved profiles ([`crate::profiles`]) and state ([`crate::saved`]) are in `localStorage`
@@ -189,10 +189,11 @@ impl Platform {
             .map_err(|error| js_message(&error))
     }
 
-    /// Opens screeps.com's rate-limit reset page `url` ([`crate::rate_limits::reset_url`]):
-    /// in the shell, the system browser (the page cannot reach the app; recheck when the
-    /// window regains focus); in a browser, a popup that keeps this page as its opener, so
-    /// the page's success message reaches this window.
+    /// Opens a rate-limit lift page `url`
+    /// ([`LiftPage`](overseer::net::api::LiftPage), such as screeps.com's reset page): in the
+    /// shell, the system browser (the page cannot reach the app; recheck when the window
+    /// regains focus); in a browser, a popup that keeps this page as its opener, so the page's
+    /// success message reaches this window.
     ///
     /// # Errors
     ///

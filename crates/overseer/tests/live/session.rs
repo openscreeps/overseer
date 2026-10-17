@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
-use overseer::core::api::types::UserWorldStatus;
-use overseer::core::api::{ApiError, endpoints};
+use overseer::core::api::ApiError;
+use overseer::model::account::UserWorldStatus;
+use overseer::net::api::AccountApi as _;
 use overseer::{Auth, ConnectionStatus, Error, Notice, Overseer, ServerProfile, net};
 use tokio::sync::watch;
 use tokio::time::{Instant, timeout, timeout_at};
@@ -17,6 +18,8 @@ fn profile(auth: Auth) -> ServerProfile {
         auth,
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     }
 }
 
@@ -198,11 +201,15 @@ async fn idle_session_keeps_its_token_alive() {
     );
     let current = tokens.borrow().clone().expect("a current token");
     assert_ne!(current, issued, "the token was rotated");
+    // Discovery is anonymous; the first authenticated request shows the token expired.
     let expired = net::Client::builder(support::url())
         .token(issued)
         .build()
         .expect("a client")
-        .send(&endpoints::AuthMe)
+        .api()
+        .await
+        .expect("discovery needs no account")
+        .me()
         .await
         .expect_err("the first token expired");
     assert!(

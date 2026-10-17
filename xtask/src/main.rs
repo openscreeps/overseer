@@ -1,12 +1,15 @@
 //! Repository automation, run as `cargo xtask <command>`:
 //!
 //! - `vendor [<openapi checkout>]` copies `openapi.json` and `asyncapi.json` from the
-//!   `openscreeps/openapi` checkout (default `../openapi`) into `reference/` and composes
-//!   `reference/standalone.openapi.json` and `reference/standalone.asyncapi.json` from them and
-//!   the standalone profile with the checkout's `composeProfile` and `composeSocketProfile`
-//!   (needs `node`).
+//!   `openscreeps/openapi` checkout (default `../openapi`) into `reference/` and composes, with
+//!   the checkout's own contract library (needs `node`), the `OpenScreeps` and community contracts
+//!   (`reference/openscreeps.*` and `reference/community.*`, from the standalone and community
+//!   profiles with `composeProfile` and `composeSocketProfile`) and one document per plugin
+//!   (`reference/plugins/<plugin>.openapi.json`, composed on the community document with
+//!   `composePlugin`).
 //! - `codegen [--check]` generates the typed HTTP and socket APIs of `overseer-core` from
-//!   `reference/`; `--check` fails instead of writing when the generated files are stale.
+//!   `reference/`, one module per contract; `--check` fails instead of writing when the
+//!   generated files are stale.
 //! - `web-demo` builds the browser demo (`web/demo`) into the static bundle
 //!   `target/web-demo/` (needs the `wasm-bindgen` CLI matching the locked crate version).
 //! - `e2e [--target openscreeps|official|community] [--rust-only | --ui-only | --desktop]

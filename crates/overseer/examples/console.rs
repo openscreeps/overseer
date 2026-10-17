@@ -39,6 +39,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         auth,
         server_password: env("SCREEPS_SERVER_PASSWORD"),
         default_shard: env("SCREEPS_SHARD"),
+        server_kind: None,
+        plugins: None,
     })
     .await?;
     eprintln!(

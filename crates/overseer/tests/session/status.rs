@@ -60,6 +60,8 @@ async fn token_updates_include_auth_ok_rotations() {
         auth: overseer::Auth::Token(Token::new("t1")),
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     };
     let overseer = overseer::Overseer::connect(profile).await.unwrap();
     let mut tokens = overseer.tokens();

@@ -2,7 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use overseer_net::core::api::{endpoints, types};
+use overseer_net::api::PowerCreepsApi as _;
+use overseer_net::model::power_creeps::{PowerCreep, PowerCreepClassName};
 
 use super::forget_me;
 use crate::{Error, Overseer};
@@ -29,12 +30,14 @@ impl PowerCreeps {
     /// # Errors
     ///
     /// See [`PowerCreeps`].
-    pub async fn list(&self) -> Result<Vec<types::PowerCreep>, Error> {
-        Ok(self.overseer.send(&endpoints::PowerCreepsList).await?.list)
+    pub async fn list(&self) -> Result<Vec<PowerCreep>, Error> {
+        Ok(self.overseer.user_api()?.power_creeps().await?)
     }
 
     /// Creates an unspawned level-0 power creep named `name` (`POST
-    /// /api/game/power-creeps/create`); needs a free Global Power Level.
+    /// /api/game/power-creeps/create`); needs a free Global Power Level. Returns the new record
+    /// when the server answers it (`OpenScreeps`); screeps.com and community servers only
+    /// acknowledge, so [list](Self::list) the power creeps to see it there.
     ///
     /// # Errors
     ///
@@ -42,15 +45,10 @@ impl PowerCreeps {
     pub async fn create(
         &self,
         name: &str,
-        class: types::PowerCreepCreateRequestClassName,
-    ) -> Result<types::PowerCreepCreateResponse, Error> {
-        let body = types::PowerCreepCreateRequest {
-            class_name: class,
-            name: name.to_owned(),
-        };
-        self.overseer
-            .send(&endpoints::PowerCreepsCreate { body })
-            .await
+        class: PowerCreepClassName,
+    ) -> Result<Option<PowerCreep>, Error> {
+        let api = self.overseer.user_api()?;
+        Ok(api.create_power_creep(name.to_owned(), class).await?)
     }
 
     /// Renames the unspawned power creep `id` (`POST /api/game/power-creeps/rename`).
@@ -59,12 +57,8 @@ impl PowerCreeps {
     ///
     /// See [`PowerCreeps`].
     pub async fn rename(&self, id: &str, name: &str) -> Result<(), Error> {
-        let body = types::PowerCreepRenameRequest {
-            id: id.to_owned(),
-            name: name.to_owned(),
-        };
-        self.overseer
-            .send(&endpoints::PowerCreepsRename { body })
+        let api = self.overseer.user_api()?;
+        api.rename_power_creep(id.to_owned(), name.to_owned())
             .await?;
         Ok(())
     }
@@ -77,10 +71,8 @@ impl PowerCreeps {
     ///
     /// See [`PowerCreeps`].
     pub async fn delete(&self, id: &str) -> Result<(), Error> {
-        let body = types::PowerCreepIdRequest { id: id.to_owned() };
-        self.overseer
-            .send(&endpoints::PowerCreepsDelete { body })
-            .await?;
+        let api = self.overseer.user_api()?;
+        api.delete_power_creep(id.to_owned()).await?;
         Ok(())
     }
 
@@ -91,10 +83,8 @@ impl PowerCreeps {
     ///
     /// See [`PowerCreeps`].
     pub async fn cancel_delete(&self, id: &str) -> Result<(), Error> {
-        let body = types::PowerCreepIdRequest { id: id.to_owned() };
-        self.overseer
-            .send(&endpoints::PowerCreepsCancelDelete { body })
-            .await?;
+        let api = self.overseer.user_api()?;
+        api.cancel_power_creep_delete(id.to_owned()).await?;
         Ok(())
     }
 
@@ -106,13 +96,8 @@ impl PowerCreeps {
     ///
     /// See [`PowerCreeps`].
     pub async fn upgrade(&self, id: &str, powers: BTreeMap<String, u64>) -> Result<(), Error> {
-        let body = types::PowerCreepUpgradeRequest {
-            id: id.to_owned(),
-            powers,
-        };
-        self.overseer
-            .send(&endpoints::PowerCreepsUpgrade { body })
-            .await?;
+        let api = self.overseer.user_api()?;
+        api.upgrade_power_creep(id.to_owned(), powers).await?;
         Ok(())
     }
 
@@ -126,7 +111,8 @@ impl PowerCreeps {
     /// See [`PowerCreeps`]; the server answers `no power resets` when none are left.
     pub async fn start_experimentation(&self) -> Result<(), Error> {
         self.overseer
-            .send(&endpoints::PowerCreepsExperimentation::default())
+            .user_api()?
+            .start_power_experimentation()
             .await?;
         forget_me(&self.overseer).await;
         Ok(())

@@ -270,13 +270,9 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     await Session.signIn(server.url, account.username, account.password);
   });
 
-  // screepsmod-auth answers a wrong current password and then crashes the community server's
-  // backend (`@wrong-password`, see the fixtures).
-  test('rejects a wrong current password', { tag: '@wrong-password' }, async ({
-    page,
-    server,
-    account,
-  }) => {
+  // On the community server Overseer checks the current password by signing in with it
+  // first: screepsmod-auth would answer a wrong one, then erase the password and crash.
+  test('rejects a wrong current password', async ({ page, server, account }) => {
     await signIn(page, server, account);
     await openProfile(page, account.username);
     const section = page.getByRole('region', { name: 'Password' });
@@ -284,7 +280,7 @@ test.describe('profile', { tag: '@openscreeps' }, () => {
     await section.getByLabel('New password', { exact: true }).fill('long-enough-1');
     await section.getByLabel('Repeat the new password').fill('long-enough-1');
     await section.getByRole('button', { name: 'Change password' }).click();
-    await expect(alerts(section)).toHaveText('invalid password');
+    await expect(alerts(section)).toHaveText('the current password is wrong');
     await expect(page.getByRole('button', { name: `Account: ${account.username}` })).toBeVisible();
     await Session.signIn(server.url, account.username, account.password);
   });

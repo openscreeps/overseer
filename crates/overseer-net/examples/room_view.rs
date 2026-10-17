@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt::Write as _;
 
+use overseer_net::model::console::ConsoleEvent;
 use overseer_net::prelude::*;
 
 /// Console lines kept below the map.
@@ -49,7 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     socket.watch_room(&room).await?;
     socket.subscribe_console()?;
     if let Some(expression) = &options.console {
-        client.console(None, expression.as_str()).await?;
+        client.api().await?.console(expression, None).await?;
     }
 
     let mut console = VecDeque::new();
@@ -80,16 +81,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 payload: Payload::Console(output),
                 ..
             }) => match output {
-                socket::types::UserConsole::Output(output) => {
-                    for line in output.messages.log {
+                ConsoleEvent::Output { log, results, .. } => {
+                    for line in log {
                         push(&mut console, line);
                     }
-                    for line in output.messages.results {
+                    for line in results {
                         push(&mut console, format!("> {line}"));
                     }
                 }
-                socket::types::UserConsole::Error(error) => {
-                    push(&mut console, format!("! {}", error.error));
+                ConsoleEvent::Error { error, .. } => {
+                    push(&mut console, format!("! {error}"));
                 }
             },
             SocketEvent::Disconnected(reason) => {
@@ -159,11 +160,8 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
 
 async fn start_room(client: &Client) -> Result<String, Box<dyn Error>> {
     let shard = client.world().await?.shard().map(str::to_owned);
-    let start = client
-        .send(&endpoints::UserWorldStartRoom { shard })
-        .await?;
-    let name = start.body.room.first().ok_or("no start room")?;
-    Ok(name.rsplit('/').next().unwrap_or(name).to_owned())
+    let start = client.api().await?.start_room(shard.as_deref()).await?;
+    Ok(start.ok_or("no start room")?.room)
 }
 
 fn push(console: &mut VecDeque<String>, line: String) {

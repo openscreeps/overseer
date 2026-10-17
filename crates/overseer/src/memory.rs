@@ -4,17 +4,12 @@
 //! Writes are queued: the player's runtime applies them after a later tick, not before the
 //! method returns. Segments are the 100 raw strings of `RawMemory.segments`.
 
-use overseer_net::core::api::types::{
-    UserMemorySegmentGetResponseData, UserMemorySegmentSetRequest, UserMemorySegmentSetRequestData,
-    UserMemorySegmentSetRequestSegment,
-};
-use overseer_net::core::api::{MemoryValue, endpoints};
+use overseer_net::api::MemoryApi as _;
 use overseer_net::core::socket::{Channel, Payload};
 
-use crate::{Error, Overseer, Watch};
+pub use overseer_net::model::memory::{MAX_SEGMENT, MemoryValue};
 
-/// The highest Memory segment id; segments are numbered `0..=MAX_SEGMENT`.
-pub const MAX_SEGMENT: u8 = 99;
+use crate::{Error, Overseer, Watch};
 
 /// The signed-in user's Memory and Memory segments.
 ///
@@ -38,9 +33,7 @@ impl Memory {
     ///
     /// Returns [`Error::Net`] when the request fails or the value does not decode.
     pub async fn get(&self, path: &str, shard: Option<&str>) -> Result<MemoryValue, Error> {
-        self.ready()?;
-        let path = (!path.is_empty()).then_some(path);
-        Ok(self.overseer.client().memory(shard, path).await?)
+        Ok(self.overseer.user_api()?.memory(path, shard).await?)
     }
 
     /// Queues the assignment of `value` at `path` (`POST /api/user/memory`). An empty `path`
@@ -55,11 +48,10 @@ impl Memory {
         value: serde_json::Value,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        self.ready()?;
         Ok(self
             .overseer
-            .client()
-            .set_memory(shard, path, value)
+            .user_api()?
+            .set_memory(path, value, shard)
             .await?)
     }
 
@@ -70,8 +62,7 @@ impl Memory {
     ///
     /// Returns [`Error::Net`] when the request fails.
     pub async fn delete(&self, path: &str, shard: Option<&str>) -> Result<(), Error> {
-        self.ready()?;
-        Ok(self.overseer.client().delete_memory(shard, path).await?)
+        Ok(self.overseer.user_api()?.delete_memory(path, shard).await?)
     }
 
     /// The contents of segment `id` (`GET /api/user/memory-segment`); `None` for a segment
@@ -83,16 +74,7 @@ impl Memory {
     /// when the request fails.
     pub async fn segment(&self, id: u8, shard: Option<&str>) -> Result<Option<String>, Error> {
         check_segment(id)?;
-        let request = endpoints::UserMemorySegmentGet {
-            segment: id.to_string(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        Ok(match self.overseer.send(&request).await?.data {
-            Some(UserMemorySegmentGetResponseData::String(data)) => Some(data),
-            // screeps.com answers a list in request order.
-            Some(UserMemorySegmentGetResponseData::List(list)) => list.into_iter().next().flatten(),
-            None => None,
-        })
+        Ok(self.overseer.user_api()?.memory_segment(id, shard).await?)
     }
 
     /// Replaces the contents of segment `id` with `data` (`POST /api/user/memory-segment`).
@@ -103,15 +85,11 @@ impl Memory {
     /// when the request fails; the server rejects `data` over 100 KiB.
     pub async fn set_segment(&self, id: u8, data: &str, shard: Option<&str>) -> Result<(), Error> {
         check_segment(id)?;
-        let body = UserMemorySegmentSetRequest {
-            data: UserMemorySegmentSetRequestData::String(data.to_owned()),
-            segment: UserMemorySegmentSetRequestSegment::Integer(id.into()),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer
-            .send(&endpoints::UserMemorySegmentSet { body })
-            .await?;
-        Ok(())
+        Ok(self
+            .overseer
+            .user_api()?
+            .set_memory_segment(id, data, shard)
+            .await?)
     }
 
     /// Watches the value at `path` (`user:<user>/memory/…`): after every run of the player's

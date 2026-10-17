@@ -17,17 +17,15 @@
 //!    container, and the harness registers its player `e2e` over HTTP once the server answers.
 //!    Players and their bots slow a world down as they add up, so the suites do not share one.
 //! 3. Runs the live Rust tests (`cargo test --workspace --no-fail-fast --test live --
-//!    --ignored`, so that every crate's results show; on `community` without
-//!    [`COMMUNITY_SKIPPED`]: the test of a wrong current password, which crashes the community
-//!    server's backend; on `official` only their read-only subset, the `read_only::` modules),
+//!    --ignored`, so that every crate's results show; on `official` only their read-only
+//!    subset, the `read_only::` modules),
 //!    then Playwright (`npx playwright test`, extra arguments after `--` are passed on), each
 //!    with the target's environment (see [`common_environment`], [`world_environment`],
 //!    [`community_environment`] and [`official_environment`]). Each Playwright project first
 //!    loads the server's world once into the app's cache and saves it
 //!    (`target/e2e/cache-<target>-<project>.json`); its tests start from a copy (see
 //!    `e2e/tests/cache.setup.ts`). On `community`, Playwright runs the `proxy` project only
-//!    (community servers send no CORS headers) and leaves out the `@wrong-password` tests, whose
-//!    wrong current password crashes the server's backend. On `official`, Playwright runs the
+//!    (community servers send no CORS headers). On `official`, Playwright runs the
 //!    `proxy` project only, starts that setup from the previous official run's cache, leaves out
 //!    the `@openscreeps` tests (which need a disposable world, so also the `@admin` ones) and
 //!    fails any test that sends a request that may change the account (see
@@ -464,16 +462,6 @@ impl World {
     }
 }
 
-/// The live tests left out on `community`.
-const COMMUNITY_SKIPPED: [&str; 1] = [
-    // screepsmod-auth 2.10.1 answers a wrong current password with HTTP 401 and then goes on: it
-    // stores an undefined password and replies again, which throws `ERR_HTTP_HEADERS_SENT` in a
-    // promise and ends the backend (`lib/backend.js` `POST /api/user/password`,
-    // https://unpkg.com/screepsmod-auth@2.10.1/lib/backend.js); every request in flight fails
-    // until the launcher has restarted it. Changing the password with the right one works there.
-    "account::wrong_current_password_is_refused",
-];
-
 /// The suites against fresh worlds.
 fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summary: &mut Summary) {
     if options.desktop {
@@ -501,11 +489,6 @@ fn world_suites(prepared: &Prepared, options: &Options, worlds: Worlds<'_>, summ
                 let mut test = cargo(&prepared.root);
                 test.args(["test", "--workspace", "--no-fail-fast", "--test", "live"]);
                 test.args(["--", "--ignored"]);
-                if let Worlds::Community { .. } = worlds {
-                    for test_name in COMMUNITY_SKIPPED {
-                        test.args(["--skip", test_name]);
-                    }
-                }
                 test
             },
         );

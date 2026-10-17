@@ -2,7 +2,9 @@
 
 use std::collections::VecDeque;
 
-use overseer_net::core::socket::{Channel, Payload, UserConsole};
+use overseer_net::api::ConsoleApi as _;
+use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::console::ConsoleEvent;
 use overseer_net::rt::SystemTime;
 use tokio::sync::broadcast;
 
@@ -148,8 +150,8 @@ impl Console {
             }
         });
         self.overseer
-            .client()
-            .console(shard.as_deref(), expression)
+            .api()
+            .console(expression, shard.as_deref())
             .await?;
         Ok(())
     }
@@ -199,16 +201,20 @@ impl Sink for ConsoleSink {
             received,
         };
         match console {
-            UserConsole::Output(output) => {
-                for line in &output.messages.log {
-                    self.push(entry(ConsoleKind::Log, &output.shard, line));
+            ConsoleEvent::Output {
+                log,
+                results,
+                shard,
+            } => {
+                for line in log {
+                    self.push(entry(ConsoleKind::Log, shard, line));
                 }
-                for line in &output.messages.results {
-                    self.push(entry(ConsoleKind::Result, &output.shard, line));
+                for line in results {
+                    self.push(entry(ConsoleKind::Result, shard, line));
                 }
             }
-            UserConsole::Error(error) => {
-                self.push(entry(ConsoleKind::Error, &error.shard, &error.error));
+            ConsoleEvent::Error { error, shard } => {
+                self.push(entry(ConsoleKind::Error, shard, error));
             }
         }
     }
@@ -286,9 +292,8 @@ fn decode_reference(name: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use overseer_net::core::socket::{
-        Payload, UserConsole, UserConsoleError, UserConsoleOutput, UserConsoleOutputMessages,
-    };
+    use overseer_net::core::socket::Payload;
+    use overseer_net::model::console::ConsoleEvent;
     use overseer_net::rt::SystemTime;
     use tokio::sync::broadcast;
 
@@ -337,17 +342,15 @@ mod tests {
             sender,
             history: std::collections::VecDeque::new(),
         };
-        sink.deliver(&Payload::Console(UserConsole::Output(UserConsoleOutput {
-            messages: UserConsoleOutputMessages {
-                log: vec!["one".to_owned(), "two".to_owned()],
-                results: vec!["3".to_owned()],
-            },
+        sink.deliver(&Payload::Console(ConsoleEvent::Output {
+            log: vec!["one".to_owned(), "two".to_owned()],
+            results: vec!["3".to_owned()],
             shard: Some("shard3".to_owned()),
-        })));
-        sink.deliver(&Payload::Console(UserConsole::Error(UserConsoleError {
+        }));
+        sink.deliver(&Payload::Console(ConsoleEvent::Error {
             error: "Error: boom".to_owned(),
             shard: None,
-        })));
+        }));
         let lines: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok())
             .map(|entry| (entry.kind, entry.shard, entry.text))
             .collect();

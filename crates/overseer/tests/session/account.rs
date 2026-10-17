@@ -5,34 +5,44 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use overseer::core::Token;
-use overseer::core::api::types::{
-    PowerCreepCreateRequestClassName, UserAuthTokenCreateRequest, UserBadgeCustomPaths,
-    UserBadgeInput, UserBadgeInputParam, UserBadgeInputType, UserNotifyPrefs, UserRoomStatName,
-    UserWorldStatus,
+use overseer::core::socket::Channel;
+use overseer::model::account::{
+    AuthTokenRequest, StartRoom, UserBadgeCustomPaths, UserBadgeInput, UserBadgeInputParam,
+    UserBadgeInputType, UserNotifyPrefs, UserRoomStatName, UserWorldStatus,
 };
-use overseer::core::socket::{Channel, UserCpuCpu};
-use overseer::{Auth, Error, Overseer, ServerProfile, StartRoom, StatInterval};
+use overseer::model::power_creeps::PowerCreepClassName;
+use overseer::model::socket::UserCpuCpu;
+use overseer::{Auth, Error, Overseer, ServerProfile, StatInterval};
 
 use crate::server::{self, Request, Server};
 use crate::{connect, receive, routes, soon};
 
-/// The account routes over [`routes`]; `/api/auth/me` reports `money` = the number of profile
-/// requests so far.
+/// `GET /api/version` of the stock Screeps server: a community server, no features.
+const COMMUNITY_VERSION: &str = r#"{"ok":1,"protocol":14,"useNativeAuth":false,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":20,"socketUpdateThrottle":100,"renderer":{"resources":{},"metadata":{}}}}"#;
+
+/// `GET /api/authmod` of screepsmod-auth.
+const AUTHMOD: &str = r#"{"ok":1,"name":"screepsmod-auth","version":"2.10.1","allowRegistration":true,"steam":true,"github":false,"gitlab":false}"#;
+
+/// The account routes over [`routes`] of a community server with screepsmod-auth (which
+/// provides the API tokens); `/api/auth/me` reports `money` = the number of profile requests so
+/// far.
 fn account_routes(request: &Request, profiles: &AtomicU64) -> (u16, String) {
     let ok = || (200, r#"{"ok":1}"#.to_owned());
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/api/version") => (200, COMMUNITY_VERSION.to_owned()),
+        ("GET", "/api/authmod") => (200, AUTHMOD.to_owned()),
         ("GET", "/api/auth/me") if request.token.is_some() => {
             let money = profiles.fetch_add(1, Ordering::SeqCst);
             (
                 200,
                 format!(
-                    r#"{{"ok":1,"_id":"u1","username":"Alice","money":{money},"powerExperimentations":1,"notifyPrefs":{{"sendOnline":true}}}}"#
+                    r#"{{"ok":1,"_id":"u1","username":"Alice","password":true,"money":{money},"powerExperimentations":1,"notifyPrefs":{{"sendOnline":true}}}}"#
                 ),
             )
         }
         ("GET", "/api/user/overview") => (
             200,
-            r#"{"ok":1,"rooms":["W1N1"],"stats":{"W1N1":[{"value":5,"endTime":1}]},"statsMax":5,"totals":{"energyHarvested":5}}"#
+            r#"{"ok":1,"rooms":["W1N1"],"stats":{"W1N1":[{"value":5,"endTime":1}]},"gametimes":[1],"statsMax":5,"totals":{"energyHarvested":5}}"#
                 .to_owned(),
         ),
         ("GET", "/api/user/world-status") => (200, r#"{"ok":1,"status":"normal"}"#.to_owned()),
@@ -58,12 +68,18 @@ fn account_routes(request: &Request, profiles: &AtomicU64) -> (u16, String) {
                 .to_owned(),
         ),
         ("POST", "/api/user/auth-token") => (200, r#"{"ok":1,"token":"fresh"}"#.to_owned()),
+        ("POST", "/api/auth/signin") if request.body.contains(r#""password":"old""#) => {
+            (200, r#"{"ok":1,"token":"signed-in"}"#.to_owned())
+        }
         (
             "POST",
             "/api/user/respawn"
             | "/api/user/badge"
             | "/api/user/notify-prefs"
             | "/api/user/delete-auth-token"
+            | "/api/user/email"
+            | "/api/user/password"
+            | "/api/register/set-username"
             | "/api/game/power-creeps/rename"
             | "/api/game/power-creeps/delete"
             | "/api/game/power-creeps/cancel-delete"
@@ -211,7 +227,13 @@ async fn account_requests_have_the_documented_shape() {
         .overview(StatInterval::ThreeHours, UserRoomStatName::EnergyHarvested)
         .await
         .unwrap();
-    assert_eq!(overview.rooms.unwrap(), ["W1N1"]);
+    let rooms: Vec<_> = overview
+        .rooms
+        .iter()
+        .map(|room| (room.shard.as_deref(), room.room.as_str(), room.series.len()))
+        .collect();
+    assert_eq!(rooms, [(None, "W1N1", 1)]);
+    assert_eq!(overview.totals["energyHarvested"], 5.0);
     assert_eq!(
         sent(&server, "/api/user/overview"),
         [request("GET", "interval=180&statName=energyHarvested", "")]
@@ -248,9 +270,9 @@ async fn account_requests_have_the_documented_shape() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].id, "k1");
     let created = account
-        .create_auth_token(UserAuthTokenCreateRequest {
-            r#type: Some("full".to_owned()),
-            ..UserAuthTokenCreateRequest::default()
+        .create_auth_token(AuthTokenRequest {
+            kind: Some("full".to_owned()),
+            ..AuthTokenRequest::default()
         })
         .await
         .unwrap();
@@ -266,6 +288,38 @@ async fn account_requests_have_the_documented_shape() {
     assert_eq!(
         sent(&server, "/api/user/delete-auth-token"),
         [request("POST", "", r#"{"tokenId":"k1"}"#)]
+    );
+
+    account.set_email("alice@example.com").await.unwrap();
+    account
+        .set_username("Alice", Some("a@example.com"))
+        .await
+        .unwrap();
+    // screepsmod-auth changes the password once Overseer has signed in with the current one.
+    account.set_password(Some("old"), "new").await.unwrap();
+    assert_eq!(
+        sent(&server, "/api/user/email"),
+        [request("POST", "", r#"{"email":"alice@example.com"}"#)]
+    );
+    assert_eq!(
+        sent(&server, "/api/register/set-username"),
+        [request(
+            "POST",
+            "",
+            r#"{"email":"a@example.com","username":"Alice"}"#
+        )]
+    );
+    assert_eq!(
+        sent(&server, "/api/auth/signin"),
+        [request("POST", "", r#"{"email":"Alice","password":"old"}"#)]
+    );
+    assert_eq!(
+        sent(&server, "/api/user/password"),
+        [request(
+            "POST",
+            "",
+            r#"{"oldPassword":"old","password":"new"}"#
+        )]
     );
 }
 
@@ -302,6 +356,8 @@ async fn the_rate_limit_exemption_is_the_session_tokens_entry_while_in_the_futur
             auth: Auth::Token(Token::new(token)),
             server_password: None,
             default_shard: None,
+            server_kind: None,
+            plugins: None,
         };
         let overseer = Overseer::connect(profile).await.unwrap();
         assert_eq!(
@@ -325,11 +381,12 @@ async fn power_creep_requests_have_the_documented_shape() {
     let list = power_creeps.list().await.unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "Op");
+    // A community server only acknowledges the creation.
     let created = power_creeps
-        .create("Op2", PowerCreepCreateRequestClassName::Operator)
+        .create("Op2", PowerCreepClassName::Operator)
         .await
         .unwrap();
-    assert_eq!(created.id.as_deref(), Some("pc2"));
+    assert_eq!(created, None);
     power_creeps.rename("pc1", "Renamed").await.unwrap();
     power_creeps.delete("pc1").await.unwrap();
     power_creeps.cancel_delete("pc1").await.unwrap();
@@ -358,6 +415,32 @@ async fn power_creep_requests_have_the_documented_shape() {
         )
     });
     assert_eq!(posted, expected);
+}
+
+#[tokio::test]
+async fn an_openscreeps_server_answers_the_created_power_creep() {
+    let record = r#"{"_id":"pc2","name":"Op2","className":"operator","user":"u1","level":0,"hitsMax":1000,"store":{},"storeCapacity":100,"spawnCooldownTime":0,"powers":{}}"#;
+    let mut server = Server::start(
+        move |request| match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/api/game/power-creeps/create") => {
+                (200, format!(r#"{{"ok":1,{}"#, &record[1..]))
+            }
+            _ => routes(request),
+        },
+        |_| true,
+    )
+    .await;
+    let (overseer, _websocket) = connect(&mut server).await;
+
+    let created = overseer
+        .account()
+        .power_creeps()
+        .create("Op2", PowerCreepClassName::Operator)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(created, serde_json::from_str(record).unwrap());
+    assert_eq!((created.id.as_str(), created.level), ("pc2", 0));
 }
 
 #[tokio::test]
@@ -416,6 +499,8 @@ async fn anonymous_sessions_need_a_user_for_the_account_but_not_for_users() {
         auth: Auth::Anonymous,
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     };
     let overseer = Overseer::connect(profile).await.unwrap();
     let account = overseer.account();

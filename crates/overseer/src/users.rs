@@ -1,6 +1,11 @@
 //! Other players: profiles, rooms, badges and leaderboards.
 
-use overseer_net::core::api::{endpoints, types};
+use overseer_net::Api;
+use overseer_net::api::UsersApi as _;
+use overseer_net::model::account::UserRoomStatValues;
+use overseer_net::model::users::{
+    LeaderboardMode, LeaderboardPage, LeaderboardResult, LeaderboardSeason, PublicProfile, UserRoom,
+};
 
 use crate::rooms::StatInterval;
 use crate::{Error, Overseer};
@@ -26,12 +31,8 @@ impl Users {
     /// # Errors
     ///
     /// See [`Users`].
-    pub async fn find(&self, username: &str) -> Result<types::UserPublicProfile, Error> {
-        let find = endpoints::UserFind {
-            username: Some(username.to_owned()),
-            id: None,
-        };
-        Ok(self.overseer.send(&find).await?.user)
+    pub async fn find(&self, username: &str) -> Result<PublicProfile, Error> {
+        Ok(self.api()?.find(Some(username), None).await?)
     }
 
     /// The public profile of the user with id `id` (`GET /api/user/find?id`).
@@ -39,26 +40,18 @@ impl Users {
     /// # Errors
     ///
     /// See [`Users`].
-    pub async fn find_by_id(&self, id: &str) -> Result<types::UserPublicProfile, Error> {
-        let find = endpoints::UserFind {
-            username: None,
-            id: Some(id.to_owned()),
-        };
-        Ok(self.overseer.send(&find).await?.user)
+    pub async fn find_by_id(&self, id: &str) -> Result<PublicProfile, Error> {
+        Ok(self.api()?.find(None, Some(id)).await?)
     }
 
-    /// The rooms whose controller user `id` owns, per shard on sharded servers
+    /// The rooms whose controller user `id` owns, with their shard on sharded servers
     /// (`GET /api/user/rooms`).
     ///
     /// # Errors
     ///
     /// See [`Users`].
-    pub async fn rooms(&self, id: &str) -> Result<types::UserRoomsResponse, Error> {
-        let rooms = endpoints::UserRooms {
-            id: id.to_owned(),
-            reservation: None,
-        };
-        self.overseer.send(&rooms).await
+    pub async fn rooms(&self, id: &str) -> Result<Vec<UserRoom>, Error> {
+        Ok(self.api()?.rooms(id).await?)
     }
 
     /// The totals of each room statistic of user `id` over `interval`
@@ -71,12 +64,8 @@ impl Users {
         &self,
         id: &str,
         interval: StatInterval,
-    ) -> Result<types::UserRoomStatValues, Error> {
-        let stats = endpoints::UserStats {
-            id: id.to_owned(),
-            interval: interval.minutes(),
-        };
-        Ok(self.overseer.send(&stats).await?.stats)
+    ) -> Result<UserRoomStatValues, Error> {
+        Ok(self.api()?.stats(id, interval.minutes()).await?)
     }
 
     /// The badge of the user named `username` as an SVG document, optionally with a border
@@ -86,11 +75,7 @@ impl Users {
     ///
     /// See [`Users`].
     pub async fn badge_svg(&self, username: &str, border: bool) -> Result<String, Error> {
-        let badge = endpoints::UserBadgeSvg {
-            username: username.to_owned(),
-            border: border.then_some(types::UserBadgeSvgBorder::V1),
-        };
-        self.overseer.send(&badge).await
+        Ok(self.api()?.badge_svg(username, border).await?)
     }
 
     /// A page of the `mode` ranking of `season` (`YYYY-MM`; `None`: the current season):
@@ -102,38 +87,27 @@ impl Users {
     /// See [`Users`].
     pub async fn leaderboard(
         &self,
-        mode: types::LeaderboardMode,
+        mode: LeaderboardMode,
         season: Option<&str>,
         offset: u64,
         limit: u64,
-    ) -> Result<types::LeaderboardListResponse, Error> {
-        let list = endpoints::LeaderboardList {
-            mode,
-            season: season.map(str::to_owned),
-            limit: Some(limit),
-            offset: Some(offset),
-        };
-        self.overseer.send(&list).await
+    ) -> Result<LeaderboardPage, Error> {
+        Ok(self.api()?.leaderboard(mode, season, offset, limit).await?)
     }
 
-    /// The rank and score of the user named `username` in the `mode` ranking of `season`
-    /// (`YYYY-MM`), or in every season when `None` (`GET /api/leaderboard/find`).
+    /// The rank and score of the user named `username` in the `mode` ranking: in `season`
+    /// (`YYYY-MM`; one entry), or in every season when `None` (`GET /api/leaderboard/find`).
     ///
     /// # Errors
     ///
     /// See [`Users`]; an unranked user is the server's `result not found`.
     pub async fn leaderboard_find(
         &self,
-        mode: types::LeaderboardMode,
+        mode: LeaderboardMode,
         username: &str,
         season: Option<&str>,
-    ) -> Result<types::LeaderboardFindResponse, Error> {
-        let find = endpoints::LeaderboardFind {
-            mode,
-            username: username.to_owned(),
-            season: season.map(str::to_owned),
-        };
-        self.overseer.send(&find).await
+    ) -> Result<Vec<LeaderboardResult>, Error> {
+        Ok(self.api()?.leaderboard_find(mode, username, season).await?)
     }
 
     /// The leaderboard seasons, newest (the current one) first
@@ -142,11 +116,13 @@ impl Users {
     /// # Errors
     ///
     /// See [`Users`].
-    pub async fn leaderboard_seasons(&self) -> Result<Vec<types::LeaderboardSeason>, Error> {
-        Ok(self
-            .overseer
-            .send(&endpoints::LeaderboardSeasons::default())
-            .await?
-            .seasons)
+    pub async fn leaderboard_seasons(&self) -> Result<Vec<LeaderboardSeason>, Error> {
+        Ok(self.api()?.leaderboard_seasons().await?)
+    }
+
+    /// The server's operations, or [`Error::Closed`].
+    fn api(&self) -> Result<&Api, Error> {
+        self.overseer.ensure_open()?;
+        Ok(self.overseer.api())
     }
 }

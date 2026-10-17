@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use overseer_net::Error as NetError;
-use overseer_net::core::api::{ApiError, Terrain, endpoints};
+use overseer_net::api::WorldOperation;
+use overseer_net::core::api::ApiError;
+use overseer_net::model::world::Terrain;
 use overseer_net::rt::{BoxFuture, Instant, SystemTime, UNIX_EPOCH};
 
 use super::WorldEvent;
@@ -190,7 +192,7 @@ impl Terrains {
             return None;
         }
         let mut ready = self.not_before.filter(|&at| at > now);
-        if let Some(limit) = budget.client().rate_limit::<endpoints::GameRooms>()
+        if let Some(limit) = WorldOperation::Terrains.rate_limit(budget.client())
             && limit.remaining == 0
         {
             let reset = reset_at(limit.reset, now);

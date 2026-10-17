@@ -1,6 +1,9 @@
 //! The market: orders, statistics and money history.
 
-use overseer_net::core::api::{endpoints, types};
+use overseer_net::api::MarketApi as _;
+use overseer_net::model::market::{
+    MarketOrder, MarketOrderIndexEntry, MarketStatsEntry, MoneyHistory, MyOrders,
+};
 
 use crate::{Error, Overseer};
 
@@ -29,11 +32,9 @@ impl Market {
     pub async fn orders_index(
         &self,
         shard: Option<&str>,
-    ) -> Result<Vec<types::MarketOrderIndexEntry>, Error> {
-        let index = endpoints::MarketOrdersIndex {
-            shard: self.overseer.resolve_shard(shard),
-        };
-        Ok(self.overseer.send(&index).await?.list)
+    ) -> Result<Vec<MarketOrderIndexEntry>, Error> {
+        let api = self.overseer.user_api()?;
+        Ok(api.orders_index(self.overseer.resolve_shard(shard)).await?)
     }
 
     /// The active buy and sell orders for `resource` (for example `energy`, `H` or `pixel`)
@@ -46,22 +47,21 @@ impl Market {
         &self,
         resource: &str,
         shard: Option<&str>,
-    ) -> Result<Vec<types::MarketOrder>, Error> {
-        let orders = endpoints::MarketOrders {
-            resource_type: Some(resource.to_owned()),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        Ok(self.overseer.send(&orders).await?.list)
+    ) -> Result<Vec<MarketOrder>, Error> {
+        let api = self.overseer.user_api()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(api.orders(resource.to_owned(), shard).await?)
     }
 
-    /// Every order of the user, active or not, grouped by shard (intershard orders under
-    /// `intershard`) via `GET /api/game/market/my-orders`.
+    /// Every order of the user, active or not (`GET /api/game/market/my-orders`): grouped by
+    /// shard on screeps.com (intershard orders under `intershard`), one list on single-world
+    /// servers.
     ///
     /// # Errors
     ///
     /// See [`Market`].
-    pub async fn my_orders(&self) -> Result<types::MarketMyOrdersResponse, Error> {
-        self.overseer.send(&endpoints::MarketMyOrders).await
+    pub async fn my_orders(&self) -> Result<MyOrders, Error> {
+        Ok(self.overseer.user_api()?.my_orders().await?)
     }
 
     /// Daily price statistics of `resource` on `shard`, newest first
@@ -74,12 +74,10 @@ impl Market {
         &self,
         resource: &str,
         shard: Option<&str>,
-    ) -> Result<Vec<types::MarketStatsEntry>, Error> {
-        let stats = endpoints::MarketStats {
-            resource_type: Some(resource.to_owned()),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        Ok(self.overseer.send(&stats).await?.stats)
+    ) -> Result<Vec<MarketStatsEntry>, Error> {
+        let api = self.overseer.user_api()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(api.stats(resource.to_owned(), shard).await?)
     }
 
     /// Page `page` (from 0) of the user's credit transactions, 20 per page and newest first;
@@ -88,8 +86,7 @@ impl Market {
     /// # Errors
     ///
     /// See [`Market`].
-    pub async fn money_history(&self, page: u64) -> Result<types::UserMoneyHistoryResponse, Error> {
-        let history = endpoints::UserMoneyHistory { page: Some(page) };
-        self.overseer.send(&history).await
+    pub async fn money_history(&self, page: u64) -> Result<MoneyHistory, Error> {
+        Ok(self.overseer.user_api()?.money_history(page).await?)
     }
 }

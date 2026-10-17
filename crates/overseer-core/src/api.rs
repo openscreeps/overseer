@@ -1,23 +1,23 @@
 //! HTTP API: typed endpoints, request building and reply interpretation.
 //!
-//! An [`Endpoint`] describes one operation of the Screeps HTTP API; [`endpoints`] holds one per
-//! operation of the `openscreeps/openapi` reference and [`types`] its schemas, both generated
-//! by `cargo xtask codegen` from `reference/`. A [`Session`] holds the server address, the
-//! current token and an optional server password; it turns an endpoint into an
-//! [`::http::Request`] for the driver to send, and turns the driver's [`::http::Response`] into
-//! the endpoint's response type or an [`ApiError`]. Logical failures arrive as `{error}`
-//! bodies, usually with HTTP 200; success bodies carry a truthy `ok`.
+//! An [`Endpoint`] describes one operation of the Screeps HTTP API. Each contract of the
+//! `openscreeps/openapi` reference has its own module of endpoints and schema types, generated
+//! by `cargo xtask codegen` from `reference/`: [`official`] (screeps.com), [`openscreeps`],
+//! [`community`] (the stock Screeps server) and [`plugins`] (community server mods).
+//! A [`Session`] holds the server address, the current token and an optional server password;
+//! it turns an endpoint into an [`::http::Request`] for the driver to send, and turns the
+//! driver's [`::http::Response`] into the endpoint's response type or an [`ApiError`]. Logical
+//! failures arrive as `{error}` bodies, usually with HTTP 200; success bodies carry a truthy
+//! `ok`.
 
-pub mod endpoints;
+pub mod community;
 #[cfg(test)]
 mod fixtures;
 mod indexed_list;
-mod memory;
-mod room_object;
+pub mod official;
+pub mod openscreeps;
+pub mod plugins;
 mod session;
-mod terrain;
-pub mod types;
-mod version;
 
 use std::fmt;
 
@@ -26,9 +26,7 @@ use url::UrlQuery;
 use url::form_urlencoded::Serializer;
 
 pub use indexed_list::IndexedList;
-pub use memory::{MemoryError, MemoryValue};
 pub use session::{ApiError, RateLimit, Reply, RequestError, Session};
-pub use terrain::{Terrain, TerrainError, Tile};
 
 /// Whether an endpoint needs a token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

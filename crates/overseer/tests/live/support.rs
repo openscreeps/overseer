@@ -26,13 +26,11 @@ use tokio::net::TcpStream;
 use tokio::sync::OnceCell;
 
 use overseer::core::{ServerUrl, Token};
+use overseer::model::account::Registration;
+use overseer::model::code::Modules;
 use overseer::net::Client;
-use overseer::net::core::api::Tile;
-use overseer::net::core::api::endpoints;
-use overseer::net::core::api::types::{
-    GameCoordinateInput, GameMapStatsResponse, GamePlaceSpawnRequest, RegisterSubmitRequest,
-    UserCodeModules, UserCodeModulesValue,
-};
+use overseer::net::api::{PasswordAccount as _, WorldApi as _};
+use overseer::net::model::world::{MapStats, Tile};
 use overseer::{Auth, Overseer, ServerProfile};
 
 /// Upper bound of every wait for the server (ticks run every few hundred milliseconds).
@@ -178,6 +176,8 @@ pub fn reader() -> ServerProfile {
             auth: Auth::Token(Token::new(token)),
             server_password: None,
             default_shard: None,
+            server_kind: None,
+            plugins: None,
         },
         _ => admin().profile(),
     }
@@ -221,6 +221,8 @@ impl Account {
             },
             server_password: None,
             default_shard: None,
+            server_kind: None,
+            plugins: None,
         }
     }
 
@@ -269,22 +271,26 @@ pub fn unique(prefix: &str) -> String {
 }
 
 /// Registers a new account (`POST /api/register/submit`) with `modules` as its code.
-pub async fn register_with(modules: Option<UserCodeModules>) -> Account {
+pub async fn register_with(modules: Option<Modules>) -> Account {
     let username = unique("lv");
     let account = Account {
         email: format!("{username}@e2e.invalid"),
         password: format!("pw-{}", unique("")),
         username,
     };
-    let body = RegisterSubmitRequest {
-        email: account.email.clone(),
-        modules,
-        password: account.password.clone(),
+    let registration = Registration {
         username: account.username.clone(),
-        ..RegisterSubmitRequest::default()
+        email: account.email.clone(),
+        password: account.password.clone(),
+        modules,
     };
     anonymous()
-        .send(&endpoints::RegisterSubmit { body })
+        .api()
+        .await
+        .expect("the server's operations")
+        .password_account()
+        .expect("the server registers accounts")
+        .register(registration)
         .await
         .expect("registration succeeds");
     account
@@ -297,12 +303,11 @@ pub async fn register() -> Account {
 
 /// Registers a new account running [`BOT`] and places its spawn in a free room.
 pub async fn player() -> Player {
-    let modules = UserCodeModules::from([(
-        "main".to_owned(),
-        UserCodeModulesValue::String(BOT.to_owned()),
-    )]);
+    let mut modules = Modules::new();
+    modules.insert_js("main", BOT);
     let account = register_with(Some(modules)).await;
     let client = account.client();
+    let api = client.api().await.expect("the server's API");
     let mut rooms = rooms(&client).await;
     // Start at a different room per player so concurrent tests rarely race for one.
     let offset = usize::try_from(u64::from_str_radix(&unique("")[4..], 16).unwrap_or(0))
@@ -314,18 +319,8 @@ pub async fn player() -> Player {
             continue;
         };
         for (x, y) in spawn_spots(|x, y| terrain.get(x, y)).into_iter().take(4) {
-            let body = GamePlaceSpawnRequest {
-                name: Some("Spawn1".to_owned()),
-                room: room.clone(),
-                shard: None,
-                x: GameCoordinateInput::Integer(x.into()),
-                y: GameCoordinateInput::Integer(y.into()),
-            };
-            if client
-                .send(&endpoints::GamePlaceSpawn { body })
-                .await
-                .is_ok()
-            {
+            let placed = api.place_spawn(None, &room, (x, y), Some("Spawn1")).await;
+            if placed.is_ok() {
                 return Player {
                     account,
                     room,
@@ -358,7 +353,7 @@ pub async fn subscribed(overseer: &Overseer) {
 
 /// The `owner0` map statistics of every room the server knows (it answers only for those),
 /// searching up to 10 rooms from the centre in each direction.
-pub async fn world(client: &Client) -> GameMapStatsResponse {
+pub async fn world(client: &Client) -> MapStats {
     let mut names = Vec::new();
     for horizontal in ['W', 'E'] {
         for vertical in ['N', 'S'] {
@@ -370,6 +365,9 @@ pub async fn world(client: &Client) -> GameMapStatsResponse {
         }
     }
     client
+        .api()
+        .await
+        .expect("the server's API")
         .map_stats(None, names, "owner0")
         .await
         .expect("map stats")

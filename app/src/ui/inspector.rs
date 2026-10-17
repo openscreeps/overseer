@@ -12,9 +12,8 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 use overseer::RoomSnapshot;
-use overseer::core::api::types::{GameRoomObject, GameRoomObjectStore};
-use overseer::core::socket::types::RoomUser;
 use overseer::map::{Portal, PortalDestination};
+use overseer::model::world::{GameRoomObject, GameRoomObjectStore, RoomUser};
 
 use crate::ui::style;
 use crate::ui::style::concatcp;
@@ -1072,8 +1071,7 @@ fn value_view(
 mod tests {
     use std::collections::BTreeMap;
 
-    use overseer::core::api::types::GameRoomObject;
-    use overseer::core::socket::types::RoomUser;
+    use overseer::model::world::{GameRoomObject, RoomUser};
     use serde_json::{Value as Json, json};
 
     use super::{

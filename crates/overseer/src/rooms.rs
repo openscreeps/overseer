@@ -4,17 +4,16 @@
 mod actions;
 mod info;
 
-pub use actions::{FlagColor, GlobalIntent, ObjectIntent, RoomIntent};
+pub use actions::{GlobalIntent, ObjectIntent, RoomIntent};
 pub use info::StatInterval;
+pub use overseer_net::model::world::FlagColor;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use overseer_net::core::api::Terrain;
-use overseer_net::core::api::types::GameRoomObject;
-use overseer_net::core::socket::types::{RoomUser, RoomVisualItem};
 use overseer_net::core::socket::{Channel, Flag, FlagError, Payload, RoomState};
+use overseer_net::model::world::{GameRoomObject, RoomUser, RoomVisualItem, Terrain};
 use tokio::sync::watch;
 
 use crate::live::{Command, Sink, Watch};

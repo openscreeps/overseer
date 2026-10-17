@@ -18,23 +18,31 @@ pub const OFFICIAL_URL: &str = "https://screeps.com/";
 /// The official seasonal server (screeps.com accounts).
 pub const SEASON_URL: &str = "https://screeps.com/season/";
 
-/// What a server is, which decides how to sign in and register.
+/// How the user added the server and how the server list shows it, and for screeps.com
+/// entries the contract to force ([`Self::forced`]). Only that: what the app offers on the
+/// server (sign-in methods, registration, lifting rate limits, …) follows from the subsystems
+/// the server has ([`overseer::net::World::subsystems`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerKind {
-    /// screeps.com (built in).
+    /// screeps.com (built in, never removed).
     Official,
-    /// The seasonal world on screeps.com.
+    /// The seasonal world on screeps.com (the preset of the "Add server" dialog).
     Season,
     /// A private server.
     Private,
 }
 
 impl ServerKind {
-    /// screeps.com accounts: API token or e-mail sign-in, registration and password recovery
-    /// on the website.
-    pub const fn uses_screeps_accounts(self) -> bool {
-        matches!(self, Self::Official | Self::Season)
+    /// The contract to force when connecting
+    /// ([`ServerProfile::server_kind`](overseer::ServerProfile::server_kind)): the official
+    /// one for screeps.com entries, whatever their address; `None` discovers it (private
+    /// servers).
+    pub const fn forced(self) -> Option<overseer::model::platform::ServerKind> {
+        match self {
+            Self::Official | Self::Season => Some(overseer::model::platform::ServerKind::Official),
+            Self::Private => None,
+        }
     }
 }
 
@@ -46,9 +54,9 @@ pub struct SavedUser {
     /// Username; `None` until the account chose one.
     #[serde(default)]
     pub username: Option<String>,
-    /// How the account signed in on screeps.com: `Some(true)` with an API token (its rate limits
-    /// can be lifted on screeps.com's reset page), `Some(false)` with a password (a session
-    /// token, which the reset page does not take), `None` when saved before the app recorded it.
+    /// How the account signed in: `Some(true)` with an API token (its rate limits can be
+    /// lifted where the server lifts them), `Some(false)` with a password (a session token,
+    /// which matches no API token), `None` when saved before the app recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<bool>,
 }
@@ -60,7 +68,7 @@ pub struct Server {
     pub name: String,
     /// Normalized base URL ([`normalize_url`]); identifies the server.
     pub url: String,
-    /// What the server is.
+    /// How the server was added and is listed.
     pub kind: ServerKind,
     /// The name last used to sign in (username or e-mail), to fill the sign-in form.
     #[serde(default)]
@@ -343,6 +351,14 @@ mod tests {
             assert_eq!(profiles, Profiles::default(), "{json:?}");
             assert_eq!(profiles.servers[0].url, OFFICIAL_URL);
         }
+    }
+
+    #[test]
+    fn screeps_com_entries_force_the_official_contract_and_private_ones_discover_it() {
+        use overseer::model::platform::ServerKind as Contract;
+        assert_eq!(ServerKind::Official.forced(), Some(Contract::Official));
+        assert_eq!(ServerKind::Season.forced(), Some(Contract::Official));
+        assert_eq!(ServerKind::Private.forced(), None);
     }
 
     #[test]

@@ -3,9 +3,8 @@
 
 use std::sync::Arc;
 
-use overseer::core::api::Tile;
-use overseer::core::api::types::GameRoomStatName;
 use overseer::map::{RoomMap, Terrain};
+use overseer::model::world::{GameRoomStatName, Tile};
 use overseer::{MapStat, Overseer, StatInterval};
 use tokio::time::timeout;
 
@@ -185,8 +184,8 @@ async fn owner_statistics_name_players_and_the_invader() {
             .and_then(|invader| invader.username.as_deref()),
         Some("Invader")
     );
-    let mineral = invaded.minerals0.as_ref().expect("the room has a mineral");
-    assert!(mineral.r#type.is_some() && mineral.density.is_some());
+    let mineral = invaded.mineral.as_ref().expect("the room has a mineral");
+    assert!(mineral.kind.is_some() && mineral.density.is_some());
 
     for stat in [
         GameRoomStatName::EnergyHarvested,

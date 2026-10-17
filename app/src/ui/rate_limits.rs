@@ -1,20 +1,22 @@
 //! The live session's rate limits: the Rate limits panel (account menu), the status bar's
-//! `Reset limit` and `Rate limits lifted` items, the prompt to lift them, and screeps.com's
-//! reset flow ([`crate::rate_limits`]).
+//! `Reset limit` and `Rate limits lifted` items, the prompt to lift them, and the lift flow
+//! ([`crate::rate_limits`]), as the server's lifting subsystem says
+//! ([`overseer::Account::rate_limit_lift`]).
 //!
-//! The reset page opens as a popup in a browser and resumes the world's overviews on its
-//! success message (from `https://screeps.com` only); in the shell it opens in the system
-//! browser, which cannot talk back, so the app rechecks when its window regains focus. A
-//! recheck ([`crate::feed::Feed::recheck_rate_limit`]) sends nothing unless the world's
-//! overviews are paused by the limit.
+//! A lift page (screeps.com's reset page) opens as a popup in a browser and resumes the
+//! world's overviews on its success message (from the page's origin only); in the shell it
+//! opens in the system browser, which cannot talk back, so the app rechecks when its window
+//! regains focus. A lift request (screepsmod-auth) is sent, then the app rechecks. A recheck
+//! ([`crate::feed::Feed::recheck_rate_limit`]) sends nothing unless the world's overviews are
+//! paused by the limit.
 //!
-//! On screeps.com API-token sessions (main window only, [`rate_limits::follows_lift`]),
-//! [`RateLimitsUi::follow`] checks whether the token's limits are lifted
-//! ([`overseer::Account::rate_limit_exemption`]) as [`CheckSchedule`] says: when the session
-//! starts, after a reset, after `Check again`, after HTTP 429 replies, when the window gets
-//! focus or the page becomes visible again (the user may have lifted them on the website),
-//! every minute while loading waits on the limits, and while lifted now and then and when the
-//! lift ends. The world map ignores its budget while lifted
+//! On API-token sessions of servers that lift rate limits (main window only,
+//! [`rate_limits::follows_lift`]), [`RateLimitsUi::follow`] checks whether the token's limits
+//! are lifted ([`overseer::Account::rate_limit_exemption`]) as [`CheckSchedule`] says: when
+//! the session starts, after a reset, after `Check again`, after HTTP 429 replies, when the
+//! window gets focus or the page becomes visible again (the user may have lifted them on the
+//! website), every minute while loading waits on the limits, and while lifted now and then and
+//! when the lift ends. The world map ignores its budget while lifted
 //! ([`crate::feed::Feed::set_rate_limit_exempt_until`]).
 
 use std::time::Duration;
@@ -23,12 +25,14 @@ use leptos::html::{Button, Section};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::Account;
+use overseer::model::platform::Subsystem;
+use overseer::net::api::{LiftPage, RateLimitLift};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{FocusEvent, HtmlElement, KeyboardEvent, Node};
 
-use crate::profiles::ServerKind;
 use crate::rate_limits::{self, Actions, CheckSchedule, Warning, Warnings};
+use crate::session;
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
@@ -75,9 +79,11 @@ pub struct RateLimitsUi {
     pub exempt_until: RwSignal<Option<u64>>,
     /// The prompt to lift the limits, while shown.
     pub warning: RwSignal<Option<Warning>>,
-    /// The shell opened the reset page in the system browser: recheck once the window
+    /// The shell opened the lift page in the system browser: recheck once the window
     /// regains focus.
     awaiting_focus: StoredValue<bool>,
+    /// The lift page opened last, whose success message is awaited.
+    page: StoredValue<Option<LiftPage>>,
     monitor: StoredValue<Monitor>,
 }
 
@@ -94,6 +100,7 @@ impl RateLimitsUi {
             exempt_until: RwSignal::new(None),
             warning: RwSignal::new(None),
             awaiting_focus: StoredValue::new(false),
+            page: StoredValue::new(None),
             monitor: StoredValue::new(Monitor::default()),
         }
     }
@@ -111,13 +118,18 @@ impl RateLimitsUi {
             .filter(|until| *until > self.now.get())
     }
 
-    /// Rechecks after a reset: on the page's success message (browser) or when the window
+    /// Rechecks after a reset: on the lift page's success message (browser) or when the window
     /// regains focus after the shell opened the page; and when the window gets focus or the
     /// page becomes visible again ([`CheckSchedule::attention`]). For as long as the page
     /// lives.
     pub fn listen(self, map: MapState) {
         let message = window_event_listener(leptos::ev::message, move |event| {
-            if rate_limits::is_reset_success(&event.origin(), event.data().as_string().as_deref()) {
+            let data = event.data().as_string();
+            let lifted = self.page.with_value(|page| {
+                page.as_ref()
+                    .is_some_and(|page| page.is_success(&event.origin(), data.as_deref()))
+            });
+            if lifted {
                 self.lifted(map);
             }
         });
@@ -155,13 +167,13 @@ impl RateLimitsUi {
             .update_value(|monitor| monitor.schedule.attention());
     }
 
-    /// Follows the lift of the live session's token on screeps.com API-token sessions in the
-    /// main window ([`rate_limits::follows_lift`]): checks it (see the module docs), tells the
-    /// world map, toasts before it ends and prompts to lift the limits when an endpoint runs
-    /// low. As long as the page lives.
+    /// Follows the lift of the live session's token on API-token sessions of servers that
+    /// lift rate limits, in the main window ([`rate_limits::follows_lift`]): checks it (see
+    /// the module docs), tells the world map, toasts before it ends and prompts to lift the
+    /// limits when an endpoint runs low. As long as the page lives.
     pub fn follow(self, state: AppState, map: MapState) {
         let toasts = Toasts::expect();
-        let lift_again = Callback::new(move |()| start_reset(state, self));
+        let lift_again = Callback::new(move |()| start_reset(state, self, map));
         Effect::new(move |_| {
             let until = self.exempt_until.get();
             map.feed.with(|feed| {
@@ -173,7 +185,7 @@ impl RateLimitsUi {
         let popout = state.is_popout();
         Effect::new(move |_| {
             let now = self.now.get();
-            let (kind, api_token) = session_server(state);
+            let (lifts, api_token) = session_lift(state);
             let session = state
                 .session
                 .with(|session| {
@@ -181,7 +193,7 @@ impl RateLimitsUi {
                         .as_ref()
                         .map(|session| (session.epoch(), session.overseer.clone()))
                 })
-                .filter(|_| rate_limits::follows_lift(kind, api_token, popout));
+                .filter(|_| rate_limits::follows_lift(lifts, api_token, popout));
             match session {
                 Some((epoch, overseer)) => {
                     let held_back = map
@@ -349,24 +361,43 @@ fn epoch_millis() -> u64 {
     now
 }
 
-/// The kind of the live session's server and whether it signed in with an API token
-/// (reactive); a private server without a session.
-fn session_server(state: AppState) -> (ServerKind, Option<bool>) {
-    let server = state
-        .session
-        .with(|session| session.as_ref().map(|session| session.server.clone()));
-    server
-        .and_then(|url| {
-            state.profiles.with(|profiles| {
-                profiles.server(&url).map(|server| {
-                    (
-                        server.kind,
-                        server.user.as_ref().and_then(|user| user.api_token),
-                    )
-                })
-            })
+/// Whether the live session's server lifts rate limits
+/// ([`Subsystem::RateLimitLift`]) and whether the session signed in with an API token
+/// (reactive); neither without a session.
+fn session_lift(state: AppState) -> (bool, Option<bool>) {
+    let session = state.session.with(|session| {
+        session.as_ref().map(|session| {
+            (
+                session.server.clone(),
+                session.overseer.world().supports(Subsystem::RateLimitLift),
+            )
         })
-        .unwrap_or((ServerKind::Private, None))
+    });
+    session.map_or((false, None), |(url, lifts)| {
+        let api_token = state.profiles.with(|profiles| {
+            profiles
+                .server(&url)
+                .and_then(|server| server.user.as_ref().and_then(|user| user.api_token))
+        });
+        (lifts, api_token)
+    })
+}
+
+/// The host of the web page where the live session's token gets its limits lifted, for the
+/// texts naming it; `None` where a request lifts them, and without a session or a lift.
+fn lift_page_host(state: AppState) -> Option<String> {
+    state.session.with(|session| {
+        match session
+            .as_ref()?
+            .overseer
+            .account()
+            .rate_limit_lift()
+            .ok()?
+        {
+            RateLimitLift::Page(page) => Some(rate_limits::page_host(&page.url)),
+            RateLimitLift::Request(_) => None,
+        }
+    })
 }
 
 /// The rate-limit actions of the live session (reactive).
@@ -374,8 +405,8 @@ pub fn session_actions(state: AppState, map: MapState, ui: RateLimitsUi) -> Acti
     let paused = map
         .progress
         .with(|progress| progress.is_some_and(|progress| progress.stats_paused_until.is_some()));
-    let (kind, api_token) = session_server(state);
-    rate_limits::actions(kind, api_token, paused, ui.lifted_until().is_some())
+    let (lifts, api_token) = session_lift(state);
+    rate_limits::actions(lifts, api_token, paused, ui.lifted_until().is_some())
 }
 
 /// Resumes the world's overviews paused by the rate limit, if any.
@@ -387,41 +418,65 @@ pub fn recheck(map: MapState) {
     });
 }
 
-/// Opens screeps.com's reset page for the live session's API token (its first 8 characters
-/// only); failures go to the banner.
-pub fn start_reset(state: AppState, ui: RateLimitsUi) {
-    let url = state.session.with_untracked(|session| {
-        session.as_ref().and_then(|session| {
-            session
-                .overseer
-                .tokens()
-                .borrow()
-                .as_ref()
-                .and_then(|token| rate_limits::reset_url(token.as_str()))
-        })
+/// Lifts the rate limits of the live session's API token as its server does (only the
+/// token's first 8 characters leave the app): opens the lift page, or sends the lift request
+/// and rechecks. Failures go to the banner.
+pub fn start_reset(state: AppState, ui: RateLimitsUi, map: MapState) {
+    let lift = state.session.with_untracked(|session| {
+        session
+            .as_ref()
+            .map(|session| session.overseer.account().rate_limit_lift())
     });
-    let Some(url) = url else {
-        state
-            .banner
-            .set(Some("No API token to reset the rate limits of.".to_owned()));
-        return;
-    };
-    let platform = state.platform();
-    if platform.is_tauri() {
-        ui.awaiting_focus.set_value(true);
-    }
-    spawn_local(async move {
-        if let Err(error) = platform.open_reset_page(&url).await {
-            ui.awaiting_focus.set_value(false);
+    let lift = match lift {
+        Some(Ok(lift)) => lift,
+        Some(Err(error)) => {
             state.banner.set(Some(format!(
-                "Could not open screeps.com's reset page: {error}"
+                "Could not lift the rate limits: {}",
+                session::error_message(&error)
             )));
+            return;
         }
-    });
+        None => {
+            state
+                .banner
+                .set(Some("No API token to reset the rate limits of.".to_owned()));
+            return;
+        }
+    };
+    match lift {
+        RateLimitLift::Page(page) => {
+            let url = page.url.clone();
+            let host = rate_limits::page_host(&url);
+            ui.page.set_value(Some(page));
+            let platform = state.platform();
+            if platform.is_tauri() {
+                ui.awaiting_focus.set_value(true);
+            }
+            spawn_local(async move {
+                if let Err(error) = platform.open_reset_page(&url).await {
+                    ui.awaiting_focus.set_value(false);
+                    state
+                        .banner
+                        .set(Some(format!("Could not open {host}'s reset page: {error}")));
+                }
+            });
+        }
+        RateLimitLift::Request(request) => {
+            spawn_local(async move {
+                match request.send().await {
+                    Ok(()) => ui.lifted(map),
+                    Err(error) => state.banner.set(Some(format!(
+                        "Could not lift the rate limits: {}",
+                        session::message(&error)
+                    ))),
+                }
+            });
+        }
+    }
 }
 
-/// `Reset limit` in the status bar, while the world's overviews wait for a limit the reset
-/// page can lift.
+/// `Reset limit` in the status bar, while the world's overviews wait for a limit that lifting
+/// can lift.
 #[component]
 pub fn StatusReset() -> impl IntoView {
     let state = AppState::expect();
@@ -429,13 +484,17 @@ pub fn StatusReset() -> impl IntoView {
     let ui = RateLimitsUi::expect();
     move || {
         session_actions(state, map, ui).status_reset.then(|| {
+            let title = match lift_page_host(state) {
+                Some(host) => format!("Lift the rate limits of your API token on {host}"),
+                None => "Lift the rate limits of your API token".to_owned(),
+            };
             view! {
                 <span class="inline-flex flex-none items-center gap-2">
                     <button
                         type="button"
                         class=concatcp!(style::LINK_BUTTON, " text-[length:inherit]")
-                        title="Lift the rate limits of your API token on screeps.com"
-                        on:click=move |_| start_reset(state, ui)
+                        title=title
+                        on:click=move |_| start_reset(state, ui, map)
                     >
                         "Reset limit"
                     </button>
@@ -582,16 +641,27 @@ pub fn RateLimitsPanel() -> impl IntoView {
     let actions = move || {
         let actions = session_actions(state, map, ui);
         let reset = actions.reset.then(|| {
+            let (help, label) = match lift_page_host(state) {
+                Some(host) => (
+                    format!(
+                        "{host} lets you lift your API token's limits early: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent, in the page's address; the full token never leaves Overseer.{}",
+                        if tauri {
+                            " The page opens in your browser; Overseer checks again when you come back."
+                        } else {
+                            ""
+                        },
+                    ),
+                    format!("Reset on {host}"),
+                ),
+                None => (
+                    "The server lifts your API token's limits early for about 2 hours on request. Only the first 8 characters of your token are sent; the full token never leaves Overseer.".to_owned(),
+                    "Lift limits".to_owned(),
+                ),
+            };
             view! {
-                <p class=style::HELP>
-                    "screeps.com lets you lift your API token's limits early: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent, in the page's address; the full token never leaves Overseer."
-                    {tauri
-                        .then_some(
-                            " The page opens in your browser; Overseer checks again when you come back.",
-                        )}
-                </p>
-                <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| start_reset(state, ui)>
-                    "Reset on screeps.com"
+                <p class=style::HELP>{help}</p>
+                <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| start_reset(state, ui, map)>
+                    {label}
                 </button>
             }
         });
@@ -641,11 +711,12 @@ pub fn RateLimitsPanel() -> impl IntoView {
 
 /// The prompt to lift the limits when an endpoint runs low ([`RateLimitsUi::warning`]): a
 /// non-modal dialog that never takes the focus (typing elsewhere goes on), with `Lift limits
-/// for 2 hours` (the reset page) and `Not now` (Escape inside it too). Closing it while it
-/// holds the focus gives the focus back to where it came from.
+/// for 2 hours` (the lift page or request) and `Not now` (Escape inside it too). Closing it
+/// while it holds the focus gives the focus back to where it came from.
 #[component]
 pub fn LiftPrompt() -> impl IntoView {
     let state = AppState::expect();
+    let map = MapState::expect();
     let ui = RateLimitsUi::expect();
     let dialog = NodeRef::<Section>::new();
     let came_from = StoredValue::new_local(None::<HtmlElement>);
@@ -681,7 +752,7 @@ pub fn LiftPrompt() -> impl IntoView {
     let lift = move || {
         close();
         ui.warning.set(None);
-        start_reset(state, ui);
+        start_reset(state, ui, map);
     };
     let keydown = move |event: KeyboardEvent| {
         if event.key() == "Escape" {
@@ -711,7 +782,12 @@ pub fn LiftPrompt() -> impl IntoView {
                 </div>
                 <p id="lift-prompt-text" class="mb-3" title=local_time(reset)>{text}</p>
                 <p class=concatcp!(style::HELP, " mb-3")>
-                    "screeps.com can lift your API token's rate limits for 2 hours: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent."
+                    {move || match lift_page_host(state) {
+                        Some(host) => format!(
+                            "{host} can lift your API token's rate limits for 2 hours: its reset page asks you to solve a captcha. Only the first 8 characters of your token are sent."
+                        ),
+                        None => "The server can lift your API token's rate limits for 2 hours. Only the first 8 characters of your token are sent.".to_owned(),
+                    }}
                 </p>
                 <div class=style::ACTIONS>
                     <button type="button" class=style::BUTTON_PRIMARY on:click=move |_| lift()>

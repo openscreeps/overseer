@@ -19,13 +19,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use overseer_net::core::api::Tile;
-use overseer_net::core::api::endpoints;
-use overseer_net::core::api::types::{
-    GameCoordinateInput, GameMapStatsResponse, GamePlaceSpawnRequest, RegisterSubmitRequest,
-    UserCodeModules, UserCodeModulesValue,
-};
+use overseer_net::api::{AccountApi as _, PasswordAccount as _, WorldApi as _};
 use overseer_net::core::{ServerUrl, Token};
+use overseer_net::model::account::Registration;
+use overseer_net::model::code::Modules;
+use overseer_net::model::world::{MapStats, Tile};
 use overseer_net::{Client, Socket, SocketEvent};
 
 /// Upper bound of every wait for the server (ticks run every few hundred milliseconds).
@@ -103,26 +101,21 @@ pub fn reader() -> Client {
 }
 
 /// The start room of `client`'s account (`GET /api/user/world-start-room`) as `(shard, room)`:
-/// sharded servers name it `shard/room`, single-world servers only the room.
+/// sharded servers name the shard, single-world servers only the room.
 ///
 /// # Panics
 ///
 /// When the request fails or the server names no room.
 pub async fn start_room(client: &Client) -> (Option<String>, String) {
-    let rooms = client
-        .send(&endpoints::UserWorldStartRoom { shard: None })
+    let start = client
+        .api()
+        .await
+        .expect("the server's operations")
+        .start_room(None)
         .await
         .expect("the start room")
-        .body
-        .room;
-    let room = rooms
-        .into_iter()
-        .next()
         .expect("the server names a start room");
-    match room.split_once('/') {
-        Some((shard, room)) => (Some(shard.to_owned()), room.to_owned()),
-        None => (None, room),
-    }
+    (start.shard, start.room)
 }
 
 /// A registered account (password sign-in).
@@ -184,23 +177,38 @@ pub fn new_account() -> Account {
     }
 }
 
-/// The registration request of `account` with `modules` as its code.
-pub fn registration(account: &Account, modules: Option<UserCodeModules>) -> RegisterSubmitRequest {
-    RegisterSubmitRequest {
-        email: account.email.clone(),
-        modules,
-        password: account.password.clone(),
+/// The registration of `account` with `modules` as its code.
+pub fn registration(account: &Account, modules: Option<Modules>) -> Registration {
+    Registration {
         username: account.username.clone(),
-        ..RegisterSubmitRequest::default()
+        email: account.email.clone(),
+        password: account.password.clone(),
+        modules,
     }
 }
 
+/// Registers `registration` through the server's password accounts
+/// (`POST /api/register/submit`).
+///
+/// # Errors
+///
+/// The server's refusal.
+///
+/// # Panics
+///
+/// When the server has no password accounts.
+pub async fn submit(registration: Registration) -> Result<(), overseer_net::Error> {
+    let api = anonymous().api().await?;
+    api.password_account()
+        .expect("the server registers accounts")
+        .register(registration)
+        .await
+}
+
 /// Registers a new account (`POST /api/register/submit`) with `modules` as its code.
-pub async fn register_with(modules: Option<UserCodeModules>) -> Account {
+pub async fn register_with(modules: Option<Modules>) -> Account {
     let account = new_account();
-    let body = registration(&account, modules);
-    anonymous()
-        .send(&endpoints::RegisterSubmit { body })
+    submit(registration(&account, modules))
         .await
         .expect("registration succeeds");
     account
@@ -213,12 +221,11 @@ pub async fn register() -> Account {
 
 /// Registers a new account running [`BOT`] and places its spawn in a free room.
 pub async fn player() -> Player {
-    let modules = UserCodeModules::from([(
-        "main".to_owned(),
-        UserCodeModulesValue::String(BOT.to_owned()),
-    )]);
+    let mut modules = Modules::new();
+    modules.insert_js("main", BOT);
     let account = register_with(Some(modules)).await;
     let client = account.client();
+    let api = client.api().await.expect("the server's API");
     let mut rooms = rooms(&client).await;
     // Start at a different room per player so concurrent tests rarely race for one.
     let offset = usize::try_from(u64::from_str_radix(&unique("")[4..], 16).unwrap_or(0))
@@ -230,18 +237,8 @@ pub async fn player() -> Player {
             continue;
         };
         for (x, y) in spawn_spots(|x, y| terrain.get(x, y)).into_iter().take(4) {
-            let body = GamePlaceSpawnRequest {
-                name: Some("Spawn1".to_owned()),
-                room: room.clone(),
-                shard: None,
-                x: GameCoordinateInput::Integer(x.into()),
-                y: GameCoordinateInput::Integer(y.into()),
-            };
-            if client
-                .send(&endpoints::GamePlaceSpawn { body })
-                .await
-                .is_ok()
-            {
+            let placed = api.place_spawn(None, &room, (x, y), Some("Spawn1")).await;
+            if placed.is_ok() {
                 return Player {
                     account,
                     room,
@@ -268,13 +265,13 @@ pub fn with_token(token: Token) -> Client {
 
 /// The current game tick.
 pub async fn game_time(client: &Client) -> u64 {
-    let time = client
-        .send(&endpoints::GameTime { shard: None })
+    client
+        .api()
+        .await
+        .expect("the server's operations")
+        .game_time(None)
         .await
         .expect("the game time")
-        .body
-        .time;
-    u64::try_from(time).expect("a non-negative game time")
 }
 
 /// Waits until the game reaches `tick`. Ticks slow down while many tests load the server, so
@@ -324,7 +321,7 @@ pub async fn until<T>(
 
 /// Ownership map statistics of every room the world may hold (rooms `[WE]0..=10[NS]0..=10`
 /// cover any world up to 22 rooms across; the server leaves out rooms it does not have).
-pub async fn world_map(client: &Client) -> GameMapStatsResponse {
+pub async fn world_map(client: &Client) -> MapStats {
     let mut names = Vec::new();
     for horizontal in ['W', 'E'] {
         for vertical in ['N', 'S'] {
@@ -336,6 +333,9 @@ pub async fn world_map(client: &Client) -> GameMapStatsResponse {
         }
     }
     client
+        .api()
+        .await
+        .expect("the server's API")
         .map_stats(None, names, "owner0")
         .await
         .expect("map stats")

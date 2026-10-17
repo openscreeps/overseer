@@ -7,8 +7,9 @@ use async_tungstenite::tungstenite::Message;
 use futures_util::StreamExt;
 use futures_util::stream::FusedStream;
 use overseer_core::Token;
-use overseer_core::api::endpoints;
+use overseer_core::model::platform::ServerKind;
 use overseer_core::socket::{Channel, Event};
+use overseer_net::api::AccountApi as _;
 use overseer_net::{Client, ReconnectPolicy, SocketEvent};
 use tokio::time::Instant;
 
@@ -86,27 +87,52 @@ async fn subscriptions_are_sent_again_after_the_server_drops_the_connection() {
 /// listed.
 const COMMUNITY_VERSION: &str = r#"{"ok":1,"protocol":14,"useNativeAuth":false,"users":1,"serverData":{"shards":["shard0"],"customObjectTypes":{},"historyChunkSize":20,"socketUpdateThrottle":1000,"renderer":{"resources":{},"metadata":{}},"features":[{"name":"auth","version":1},{"name":"auth-tokens"},{"name":"screepsmod-auth","version":"2.10.1"},{"name":"screepsmod-admin-utils","version":"1.37.1"}]}}"#;
 
+/// `GET /api/version` of the stock Screeps server listing a shard (as a mod might).
+const STOCK_SHARD_VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"shards":["shard0"],"customObjectTypes":{},"historyChunkSize":20,"renderer":{"resources":{},"metadata":{}}}}"#;
+
 #[tokio::test]
 async fn only_official_servers_name_the_shard_they_list_in_room_channels() {
-    let mut server = Server::start(
-        |request: &Request| match request.path.as_str() {
-            "/api/version" => (200, COMMUNITY_VERSION.to_owned()),
-            _ => (404, "{}".to_owned()),
-        },
-        |_| true,
-    )
-    .await;
-    // The same reply from a private server and from a stand-in for screeps.com.
-    for (url, shard, line) in [
-        (server.url(), None, "subscribe room:W1N1"),
+    // Private servers listing a shard, and a stand-in for screeps.com. The socket decodes
+    // events with the contract of the server's kind.
+    for (version, official, kind, shard, line) in [
         (
-            server.official_url(),
+            COMMUNITY_VERSION,
+            false,
+            ServerKind::Community,
+            None,
+            "subscribe room:W1N1",
+        ),
+        (
+            STOCK_SHARD_VERSION,
+            false,
+            ServerKind::Community,
+            None,
+            "subscribe room:W1N1",
+        ),
+        (
+            STOCK_SHARD_VERSION,
+            true,
+            ServerKind::Official,
             Some("shard0"),
             "subscribe room:shard0/W1N1",
         ),
     ] {
+        let mut server = Server::start(
+            move |request: &Request| match request.path.as_str() {
+                "/api/version" => (200, version.to_owned()),
+                _ => (404, "{}".to_owned()),
+            },
+            |_| true,
+        )
+        .await;
+        let url = if official {
+            server.official_url()
+        } else {
+            server.url()
+        };
         let client = Client::builder(url).build().unwrap();
         let mut socket = client.connect().await.unwrap();
+        assert_eq!(socket.session().kind(), kind);
         let room = socket.subscribe_room("W1N1");
         assert_eq!(
             room,
@@ -339,7 +365,7 @@ async fn auth_ok_tokens_reach_the_http_client() {
     assert!(tokens.has_changed().unwrap());
     assert_eq!(*tokens.borrow_and_update(), Some(Token::new("t2")));
 
-    client.send(&endpoints::AuthMe).await.unwrap();
+    client.api().await.unwrap().me().await.unwrap();
     let last = server.requests().pop().unwrap();
     assert_eq!(
         (last.path.as_str(), last.token.as_deref()),
@@ -452,7 +478,10 @@ async fn watched_rooms_combine_terrain_and_live_state() {
     let room = socket.watch_room("W1N1").await.unwrap();
     let view = socket.room_view("W1N1").unwrap();
     assert_eq!(view.room(), "W1N1");
-    assert_eq!(view.tile(1, 0), Some(overseer_core::api::Tile::Swamp));
+    assert_eq!(
+        view.tile(1, 0),
+        Some(overseer_core::model::world::Tile::Swamp)
+    );
     assert!(view.state().is_none());
     assert_eq!(view.objects().count(), 0);
 

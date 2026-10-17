@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use overseer::core::Token;
-use overseer::core::api::endpoints;
 use overseer::{Auth, ConnectionStatus, Notice, Overseer, ServerProfile};
 
 use crate::server::{self, Request, Response, Server, Ws};
@@ -48,6 +47,8 @@ async fn connect_rotating(server: &mut Server) -> Overseer {
         auth: Auth::Token(Token::new("t1")),
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     };
     let overseer = Overseer::connect(profile).await.unwrap();
     let mut websocket = server.socket().await;
@@ -145,9 +146,8 @@ async fn requests_of_the_app_postpone_the_refresh() {
     let mut server = Server::start(rotating, |_| true).await;
     let overseer = connect_rotating(&mut server).await;
     advance(Duration::from_secs(20)).await;
-    let client = overseer.client().clone();
-    let request =
-        tokio::spawn(async move { client.send(&endpoints::UserWorldStatus).await.map(|_| ()) });
+    let account = overseer.account();
+    let request = tokio::spawn(async move { account.world_status().await.map(|_| ()) });
     settle(|| request.is_finished()).await;
     request.await.unwrap().unwrap();
     assert_eq!(token(&overseer), Some(Token::new("t3")));

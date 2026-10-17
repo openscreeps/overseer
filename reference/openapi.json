@@ -10057,7 +10057,7 @@
       "get": {
         "operationId": "userMemorySegmentGet",
         "summary": "Read a RawMemory segment",
-        "description": "Returns the contents of a `RawMemory.segments` entry (0-99), or `null` when it was never written. A comma-separated list of ids returns an array of contents in request order (node-screeps-api). Ids outside 0-99 yield `invalid segment ID`. The official web client reads single segments of the current shard.",
+        "description": "Returns the contents of a `RawMemory.segments` entry (0-99). A segment that was never written has no contents: `data` is `null`, or absent when the server's storage reads it as `undefined` (backend-local answers `{data}` as read, and its default LokiJS storage yields `undefined`, which JSON omits). A comma-separated list of ids returns an array of contents in request order (node-screeps-api). Ids outside 0-99 yield `invalid segment ID`. The official web client reads single segments of the current shard.",
         "tags": [
           "User Memory"
         ],
@@ -12306,12 +12306,18 @@
             "url": "https://screeps.com/api/version",
             "date": "2026-10-15",
             "notes": "Menu items carry string `id`, `class`, `label`, `svg`, `href`, `routerLink`, `redirectUrl`, `template`, `templateBefore`, string-array `conditions` and object `config`; `customObjectTypes`, `renderer.resources` and `renderer.metadata` are empty objects."
+          },
+          {
+            "url": "https://screeps.com/api/version",
+            "date": "2026-10-17",
+            "notes": "Top-level `seasonAccessCost` maps Unix times in seconds (string keys, five entries) to integer access-key fees, decreasing from 5 to 1; the `persistent-world` feature carries `seasonHint`, an HTML text about that fee schedule. Both feed the official client's season access widget."
           }
         ],
         "x-sources": [
           "https://screeps.com/a/app2/main.js?bust=1787842760865#L220605C46",
           "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/base.ts#L103-L151",
-          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C180790"
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C180790",
+          "https://screeps.com/a/app2/main.js?bust=1787842760865#L197866C4625"
         ]
       }
     },
@@ -23591,6 +23597,13 @@
           "currentSeason": {
             "type": "string"
           },
+          "seasonAccessCost": {
+            "type": "object",
+            "description": "Season entry fee schedule: each key is a Unix time in seconds from which the value, a fee in access keys, applies. The official client passes it to its season access widget.",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
           "decorationConvertationCost": {
             "type": "number"
           },
@@ -23646,6 +23659,10 @@
                     },
                     "version": {
                       "type": "number"
+                    },
+                    "seasonHint": {
+                      "type": "string",
+                      "description": "HTML hint about the season entry fee schedule, shown by the official client's season access widget (the `persistent-world` feature)."
                     },
                     "menuData": {
                       "type": "array",
@@ -25865,7 +25882,7 @@
             "description": "Success marker; every JSON success body carries `ok: 1`."
           },
           "data": {
-            "description": "Segment text, or null for an uninitialized segment. screeps.com returns an array in request order when several comma-separated ids were requested.",
+            "description": "Segment text; `null` or absent for an uninitialized segment. screeps.com returns an array in request order when several comma-separated ids were requested.",
             "anyOf": [
               {
                 "type": "string"
@@ -25890,8 +25907,7 @@
           }
         },
         "required": [
-          "ok",
-          "data"
+          "ok"
         ]
       },
       "UserMemorySegmentSetRequest": {

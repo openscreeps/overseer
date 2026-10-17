@@ -6,96 +6,25 @@
 //! between a directory and [`Modules`], [`Code::pull_dir`] and [`Code::push_dir`] sync a
 //! directory with a branch. Directory sync is native-only: browsers (`wasm32-unknown-unknown`)
 //! have no file system, so a web app reads and writes [`Modules`] itself (file pickers,
-//! downloads, browser storage).
+//! downloads, browser storage). The values are those of [`overseer_net::model::code`].
 
 #[cfg(not(target_arch = "wasm32"))]
 mod dir;
-mod modules;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
-use overseer_net::core::api::endpoints;
-use overseer_net::core::api::types::{
-    UserCloneBranchRequest, UserCodeBranch, UserCodeSetRequest, UserDeleteBranchRequest,
-    UserSetActiveBranchRequest, UserSetActiveBranchRequestActiveName,
-};
-use overseer_net::core::socket::types::{
-    UserActiveBranchActiveName, UserCodeHash, UserCodeTimestamp,
-};
+use overseer_net::api::CodeApi as _;
 use overseer_net::core::socket::{Channel, Payload};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use dir::{read_dir, write_dir};
-pub use modules::{InvalidWasm, ModuleKind, Modules};
+pub use overseer_net::model::code::{
+    ActiveBranchChange, ActiveBranches, CodeChange, CodeTarget, InvalidWasm, ModuleKind, Modules,
+    UserCodeBranch, UserCodeHash,
+};
 
 use crate::{Error, Feed, Overseer};
-
-/// Where a branch runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CodeTarget {
-    /// The world: the branch the player's creeps run.
-    World,
-    /// The simulator.
-    Simulation,
-}
-
-impl CodeTarget {
-    /// The branch name selecting the branch active in this target (`$activeWorld` or
-    /// `$activeSim`), accepted wherever a method of [`Code`] reads or writes the modules of a
-    /// branch.
-    #[must_use]
-    pub const fn selector(self) -> &'static str {
-        match self {
-            Self::World => "$activeWorld",
-            Self::Simulation => "$activeSim",
-        }
-    }
-}
-
-/// The names of the branches active in the world and in the simulator.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ActiveBranches {
-    /// The branch running in the world; `None` when no branch is marked.
-    pub world: Option<String>,
-    /// The branch running in the simulator; `None` when no branch is marked.
-    pub simulation: Option<String>,
-}
-
-impl ActiveBranches {
-    /// The branch active in `target`.
-    #[must_use]
-    pub fn get(&self, target: CodeTarget) -> Option<&str> {
-        match target {
-            CodeTarget::World => self.world.as_deref(),
-            CodeTarget::Simulation => self.simulation.as_deref(),
-        }
-    }
-}
-
-/// The saved modules of a branch, as announced on `user:<user>/code`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CodeChange {
-    /// The branch name.
-    pub branch: String,
-    /// Every module of the branch after the change.
-    pub modules: Modules,
-    /// The `_hash` the uploading client sent, if any (the official web client sends a random
-    /// number to recognize its own uploads).
-    pub hash: Option<UserCodeHash>,
-    /// Save time in milliseconds since the Unix epoch, also for the date servers send for a
-    /// branch last saved by cloning ([`UserCodeTimestamp::millis`]).
-    pub timestamp: Option<u64>,
-}
-
-/// A branch was activated, as announced on `user:<user>/set-active-branch`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActiveBranchChange {
-    /// Where the branch now runs.
-    pub target: CodeTarget,
-    /// The branch name.
-    pub branch: String,
-}
 
 /// Code branches and modules of the signed-in user, and their sync with local directories.
 ///
@@ -120,8 +49,7 @@ impl Code {
     ///
     /// Returns [`Error::Net`] when the request fails.
     pub async fn branches(&self) -> Result<Vec<UserCodeBranch>, Error> {
-        self.ready()?;
-        Ok(self.overseer.client().branches().await?)
+        Ok(self.overseer.user_api()?.branches().await?)
     }
 
     /// The names of the branches active in the world and in the simulator, from
@@ -131,16 +59,7 @@ impl Code {
     ///
     /// As [`Self::branches`].
     pub async fn active_branches(&self) -> Result<ActiveBranches, Error> {
-        let mut active = ActiveBranches::default();
-        for branch in self.branches().await? {
-            if branch.active_world == Some(true) {
-                active.world = Some(branch.branch.clone());
-            }
-            if branch.active_sim == Some(true) {
-                active.simulation = Some(branch.branch);
-            }
-        }
-        Ok(active)
+        Ok(self.branches().await?.into_iter().collect())
     }
 
     /// The modules of `branch` (`GET /api/user/code`).
@@ -170,7 +89,7 @@ impl Code {
     /// Returns [`Error::Net`] when the request fails; the server rejects unknown branches
     /// (`branch does not exist`) and modules over 5 MiB in total.
     pub async fn set_modules(&self, branch: &str, modules: Modules) -> Result<(), Error> {
-        self.upload(branch, modules).await?;
+        self.overseer.user_api()?.set_code(branch, modules).await?;
         Ok(())
     }
 
@@ -183,12 +102,11 @@ impl Code {
     /// Returns [`Error::Net`] when the request fails; the server rejects names longer than 30
     /// characters and a 31st branch.
     pub async fn clone_branch(&self, source: &str, new_name: &str) -> Result<(), Error> {
-        self.clone_request(UserCloneBranchRequest {
-            branch: Some(source.to_owned()),
-            default_modules: None,
-            new_name: new_name.to_owned(),
-        })
-        .await
+        Ok(self
+            .overseer
+            .user_api()?
+            .clone_branch(source, new_name)
+            .await?)
     }
 
     /// Creates the branch `name` with `modules` (`POST /api/user/clone-branch` with
@@ -198,12 +116,11 @@ impl Code {
     ///
     /// As [`Self::clone_branch`].
     pub async fn create_branch(&self, name: &str, modules: Modules) -> Result<(), Error> {
-        self.clone_request(UserCloneBranchRequest {
-            branch: None,
-            default_modules: Some(modules.into()),
-            new_name: name.to_owned(),
-        })
-        .await
+        Ok(self
+            .overseer
+            .user_api()?
+            .create_branch(name, modules)
+            .await?)
     }
 
     /// Deletes `branch` (`POST /api/user/delete-branch`). The server silently keeps missing
@@ -213,13 +130,7 @@ impl Code {
     ///
     /// Returns [`Error::Net`] when the request fails.
     pub async fn delete_branch(&self, branch: &str) -> Result<(), Error> {
-        let body = UserDeleteBranchRequest {
-            branch: branch.to_owned(),
-        };
-        self.overseer
-            .send(&endpoints::UserDeleteBranch { body })
-            .await?;
-        Ok(())
+        Ok(self.overseer.user_api()?.delete_branch(branch).await?)
     }
 
     /// Makes `branch` the one running in `target` (`POST /api/user/set-active-branch`); an
@@ -231,18 +142,11 @@ impl Code {
     /// Returns [`Error::Net`] when the request fails; the server answers `no branch` for an
     /// unknown branch.
     pub async fn set_active_branch(&self, target: CodeTarget, branch: &str) -> Result<(), Error> {
-        let active_name = match target {
-            CodeTarget::World => UserSetActiveBranchRequestActiveName::ActiveWorld,
-            CodeTarget::Simulation => UserSetActiveBranchRequestActiveName::ActiveSim,
-        };
-        let body = UserSetActiveBranchRequest {
-            active_name,
-            branch: branch.to_owned(),
-        };
-        self.overseer
-            .send(&endpoints::UserSetActiveBranch { body })
-            .await?;
-        Ok(())
+        Ok(self
+            .overseer
+            .user_api()?
+            .set_active_branch(target, branch)
+            .await?)
     }
 
     /// Every code change from now on: uploads and clones of any branch, by any client.
@@ -254,15 +158,10 @@ impl Code {
     pub fn changes(&self) -> Result<Feed<CodeChange>, Error> {
         let user = self.ready()?.to_owned();
         Ok(self.overseer.feed(Channel::Code { user }, |payload| {
-            let Payload::Code(code) = payload else {
+            let Payload::Code(change) = payload else {
                 return None;
             };
-            Some(CodeChange {
-                branch: code.branch,
-                modules: Modules::from_event(code.modules),
-                hash: code.hash,
-                timestamp: code.timestamp.as_ref().and_then(UserCodeTimestamp::millis),
-            })
+            Some(change)
         }))
     }
 
@@ -279,14 +178,7 @@ impl Code {
                 let Payload::ActiveBranch(change) = payload else {
                     return None;
                 };
-                let target = match change.active_name {
-                    UserActiveBranchActiveName::ActiveWorld => CodeTarget::World,
-                    UserActiveBranchActiveName::ActiveSim => CodeTarget::Simulation,
-                };
-                Some(ActiveBranchChange {
-                    target,
-                    branch: change.branch,
-                })
+                Some(change)
             }))
     }
 
@@ -317,9 +209,9 @@ impl Code {
     /// Native-only: browsers have no file system.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn push_dir(&self, branch: &str, dir: impl AsRef<Path>) -> Result<Modules, Error> {
-        self.ready()?;
+        let api = self.overseer.user_api()?;
         let modules = read_dir(dir).await?;
-        self.upload(branch, modules).await
+        Ok(api.set_code(branch, modules).await?)
     }
 
     /// The signed-in user's id once the session is open.
@@ -329,28 +221,7 @@ impl Code {
     }
 
     async fn fetch(&self, branch: &str) -> Result<(String, Modules), Error> {
-        self.ready()?;
-        let code = self.overseer.client().code(Some(branch)).await?;
-        Ok((code.branch, code.modules.into()))
-    }
-
-    /// Sends `modules` to `branch` and hands them back.
-    async fn upload(&self, branch: &str, modules: Modules) -> Result<Modules, Error> {
-        let upload = endpoints::UserCodeSet {
-            body: UserCodeSetRequest {
-                hash: None,
-                branch: Some(branch.to_owned()),
-                modules: modules.into(),
-            },
-        };
-        self.overseer.send(&upload).await?;
-        Ok(upload.body.modules.into())
-    }
-
-    async fn clone_request(&self, body: UserCloneBranchRequest) -> Result<(), Error> {
-        self.overseer
-            .send(&endpoints::UserCloneBranch { body })
-            .await?;
-        Ok(())
+        let code = self.overseer.user_api()?.code(branch).await?;
+        Ok((code.branch, code.modules))
     }
 }

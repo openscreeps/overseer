@@ -2,14 +2,14 @@
 
 use serde_json::{Map, Value};
 
-use overseer_core::api::types::PlatformHistory;
+use overseer_core::model::socket::RoomEvent;
+use overseer_core::model::world::PlatformHistory;
 use overseer_core::socket::RoomState;
-use overseer_core::socket::types::RoomEvent;
 
 use crate::Error;
 
 /// One room-history chunk: the room's objects over consecutive ticks, fetched by
-/// [`Client::room_history`](crate::Client::room_history).
+/// [`WorldApi::room_history`](crate::api::WorldApi::room_history).
 ///
 /// The first tick of a chunk holds every object; later ticks hold diffs in the format of the
 /// socket's `room:` events. [`Self::replay`] applies them exactly as live updates are applied

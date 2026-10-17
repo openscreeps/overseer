@@ -1,7 +1,10 @@
 //! Connecting to a server and reading its failures.
 
+use std::fmt;
+
 use overseer::core::api::ApiError;
-use overseer::net::Client;
+use overseer::model::platform::ServerKind;
+use overseer::net::{Api, Client};
 use overseer::{Auth, Overseer, ServerProfile};
 
 use crate::platform::Platform;
@@ -46,6 +49,16 @@ impl Failure {
     }
 }
 
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unauthorized => f.write_str("unauthorized"),
+            Self::ServerPassword => f.write_str(INCORRECT_SERVER_PASSWORD),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
 /// The text to show for a client error: the server's own error string when it sent one,
 /// else the error and its causes.
 pub fn message(error: &overseer::net::Error) -> String {
@@ -57,6 +70,15 @@ pub fn message(error: &overseer::net::Error) -> String {
                 ..
             },
         ) => message.clone(),
+        error => describe(error),
+    }
+}
+
+/// [`message`] for a library error: the server's own error string when it sent one, else the
+/// error and its causes.
+pub fn error_message(error: &overseer::Error) -> String {
+    match error {
+        overseer::Error::Net(error) => message(error),
         error => describe(error),
     }
 }
@@ -77,7 +99,8 @@ pub fn describe(error: &dyn std::error::Error) -> String {
 }
 
 /// Connects to the server with base URL `server` as `auth`, sending `server_password` or else
-/// the stored one.
+/// the stored one, and forcing the contract `server_kind` unless `None`
+/// ([`ServerKind::forced`](crate::profiles::ServerKind::forced)).
 ///
 /// # Errors
 ///
@@ -85,6 +108,7 @@ pub fn describe(error: &dyn std::error::Error) -> String {
 pub async fn connect(
     platform: &Platform,
     server: &str,
+    server_kind: Option<ServerKind>,
     auth: Auth,
     server_password: Option<String>,
 ) -> Result<Overseer, Failure> {
@@ -98,24 +122,31 @@ pub async fn connect(
         auth,
         server_password,
         default_shard: None,
+        server_kind,
+        plugins: None,
     };
     Overseer::connect(profile)
         .await
         .map_err(|error| Failure::of(&error))
 }
 
-/// A client without an account for the server with base URL `server` (registration checks),
-/// sending `server_password` or else the stored one.
+/// The operations of the server with base URL `server` without an account (its subsystems,
+/// for the sign-in screen, and registration and its checks), sending `server_password` or else
+/// the stored one, and forcing the contract `server_kind` unless `None`. Discovers the server
+/// (one `GET /api/version`, and `GET /api/authmod` on community servers); needs no account.
 ///
 /// # Errors
 ///
-/// Returns a message when the address cannot be resolved or the client cannot be built.
-pub async fn anonymous_client(
+/// Returns [`Failure::ServerPassword`] when the server wants a (correct) server password, and
+/// [`Failure::Other`] when the address cannot be resolved, the client cannot be built or the
+/// server cannot be discovered.
+pub async fn anonymous_api(
     platform: &Platform,
     server: &str,
+    server_kind: Option<ServerKind>,
     server_password: Option<String>,
-) -> Result<Client, String> {
-    let url = platform.server_url(server).await?;
+) -> Result<Api, Failure> {
+    let url = platform.server_url(server).await.map_err(Failure::Other)?;
     let server_password = match server_password {
         Some(password) => Some(password),
         None => stored_server_password(platform, server).await,
@@ -124,7 +155,13 @@ pub async fn anonymous_client(
     if let Some(password) = server_password {
         builder = builder.server_password(password);
     }
-    builder.build().map_err(|error| describe(&error))
+    if let Some(kind) = server_kind {
+        builder = builder.server_kind(kind);
+    }
+    let client = builder
+        .build()
+        .map_err(|error| Failure::Other(describe(&error)))?;
+    client.api().await.map_err(|error| Failure::of_net(&error))
 }
 
 /// The stored server password of `server`, if any (a failing store counts as none).
@@ -168,5 +205,10 @@ mod tests {
             message(&Error::UnexpectedReply("no user")),
             "unexpected reply: no user"
         );
+        assert_eq!(
+            Failure::ServerPassword.to_string(),
+            "incorrect server password"
+        );
+        assert_eq!(Failure::Other("down".to_owned()).to_string(), "down");
     }
 }

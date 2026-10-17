@@ -1,19 +1,22 @@
-//! Driver behaviour against an in-process server: reconnects, backoff, keep-alive, token
-//! sharing, sign-in, rate limits, client flows, the event stream and upgrade retries.
+//! Driver behaviour against an in-process server: discovery, reconnects, backoff, keep-alive,
+//! token sharing, sign-in, rate limits, client flows, the event stream and upgrade retries.
 
+mod account;
+mod discovery;
 mod flows;
 mod server;
 mod signin;
 mod socket;
 mod upgrade;
+mod world;
 
 use std::time::Duration;
 
 use overseer_net::{DisconnectReason, ReconnectPolicy, Socket, SocketEvent};
 use tokio::time::Instant;
 
-/// `GET /api/version` of a single-world server.
-const VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":20,"renderer":{"resources":{},"metadata":{}}}}"#;
+/// `GET /api/version` of a single-world `OpenScreeps` server (the `openscreeps` feature).
+const VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":20,"renderer":{"resources":{},"metadata":{}},"features":[{"name":"market","version":1},{"name":"auth","version":1},{"name":"openscreeps","version":1}]}}"#;
 
 /// `GET /api/auth/me` of user `u1`.
 const ME: &str = r#"{"ok":1,"_id":"u1","money":0,"powerExperimentations":0}"#;

@@ -1,10 +1,10 @@
-//! Operations of the official and the standalone document.
+//! Operations of a document.
 
 use serde_json::{Map, Value};
 
-use super::merge::{self, Components, ObjectShape, ref_name, shape};
 use super::model::{Body, Model, Ty, description};
 use super::names;
+use super::schema::{Components, ObjectShape, ref_name};
 use crate::Error;
 
 /// Headers the session sends itself; operations do not expose them as fields.
@@ -91,14 +91,11 @@ pub struct Operation {
     pub body: Option<(Ty, Value)>,
     /// The success body type.
     pub response: Ty,
-    /// Whether only the standalone document has the operation.
-    pub standalone_only: bool,
 }
 
-/// One document with its components, for resolving references.
+/// One document, for resolving references.
 struct Document<'a> {
     root: &'a Value,
-    components: &'a Components,
 }
 
 impl Document<'_> {
@@ -186,6 +183,38 @@ impl Document<'_> {
         .into())
     }
 
+    /// Why the endpoint runtime cannot express `operation`, if it cannot: a success body that
+    /// is neither JSON nor text (`Format` has no bytes), or a path parameter spanning several
+    /// segments (`x-openscreeps-wildcard`; a `Path` segment is percent-encoded whole).
+    fn unsupported(&self, operation: &Value) -> Result<Option<String>, Error> {
+        for param in self.params(operation)? {
+            if param.get("x-openscreeps-wildcard") == Some(&Value::Bool(true)) {
+                let name = param
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                return Ok(Some(format!("wildcard path parameter `{name}`")));
+            }
+        }
+        let Some(success) = operation.pointer("/responses/200") else {
+            return Ok(None);
+        };
+        let content = self
+            .resolve(success)?
+            .get("content")
+            .and_then(Value::as_object);
+        let Some(content) = content else {
+            return Ok(None);
+        };
+        let readable = content.keys().any(|kind| {
+            kind == "application/json" || kind.starts_with("text/") || kind.ends_with("+xml")
+        });
+        Ok((!readable).then(|| {
+            let kinds: Vec<&str> = content.keys().map(String::as_str).collect();
+            format!("binary response `{}`", kinds.join("`, `"))
+        }))
+    }
+
     /// The JSON request body schema.
     fn body<'v>(&'v self, operation: &'v Value) -> Result<Option<&'v Value>, Error> {
         let Some(body) = operation.get("requestBody") else {
@@ -265,109 +294,61 @@ fn auth(operation: &Value) -> Result<Auth, Error> {
     })
 }
 
-/// Builds every operation of both documents, lowering their types into `model`.
+/// Whether a composed plugin document marks `operation` as one its plugin provides, adapts or
+/// adds (`x-plugins`).
+pub fn is_plugin_operation(operation: &Value) -> bool {
+    operation
+        .get("x-plugins")
+        .and_then(Value::as_array)
+        .is_some_and(|plugins| !plugins.is_empty())
+}
+
+/// The operations built from a document, and those skipped as `"<operationId>: <reason>"`
+/// because the endpoint runtime cannot express them (see `Document::unsupported`).
+pub type Built = (Vec<Operation>, Vec<String>);
+
+/// Builds the operations of `document` that `selected` accepts, lowering their types into
+/// `model`.
 pub fn operations(
     model: &mut Model,
-    official: &Value,
-    official_components: &Components,
-    standalone: &Value,
-    standalone_components: &Components,
-) -> Result<Vec<Operation>, Error> {
-    let official = Document {
-        root: official,
-        components: official_components,
-    };
-    let standalone = Document {
-        root: standalone,
-        components: standalone_components,
-    };
-    let standalone_ops: Vec<(&str, &str, &Value)> = standalone.operations();
-    let official_ops = official.operations();
+    document: &Value,
+    selected: fn(&Value) -> bool,
+) -> Result<Built, Error> {
+    let document = Document { root: document };
     let mut operations = Vec::new();
-    for &(method, path, operation) in &official_ops {
-        let id =
-            operation_id(operation).ok_or_else(|| format!("{method} {path} has no operationId"))?;
-        let twin = by_id(&standalone_ops, id).map(|twin| (&standalone, twin));
-        operations.push(build(model, &official, method, path, operation, twin)?);
-    }
-    for &(method, path, operation) in &standalone_ops {
-        let id =
-            operation_id(operation).ok_or_else(|| format!("{method} {path} has no operationId"))?;
-        if by_id(&official_ops, id).is_none() {
-            let mut built = build(model, &standalone, method, path, operation, None)?;
-            built.standalone_only = true;
-            operations.push(built);
+    let mut skipped = Vec::new();
+    for (method, path, operation) in document.operations() {
+        if !selected(operation) {
+            continue;
         }
+        let id =
+            operation_id(operation).ok_or_else(|| format!("{method} {path} has no operationId"))?;
+        if let Some(reason) = document.unsupported(operation)? {
+            skipped.push(format!("{id}: {reason}"));
+            continue;
+        }
+        operations.push(build(model, &document, method, path, operation)?);
     }
-    Ok(operations)
+    Ok((operations, skipped))
 }
 
 fn operation_id(operation: &Value) -> Option<&str> {
     operation.get("operationId").and_then(Value::as_str)
 }
 
-/// The operation with `operationId` `id`.
-fn by_id<'v>(operations: &[(&str, &str, &'v Value)], id: &str) -> Option<&'v Value> {
-    operations
-        .iter()
-        .find(|(_, _, operation)| operation_id(operation) == Some(id))
-        .map(|&(_, _, operation)| operation)
-}
-
-/// Builds one operation; `twin` is the same operation in the standalone document, whose
-/// response may differ and is then merged.
+/// Builds one operation.
 fn build(
     model: &mut Model,
     document: &Document<'_>,
     method: &str,
     path: &str,
     operation: &Value,
-    twin: Option<(&Document<'_>, &Value)>,
 ) -> Result<Operation, Error> {
     let id = operation_id(operation).unwrap_or_default().to_owned();
     let name = names::type_name(&id);
     let context = |error: Error| -> Error { format!("operation {id}: {error}").into() };
     let auth = auth(operation).map_err(context)?;
-    let (format, mut response) = document.response(operation).map_err(context)?;
-    if let Some((twin_document, twin)) = twin {
-        if auth != self::auth(twin).map_err(context)? {
-            return Err(context("security differs between the documents".into()));
-        }
-        let own_params: Vec<Value> = document
-            .params(operation)
-            .map_err(context)?
-            .into_iter()
-            .map(shape)
-            .collect();
-        let twin_params: Vec<Value> = twin_document
-            .params(twin)
-            .map_err(context)?
-            .into_iter()
-            .map(shape)
-            .collect();
-        if own_params != twin_params {
-            return Err(context("parameters differ between the documents".into()));
-        }
-        let own_body = document.body(operation).map_err(context)?.map(shape);
-        let twin_body = twin_document.body(twin).map_err(context)?.map(shape);
-        if own_body != twin_body {
-            return Err(context(
-                "request bodies differ between the documents".into(),
-            ));
-        }
-        let (twin_format, twin_response) = twin_document.response(twin).map_err(context)?;
-        if twin_format != format {
-            return Err(context("reply formats differ between the documents".into()));
-        }
-        if let (Some(own), Some(other)) = (&response, &twin_response) {
-            response = Some(merge::merge(
-                own,
-                other,
-                document.components,
-                twin_document.components,
-            ));
-        }
-    }
+    let (format, response) = document.response(operation).map_err(context)?;
     // An `{ok}` envelope is demanded only where every server's success reply carries `ok`.
     let format = match (format, &response) {
         (Format::Envelope, Some(schema)) if !requires_ok(schema, &model.components) => Format::Json,
@@ -420,7 +401,6 @@ fn build(
         params,
         body,
         response,
-        standalone_only: false,
     })
 }
 
@@ -473,18 +453,27 @@ fn lower_param(model: &mut Model, operation: &str, param: &Value) -> Result<Para
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{Auth, Format, Location, operations};
-    use crate::codegen::merge;
-    use crate::codegen::model::{Body, Model, Ty};
+    use super::{Auth, Format, Location, is_plugin_operation, operations};
+    use crate::codegen::model::{Model, Ty};
+    use crate::codegen::schema::Components;
 
-    fn schemas(document: &Value) -> &merge::Components {
+    fn schemas(document: &Value) -> &Components {
         document["components"]["schemas"].as_object().unwrap()
     }
 
     #[test]
-    fn operations_map_security_parameters_formats_and_server_differences() {
-        let official = json!({
+    fn operations_map_security_parameters_and_formats() {
+        let document = json!({
             "paths": {
+                "/api/game/tick": {"get": {
+                    "operationId": "gameTick",
+                    "security": [],
+                    "parameters": [{"name": "X-Server-Password", "in": "header", "schema": {"type": "string"}}],
+                    "responses": {"200": {"content": {"application/json": {"schema": {"anyOf": [
+                        {"type": "object", "properties": {"tick": {"type": "number"}}},
+                        {"$ref": "#/components/schemas/ApiError"}
+                    ]}}}}}
+                }},
                 "/api/user/rooms": {"get": {
                     "operationId": "userRooms",
                     "security": [{"Token": []}],
@@ -528,33 +517,10 @@ mod tests {
                 }
             }
         });
-        let mut standalone = official.clone();
-        standalone["paths"]["/api/user/rooms"]["get"]["responses"]["200"]["content"]["application/json"]
-            ["schema"]["anyOf"][0] = json!({"$ref": "#/components/schemas/Flat"});
-        standalone["components"]["schemas"]["Flat"] = json!({"type": "object", "properties": {
-            "ok": {"type": "integer", "const": 1},
-            "rooms": {"type": "array", "items": {"type": "string"}}
-        }, "required": ["ok", "rooms"]});
-        standalone["paths"]["/api/game/tick"] = json!({"get": {
-            "operationId": "gameTick",
-            "security": [],
-            "parameters": [{"name": "X-Server-Password", "in": "header", "schema": {"type": "string"}}],
-            "responses": {"200": {"content": {"application/json": {"schema": {"anyOf": [
-                {"type": "object", "properties": {"tick": {"type": "number"}}},
-                {"$ref": "#/components/schemas/ApiError"}
-            ]}}}}}
-        }});
-        let mut model =
-            Model::new(merge::components(schemas(&official), schemas(&standalone))).unwrap();
-        let operations = operations(
-            &mut model,
-            &official,
-            schemas(&official),
-            &standalone,
-            schemas(&standalone),
-        )
-        .unwrap();
-        let summary: Vec<(&str, &str, Auth, Format, bool)> = operations
+        let mut model = Model::new(schemas(&document).clone()).unwrap();
+        let (operations, skipped) = operations(&mut model, &document, |_| true).unwrap();
+        assert_eq!(skipped, Vec::<String>::new());
+        let summary: Vec<(&str, &str, Auth, Format)> = operations
             .iter()
             .map(|operation| {
                 (
@@ -562,46 +528,41 @@ mod tests {
                     operation.path.as_str(),
                     operation.auth,
                     operation.format,
-                    operation.standalone_only,
                 )
             })
             .collect();
         assert_eq!(
             summary,
             [
+                // Its `{error}`-or-reply schema documents no `ok`: no envelope is demanded.
+                ("GameTick", "api/game/tick", Auth::None, Format::Json),
                 (
                     "ServersLike",
                     "api/servers/like",
                     Auth::Required,
-                    Format::Empty,
-                    false
+                    Format::Empty
                 ),
                 (
                     "UserBadgeSvg",
                     "api/user/badge-svg",
                     Auth::Optional,
-                    Format::Text,
-                    false
+                    Format::Text
                 ),
                 (
                     "UserRooms",
                     "api/user/rooms",
                     Auth::Required,
-                    Format::Envelope,
-                    false
+                    Format::Envelope
                 ),
                 (
                     "RoomHistory",
                     "room-history/{shard}/{room}/{tick}.json",
                     Auth::None,
-                    Format::Json,
-                    false
+                    Format::Json
                 ),
-                // Its `{error}`-or-reply schema documents no `ok`: no envelope is demanded.
-                ("GameTick", "api/game/tick", Auth::None, Format::Json, true),
             ]
         );
-        let history = &operations[3];
+        let history = &operations[4];
         assert!(
             history
                 .params
@@ -610,23 +571,55 @@ mod tests {
         );
         assert_eq!(history.params[2].ty, Ty::U64);
         assert!(
-            operations[2].params.is_empty(),
+            operations[0].params.is_empty() && operations[3].params.is_empty(),
             "session headers are not fields"
         );
-        assert_eq!(operations[0].response, Ty::Unit);
-        assert_eq!(operations[1].response, Ty::String);
-        // The official and standalone replies merge into one struct accepting both.
-        assert_eq!(
-            operations[2].response,
-            Ty::Named("UserRoomsResponse".to_owned())
-        );
-        let Body::Struct(fields) = &model.defs["UserRoomsResponse"].body else {
-            panic!("merged reply is a struct");
-        };
-        let fields: Vec<(&str, bool)> = fields
+        assert_eq!(operations[1].response, Ty::Unit);
+        assert_eq!(operations[2].response, Ty::String);
+        assert_eq!(operations[3].response, Ty::Named("Sharded".to_owned()));
+    }
+
+    #[test]
+    fn plugin_modules_build_only_plugin_operations_and_skip_unsupported_ones() {
+        let reply = json!({"200": {"content": {"application/json": {"schema": {"anyOf": [
+            {"type": "object", "properties": {"ok": {"const": 1}, "name": {"type": "string"}}, "required": ["ok"]},
+            {"$ref": "#/components/schemas/ApiError"}
+        ]}}}}});
+        let document = json!({
+            "paths": {
+                "/api/auth/me": {"get": {
+                    "operationId": "authMe", "security": [{"Token": []}], "responses": reply
+                }},
+                "/api/authmod": {"get": {
+                    "operationId": "authModInfo", "security": [], "responses": reply,
+                    "x-plugins": [{"name": "screepsmod-auth", "status": "addition"}]
+                }},
+                "/api/user/name": {"get": {
+                    "operationId": "userName", "security": [{"Token": []}], "responses": reply,
+                    "x-plugins": [{"name": "screepsmod-auth", "status": "provided"}]
+                }},
+                "/assets/{path}": {"get": {
+                    "operationId": "platformAsset", "security": [],
+                    "parameters": [{"name": "path", "in": "path", "required": true,
+                        "x-openscreeps-wildcard": true, "schema": {"type": "string"}}],
+                    "responses": {"200": {"content": {"*/*": {"schema": {"type": "string", "format": "binary"}}}}},
+                    "x-plugins": [{"name": "screepsmod-auth", "status": "provided"}]
+                }}
+            },
+            "components": {"schemas": {
+                "ApiError": {"type": "object", "properties": {"error": {"type": "string"}}, "required": ["error"]}
+            }}
+        });
+        let mut model = Model::new(schemas(&document).clone()).unwrap();
+        let (built, skipped) = operations(&mut model, &document, is_plugin_operation).unwrap();
+        let names: Vec<&str> = built
             .iter()
-            .map(|field| (field.json.as_str(), matches!(field.ty, Ty::Option(_))))
+            .map(|operation| operation.name.as_str())
             .collect();
-        assert_eq!(fields, [("rooms", true), ("shards", true)]);
+        assert_eq!(names, ["AuthModInfo", "UserName"]);
+        assert_eq!(built[0].format, Format::Envelope);
+        assert_eq!(skipped, ["platformAsset: wildcard path parameter `path`"]);
+        assert!(model.defs.contains_key("UserNameResponse"));
+        assert!(!model.defs.contains_key("AuthMeResponse"));
     }
 }

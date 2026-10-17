@@ -1,5 +1,6 @@
 //! Rust source of the generated modules (formatted with rustfmt afterwards).
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::docs;
@@ -7,6 +8,7 @@ use super::model::{Body, Def, Field, Model, Ty};
 use super::names;
 use super::ops::{Auth, Format, Location, Operation, Param};
 use super::sample;
+use super::share::Selection;
 
 /// Appends formatted text to a `String`; writing to a `String` cannot fail.
 macro_rules! w {
@@ -33,49 +35,26 @@ fn doc(out: &mut String, text: &str) {
 }
 
 /// A generated module of schema types.
-pub struct Module {
+pub struct Module<'a> {
     /// The module documentation, as `//!` lines.
-    pub doc: &'static str,
+    pub doc: &'a str,
     /// The module `IndexedList` and `Redacted` are imported from.
-    pub support: &'static str,
+    pub support: &'a str,
 }
 
-/// `api/types.rs`.
-pub const API_TYPES: Module = Module {
-    doc: "//! Schema types of the HTTP API reference.
-//!
-//! One type per component schema of `reference/openapi.json`, plus types for inline schemas
-//! named after their location. Where `reference/standalone.openapi.json` (the standalone
-//! profile) documents a different shape, the type accepts both, so replies of official and
-//! standalone servers deserialize. Unknown fields are ignored.
-",
-    support: "super",
-};
-
-/// `socket/types.rs`.
-pub const SOCKET_TYPES: Module = Module {
-    doc: "//! Schema types of the socket API reference.
-//!
-//! One type per component schema of `reference/asyncapi.json`, plus types for inline schemas
-//! named after their location. Where `reference/standalone.asyncapi.json` (the standalone
-//! profile) documents a different shape, the type accepts both. Schemas the HTTP reference
-//! defines identically (room objects) are the [`crate::api::types`] types. Optional properties
-//! that may be `null` are `Option<Option<T>>`: `None` when absent, `Some(None)` when `null`.
-//! Unknown fields are ignored.
-",
-    support: "crate::api",
-};
-
-/// A types module: every definition of the model.
-pub fn types(model: &Model, module: &Module) -> String {
-    let defs: Vec<&Def> = model.defs.values().collect();
+/// A types module: the selected definitions of the model, after the re-exported types.
+pub fn types(model: &Model, module: &Module<'_>, selection: &Selection) -> String {
+    let defs: Vec<&Def> = model
+        .defs
+        .values()
+        .filter(|def| selection.defs.contains(&def.name))
+        .collect();
     let uses = |test: fn(&Ty) -> bool| {
         defs.iter()
             .any(|def| def.body.types().into_iter().any(&test))
     };
     let uses_map = uses(Ty::uses_map);
     let uses_list = uses(Ty::uses_indexed_list);
-    let uses_external = uses(Ty::uses_external);
     let uses_redacted = defs.iter().any(
         |def| matches!(&def.body, Body::Struct(fields) if fields.iter().any(Field::sensitive)),
     );
@@ -91,7 +70,9 @@ pub fn types(model: &Model, module: &Module) -> String {
     if uses_redacted {
         out.push_str("use std::fmt;\n");
     }
-    out.push_str("\nuse serde::{Deserialize, Serialize};\n\n");
+    if !defs.is_empty() {
+        out.push_str("\nuse serde::{Deserialize, Serialize};\n\n");
+    }
     let support = module.support;
     match (uses_list, uses_redacted) {
         (true, true) => w!(out, "use {support}::{{IndexedList, Redacted}};\n"),
@@ -99,8 +80,17 @@ pub fn types(model: &Model, module: &Module) -> String {
         (false, true) => w!(out, "use {support}::Redacted;\n"),
         (false, false) => {}
     }
-    if uses_external {
-        out.push_str("use crate::api::types as api;\n");
+    let mut reexports: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for path in selection.reexports.values() {
+        if let Some((module, name)) = path.rsplit_once("::") {
+            reexports.entry(module).or_default().push(name);
+        }
+    }
+    for (module, names) in reexports {
+        match names.as_slice() {
+            [name] => w!(out, "\npub use {module}::{name};\n"),
+            _ => w!(out, "\npub use {module}::{{{}}};\n", names.join(", ")),
+        }
     }
     for def in defs {
         out.push('\n');
@@ -193,6 +183,12 @@ fn emit_struct(out: &mut String, model: &Model, name: &str, fields: &[Field]) {
     }
     derives.extend(["PartialEq", "Serialize", "Deserialize"]);
     w!(out, "#[derive({})]\n", derives.join(", "));
+    // Clippy's `max-struct-bools` default: the contract decides how many flags a reply has.
+    if fields.iter().filter(|field| field.ty == Ty::Bool).count() > 3 {
+        out.push_str(
+            "#[expect(clippy::struct_excessive_bools, reason = \"the contract's flags\")]\n",
+        );
+    }
     if fields.is_empty() {
         w!(out, "pub struct {name} {{}}\n");
         return;
@@ -236,8 +232,16 @@ fn emit_struct(out: &mut String, model: &Model, name: &str, fields: &[Field]) {
     }
 }
 
+/// A generated module of endpoints, the sibling of its `types` module.
+pub struct Endpoints<'a> {
+    /// The first paragraph of the module documentation, as `//!` lines: which operations.
+    pub doc: &'a str,
+    /// The module of `Endpoint`, `Auth`, `Format`, `Path` and `Query`.
+    pub api: &'a str,
+}
+
 /// `endpoints.rs`: one struct and `Endpoint` impl per operation.
-pub fn endpoints(model: &Model, operations: &[Operation]) -> String {
+pub fn endpoints(model: &Model, operations: &[Operation], module: &Endpoints<'_>) -> String {
     let uses_path = operations.iter().any(|operation| {
         operation
             .params
@@ -254,11 +258,16 @@ pub fn endpoints(model: &Model, operations: &[Operation]) -> String {
         operation.response.uses_map()
             || operation.body.as_ref().is_some_and(|(ty, _)| ty.uses_map())
     });
+    let named = |ty: &Ty| ty.any(&|ty| matches!(ty, Ty::Named(_)));
+    let uses_types = operations.iter().any(|operation| {
+        named(&operation.response)
+            || operation.body.as_ref().is_some_and(|(ty, _)| named(ty))
+            || operation.params.iter().any(|param| named(&param.ty))
+    });
     let mut out = String::from(HEADER);
+    out.push_str(module.doc);
     out.push_str(
-        "//! Endpoints of the HTTP API: one per operation of `reference/openapi.json` and per
-//! standalone addition of `reference/standalone.openapi.json`.
-//!
+        "//!
 //! Fields are the operation's query and path parameters (`Option` when not required) and its
 //! JSON request body (`body`); [`Endpoint::Response`] is the success body. The session sends
 //! the `X-Token`, `X-Username` and `X-Server-Password` headers itself.
@@ -279,8 +288,10 @@ mod tests;
     if uses_query {
         imports.push("Query");
     }
-    imports.push("types");
-    w!(out, "use super::{{{}}};\n", imports.join(", "));
+    if uses_types {
+        out.push_str("use super::types;\n");
+    }
+    w!(out, "use {}::{{{}}};\n", module.api, imports.join(", "));
     for operation in operations {
         out.push('\n');
         emit_endpoint(&mut out, model, operation);
@@ -302,9 +313,6 @@ fn emit_endpoint(out: &mut String, model: &Model, operation: &Operation) {
     }
     if let Some(description) = &operation.description {
         w!(text, "\n\n{description}");
-    }
-    if operation.standalone_only {
-        text.push_str("\n\nStandalone servers only: a private-server protocol operation of the standalone profile.");
     }
     doc(out, &text);
     let has_fields = !operation.params.is_empty() || operation.body.is_some();
@@ -470,8 +478,9 @@ fn template(path: &str) -> Vec<Part<'_>> {
     parts
 }
 
-/// `endpoints/tests.rs`: one request-building test per operation.
-pub fn tests(model: &Model, operations: &[Operation]) -> String {
+/// `endpoints/tests.rs`: one request-building test per operation; `types` is the path of the
+/// endpoints' types module.
+pub fn tests(model: &Model, operations: &[Operation], types: &str) -> String {
     let mut out = String::from(HEADER);
     out.push_str(
         r#"//! Every generated endpoint builds its request: method, percent-encoded path, encoded query,
@@ -508,19 +517,19 @@ fn check<E: Endpoint>(endpoint: &E, path: &str, query: &[&str]) {
     );
     for operation in operations {
         out.push('\n');
-        emit_test(&mut out, model, operation);
+        emit_test(&mut out, model, operation, types);
     }
     out
 }
 
-fn emit_test(out: &mut String, model: &Model, operation: &Operation) {
+fn emit_test(out: &mut String, model: &Model, operation: &Operation, types: &str) {
     let name = &operation.name;
     w!(out, "#[test]\nfn {}() {{\n", names::snake(&operation.id));
     let has_fields = !operation.params.is_empty() || operation.body.is_some();
     let endpoint = if has_fields {
         w!(out, "let endpoint = super::{name} {{\n");
         for param in &operation.params {
-            let value = sample_expr(model, param);
+            let value = sample_expr(model, param, types);
             if param.required {
                 w!(out, "{}: {value},\n", param.ident);
             } else {
@@ -578,15 +587,12 @@ fn emit_test(out: &mut String, model: &Model, operation: &Operation) {
 }
 
 /// The Rust expression of a parameter's sample value.
-fn sample_expr(model: &Model, param: &Param) -> String {
+fn sample_expr(model: &Model, param: &Param, types: &str) -> String {
     match &param.ty {
         Ty::String => format!("{:?}.to_owned()", sample::STRING),
         Ty::Bool => "true".to_owned(),
         Ty::F64 => "1.5".to_owned(),
-        Ty::Named(name) => format!(
-            "crate::api::types::{name}::{}",
-            first_variant(model, name).0
-        ),
+        Ty::Named(name) => format!("{types}::{name}::{}", first_variant(model, name).0),
         _ => "7".to_owned(),
     }
 }
@@ -625,8 +631,15 @@ fn raw_string(text: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{API_TYPES, Part, SOCKET_TYPES, raw_string, template, types};
+    use super::{Module, Part, raw_string, template, types};
     use crate::codegen::model::{Model, Options};
+    use crate::codegen::share::Selection;
+
+    /// A types module as the per-contract ones are generated.
+    const MODULE: Module<'static> = Module {
+        doc: "//! Test types.\n",
+        support: "crate::api",
+    };
 
     #[test]
     fn structs_rename_keywords_skip_absent_options_and_redact_secrets() {
@@ -639,7 +652,7 @@ mod tests {
             }, "required": ["_id", "type", "password"]}
         });
         let model = Model::new(components.as_object().unwrap().clone()).unwrap();
-        let source = types(&model, &API_TYPES);
+        let source = types(&model, &MODULE, &Selection::all(&model));
         assert!(source.contains("#[serde(rename = \"_id\")]\npub id: String,"));
         assert!(source.contains("pub r#type: String,"));
         assert!(source.contains(
@@ -679,7 +692,7 @@ mod tests {
     fn tagged_unions_dispatch_on_the_discriminator_with_accessors() {
         let mut model = Model::new(objects().as_object().unwrap().clone()).unwrap();
         model.finish().unwrap();
-        let source = types(&model, &API_TYPES);
+        let source = types(&model, &MODULE, &Selection::all(&model));
         for expected in [
             "#[derive(Clone, Debug, PartialEq, Serialize)]\n#[serde(untagged)]\npub enum Obj {",
             "Creep(ObjCreep),",
@@ -718,9 +731,10 @@ mod tests {
             absent_vs_null: true,
             ..Options::default()
         };
-        options
-            .external
-            .insert("Shared".to_owned(), "api::GameShared".to_owned());
+        options.external.insert(
+            "Shared".to_owned(),
+            "crate::api::official::types::GameShared".to_owned(),
+        );
         options.raw.insert("Diff".to_owned());
         let components = json!({
             "Shared": {"type": "object", "properties": {"x": {"type": "integer"}}},
@@ -737,11 +751,10 @@ mod tests {
         let mut model =
             Model::with_options(components.as_object().unwrap().clone(), options).unwrap();
         model.finish().unwrap();
-        let source = types(&model, &SOCKET_TYPES);
+        let source = types(&model, &MODULE, &Selection::all(&model));
         for expected in [
-            "use crate::api::types as api;",
             "pub type Diff = serde_json::Map<String, serde_json::Value>;",
-            "pub object: Option<api::GameShared>,",
+            "pub object: Option<crate::api::official::types::GameShared>,",
             "pub pos: Option<[u64; 2]>,",
             "#[serde(default, deserialize_with = \"present\", skip_serializing_if = \"Option::is_none\")]\npub flags: Option<Option<String>>,",
             "fn present<'de,",

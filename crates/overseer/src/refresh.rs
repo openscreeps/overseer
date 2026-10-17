@@ -4,10 +4,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use overseer_net::api::AccountApi as _;
 use overseer_net::core::Token;
-use overseer_net::core::api::{ApiError, endpoints};
+use overseer_net::core::api::ApiError;
 use overseer_net::rt::{self, Instant, JoinHandle};
-use overseer_net::{Client, Error};
+use overseer_net::{Api, Error};
 use tokio::sync::watch;
 
 use crate::live::Registry;
@@ -17,18 +18,18 @@ use crate::{ConnectionStatus, Notice};
 /// within the default one-minute lifetime, leaving time for a second attempt.
 pub(crate) const REFRESH_AFTER: Duration = Duration::from_secs(25);
 
-/// Spawns the task refreshing `client`'s token until `status` is
+/// Spawns the task refreshing the token of `api`'s client until `status` is
 /// [`Closed`](ConnectionStatus::Closed) (or its sender is gone): a tokio task natively, a task on
-/// the browser's event loop in WebAssembly.
+/// the browser's event loop in WebAssembly. A refresh is an authenticated `GET /api/auth/me`.
 pub(crate) fn spawn(
-    client: Client,
+    api: Api,
     status: watch::Receiver<ConnectionStatus>,
     registry: Arc<Registry>,
 ) -> JoinHandle<()> {
-    let tokens = client.token_updates();
+    let tokens = api.client().token_updates();
     rt::spawn(
         Refresh {
-            client,
+            api,
             tokens,
             status,
             registry,
@@ -38,7 +39,7 @@ pub(crate) fn spawn(
 }
 
 struct Refresh {
-    client: Client,
+    api: Api,
     /// Every token change is a fresh token: an authenticated reply, a sign-in, the socket's
     /// `auth ok` or one set by the app.
     tokens: watch::Receiver<Option<Token>>,
@@ -63,7 +64,7 @@ impl Refresh {
                     let result = tokio::select! {
                         biased;
                         () = closed(&mut self.status) => return,
-                        result = self.client.send(&endpoints::AuthMe) => result,
+                        result = self.api.me() => result,
                     };
                     due = match result {
                         // The token expired (and no sign-in replaced it): wait for a new one,
@@ -84,7 +85,7 @@ impl Refresh {
     /// held and the server has rotated tokens, else never.
     fn next_due(&mut self) -> Option<Instant> {
         let held = self.tokens.borrow_and_update().is_some();
-        (held && self.client.rotates_tokens()).then(|| Instant::now() + REFRESH_AFTER)
+        (held && self.api.client().rotates_tokens()).then(|| Instant::now() + REFRESH_AFTER)
     }
 }
 

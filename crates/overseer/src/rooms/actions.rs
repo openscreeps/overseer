@@ -3,84 +3,19 @@
 
 use std::collections::BTreeMap;
 
-use overseer_net::core::api::types::{
-    self, GameAddObjectIntentRequestIntent, GameBuildableStructureType, GameCoordinateInput,
+use overseer_net::api::WorldApi as _;
+use overseer_net::model::world::{
+    self, FlagColor, GameAddObjectIntentRequestIntent, GameBuildableStructureType,
 };
-use overseer_net::core::api::{ApiError, endpoints};
 use serde::Serialize;
 use serde_json::Value;
 
 use super::Rooms;
 use crate::Error;
 
-/// A flag colour (`COLOR_*`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum FlagColor {
-    /// `COLOR_RED` (1).
-    Red = 1,
-    /// `COLOR_PURPLE` (2).
-    Purple = 2,
-    /// `COLOR_BLUE` (3).
-    Blue = 3,
-    /// `COLOR_CYAN` (4).
-    Cyan = 4,
-    /// `COLOR_GREEN` (5).
-    Green = 5,
-    /// `COLOR_YELLOW` (6).
-    Yellow = 6,
-    /// `COLOR_ORANGE` (7).
-    Orange = 7,
-    /// `COLOR_BROWN` (8).
-    Brown = 8,
-    /// `COLOR_GREY` (9).
-    Grey = 9,
-    /// `COLOR_WHITE` (10).
-    White = 10,
-}
-
-impl FlagColor {
-    /// Every colour, in the order of the game constants.
-    pub const ALL: [Self; 10] = [
-        Self::Red,
-        Self::Purple,
-        Self::Blue,
-        Self::Cyan,
-        Self::Green,
-        Self::Yellow,
-        Self::Orange,
-        Self::Brown,
-        Self::Grey,
-        Self::White,
-    ];
-
-    /// The game constant's value (1 to 10), as in requests and in
-    /// [`Flag::color`](overseer_net::core::socket::Flag::color).
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        self as u8
-    }
-
-    /// The colour of a game constant's value; `None` outside 1 to 10.
-    #[must_use]
-    pub const fn from_code(code: u8) -> Option<Self> {
-        Some(match code {
-            1 => Self::Red,
-            2 => Self::Purple,
-            3 => Self::Blue,
-            4 => Self::Cyan,
-            5 => Self::Green,
-            6 => Self::Yellow,
-            7 => Self::Orange,
-            8 => Self::Brown,
-            9 => Self::Grey,
-            10 => Self::White,
-            _ => return None,
-        })
-    }
-}
-
 /// The payload of an intent addressed to one room object, sent by [`Rooms::object_intent`]:
-/// a generated `GameIntent*` type and the engine's name for it. Implement it for intents of
+/// an intent type of [`overseer_net::model::world`] (`GameIntent*`) and the engine's name for
+/// it. Implement it for intents of
 /// server mods (`customIntentTypes`).
 pub trait ObjectIntent: Serialize {
     /// The engine's intent name, for example `harvest`.
@@ -103,7 +38,7 @@ pub trait GlobalIntent: Serialize {
 macro_rules! intents {
     ($kind:ident: $($payload:ident => $name:literal),* $(,)?) => {
         $(
-            impl $kind for types::$payload {
+            impl $kind for world::$payload {
                 const NAME: &'static str = $name;
             }
         )*
@@ -194,17 +129,10 @@ impl Rooms {
         colors: (FlagColor, FlagColor),
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GameCreateFlagRequest {
-            color: colors.0.code().into(),
-            name: name.to_owned(),
-            room: room.to_owned(),
-            secondary_color: colors.1.code().into(),
-            shard: self.overseer.resolve_shard(shard),
-            x: coordinate(x)?.into(),
-            y: coordinate(y)?.into(),
-        };
-        self.overseer
-            .send(&endpoints::GameCreateFlag { body })
+        let at = (coordinate(x)?, coordinate(y)?);
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.create_flag(shard.as_deref(), room, at, name, colors)
             .await?;
         Ok(())
     }
@@ -222,15 +150,9 @@ impl Rooms {
         colors: (FlagColor, FlagColor),
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GameChangeFlagColorRequest {
-            color: colors.0.code().into(),
-            name: name.to_owned(),
-            room: Some(room.to_owned()),
-            secondary_color: colors.1.code().into(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer
-            .send(&endpoints::GameChangeFlagColor { body })
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.change_flag_colors(shard.as_deref(), room, name, colors)
             .await?;
         Ok(())
     }
@@ -247,14 +169,9 @@ impl Rooms {
         name: &str,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GameRemoveFlagRequest {
-            name: name.to_owned(),
-            room: room.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer
-            .send(&endpoints::GameRemoveFlag { body })
-            .await?;
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.remove_flag(shard.as_deref(), room, name).await?;
         Ok(())
     }
 
@@ -265,11 +182,9 @@ impl Rooms {
     ///
     /// See [`Rooms`].
     pub async fn unique_flag_name(&self, shard: Option<&str>) -> Result<String, Error> {
-        let body = types::GameShardOnlyRequest {
-            shard: self.overseer.resolve_shard(shard),
-        };
-        let request = endpoints::GameGenUniqueFlagName { body };
-        Ok(self.overseer.send(&request).await?.name)
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        Ok(api.unique_flag_name(shard.as_deref()).await?)
     }
 
     /// Whether none of the user's flags is named `name`
@@ -279,15 +194,9 @@ impl Rooms {
     ///
     /// See [`Rooms`].
     pub async fn is_flag_name_free(&self, name: &str, shard: Option<&str>) -> Result<bool, Error> {
-        let body = types::GameCheckUniqueFlagNameRequest {
-            name: name.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        name_free(
-            self.overseer
-                .send(&endpoints::GameCheckUniqueFlagName { body })
-                .await,
-        )
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        Ok(api.is_flag_name_free(shard.as_deref(), name).await?)
     }
 
     /// The first `Spawn<N>` name none of the user's spawns and spawn construction sites has
@@ -297,12 +206,9 @@ impl Rooms {
     ///
     /// See [`Rooms`].
     pub async fn unique_spawn_name(&self, shard: Option<&str>) -> Result<String, Error> {
-        let body = types::GameGenUniqueObjectNameRequest {
-            shard: self.overseer.resolve_shard(shard),
-            r#type: types::GameGenUniqueObjectNameRequestType::Spawn,
-        };
-        let request = endpoints::GameGenUniqueObjectName { body };
-        Ok(self.overseer.send(&request).await?.name)
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        Ok(api.unique_spawn_name(shard.as_deref()).await?)
     }
 
     /// Whether none of the user's spawns and spawn construction sites is named `name`
@@ -312,16 +218,9 @@ impl Rooms {
     ///
     /// See [`Rooms`].
     pub async fn is_spawn_name_free(&self, name: &str, shard: Option<&str>) -> Result<bool, Error> {
-        let body = types::GameCheckUniqueObjectNameRequest {
-            name: name.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-            r#type: types::GameCheckUniqueObjectNameRequestType::Spawn,
-        };
-        name_free(
-            self.overseer
-                .send(&endpoints::GameCheckUniqueObjectName { body })
-                .await,
-        )
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        Ok(api.is_spawn_name_free(shard.as_deref(), name).await?)
     }
 
     /// Places a construction site of `structure` at `x`, `y` in `room`
@@ -340,16 +239,11 @@ impl Rooms {
         name: Option<&str>,
         shard: Option<&str>,
     ) -> Result<Option<String>, Error> {
-        let body = types::GameCreateConstructionRequest {
-            name: name.map(str::to_owned),
-            room: room.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-            structure_type: structure,
-            x: GameCoordinateInput::Integer(coordinate(x)?.into()),
-            y: GameCoordinateInput::Integer(coordinate(y)?.into()),
-        };
-        let request = endpoints::GameCreateConstruction { body };
-        Ok(self.overseer.send(&request).await?.id)
+        let at = (coordinate(x)?, coordinate(y)?);
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        let site = api.create_construction_site(shard.as_deref(), room, at, structure, name);
+        Ok(site.await?)
     }
 
     /// Removes the user's construction site `site` in `room` next tick (room intent
@@ -364,7 +258,7 @@ impl Rooms {
         site: &str,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let intent = types::GameIntentRemoveConstructionSite {
+        let intent = world::GameIntentRemoveConstructionSite {
             id: Some(site.to_owned()),
             room_name: Some(room.to_owned()),
         };
@@ -383,7 +277,7 @@ impl Rooms {
         structure: &str,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let intent = types::GameIntentDestroyStructure {
+        let intent = world::GameIntentDestroyStructure {
             id: Some(structure.to_owned()),
             room_name: Some(room.to_owned()),
         };
@@ -446,20 +340,16 @@ impl Rooms {
         enabled: bool,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GameSetNotifyWhenAttackedRequest {
-            id: object.to_owned(),
-            enabled: Some(enabled),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer
-            .send(&endpoints::GameSetNotifyWhenAttacked { body })
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.set_notify_when_attacked(shard.as_deref(), object, enabled)
             .await?;
         Ok(())
     }
 
     /// Queues `intent` for the object `object` in `room`, executed next tick as if the user's
     /// code issued it (`POST /api/game/add-object-intent`). For example
-    /// [`GameIntentHarvest`](types::GameIntentHarvest) for a creep.
+    /// [`GameIntentHarvest`](world::GameIntentHarvest) for a creep.
     ///
     /// # Errors
     ///
@@ -506,19 +396,18 @@ impl Rooms {
         intent: &I,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GameAddGlobalIntentRequest {
-            intent: Some(payload(intent)?),
-            name: I::NAME.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer
-            .send(&endpoints::GameAddGlobalIntent { body })
+        let payload = payload(intent)?;
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.add_global_intent(shard.as_deref(), I::NAME, payload)
             .await?;
         Ok(())
     }
 
     /// Places the user's first spawn at `x`, `y` in `room` and starts playing
-    /// (`POST /api/game/place-spawn`); `name` names it (unnamed when `None`).
+    /// (`POST /api/game/place-spawn`); `name` names it (unnamed when `None`, except on
+    /// community servers with screepsmod-admin-utils, which require a name: the next free
+    /// `Spawn<N>` name is used there).
     ///
     /// # Errors
     ///
@@ -533,16 +422,10 @@ impl Rooms {
         name: Option<&str>,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GamePlaceSpawnRequest {
-            name: name.map(str::to_owned),
-            room: room.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-            x: GameCoordinateInput::Integer(coordinate(x)?.into()),
-            y: GameCoordinateInput::Integer(coordinate(y)?.into()),
-        };
-        self.overseer
-            .send(&endpoints::GamePlaceSpawn { body })
-            .await?;
+        let at = (coordinate(x)?, coordinate(y)?);
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.place_spawn(shard.as_deref(), room, at, name).await?;
         Ok(())
     }
 
@@ -554,15 +437,9 @@ impl Rooms {
         intent: GameAddObjectIntentRequestIntent,
         shard: Option<&str>,
     ) -> Result<(), Error> {
-        let body = types::GameAddObjectIntentRequest {
-            id: target.to_owned(),
-            intent: Some(intent),
-            name: name.to_owned(),
-            room: room.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer
-            .send(&endpoints::GameAddObjectIntent { body })
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        api.add_object_intent(shard.as_deref(), (room, target), name, intent)
             .await?;
         Ok(())
     }
@@ -594,33 +471,4 @@ fn payload<I: Serialize>(intent: &I) -> Result<BTreeMap<String, Value>, Error> {
 fn id_payload(id: &str) -> GameAddObjectIntentRequestIntent {
     let payload = BTreeMap::from([("id".to_owned(), Value::String(id.to_owned()))]);
     GameAddObjectIntentRequestIntent::Map(payload)
-}
-
-/// A name check's reply: `name exists` is a taken name, not a failure.
-fn name_free<T>(reply: Result<T, Error>) -> Result<bool, Error> {
-    match reply {
-        Ok(_) => Ok(true),
-        Err(Error::Net(overseer_net::Error::Api(ApiError::Server(message))))
-            if message == "name exists" =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::FlagColor;
-
-    #[test]
-    fn flag_colors_round_trip_their_codes() {
-        for (index, color) in FlagColor::ALL.into_iter().enumerate() {
-            let code = u8::try_from(index + 1).unwrap();
-            assert_eq!(color.code(), code);
-            assert_eq!(FlagColor::from_code(code), Some(color));
-        }
-        assert_eq!(FlagColor::from_code(0), None);
-        assert_eq!(FlagColor::from_code(11), None);
-    }
 }

@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{FutureExt, StreamExt};
-use overseer::core::api::endpoints;
 use overseer::map::{
     DETAIL_FIRST, DetailState, HELD_ROOM_MAPS, Interest, MINIMAP_CAP, RoomCoord, RoomRect,
     RoomStat, RoomStatus, STATS_BATCH_SECTORS, STATS_FAR_TTL, STATS_TTL, TERRAIN_BATCH, WorldEvent,
     WorldMap,
 };
+use overseer::net::api::WorldOperation;
 use serde_json::Value;
 
 use crate::server::{self, Request, Response, Server, Ws};
@@ -881,9 +881,8 @@ async fn a_paused_overview_load_says_until_when_and_a_recheck_after_a_reset_resu
     assert_eq!(stats(&mut world).await.len(), 1400);
     assert_eq!(map_stats(&server).len(), 3);
     assert_eq!(
-        overseer
-            .client()
-            .rate_limit::<endpoints::GameMapStats>()
+        WorldOperation::MapStats
+            .rate_limit(overseer.client())
             .map(|limit| limit.remaining),
         Some(59)
     );
@@ -926,9 +925,8 @@ async fn a_recheck_while_not_paused_sends_nothing() {
     assert_eq!(map_stats(&server).len(), 2);
     // The limit seen is kept.
     assert_eq!(
-        overseer
-            .client()
-            .rate_limit::<endpoints::GameMapStats>()
+        WorldOperation::MapStats
+            .rate_limit(overseer.client())
             .map(|limit| limit.remaining),
         Some(10)
     );

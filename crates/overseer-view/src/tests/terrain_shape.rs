@@ -2,7 +2,7 @@
 //! from cell to cell, and the raised-wall mesh of whole rooms.
 
 use glam::{Vec2, Vec3};
-use overseer::core::api::Terrain;
+use overseer::model::world::Terrain;
 
 use crate::mesh::contour::{ARC_SEGMENTS, CORNERS, Cell, RADIUS, cell_sd, walls};
 use crate::mesh::{Mesh, TerrainVertex, WALL_HEIGHT};

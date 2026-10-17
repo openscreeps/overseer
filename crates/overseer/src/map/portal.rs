@@ -1,6 +1,6 @@
 //! Portals on the world map: where they lead and when they go away.
 
-use overseer_net::core::api::types::{GameRoomObject, GameRoomObjectPortal};
+use overseer_net::model::world::{GameRoomObject, GameRoomObjectPortal};
 
 use super::RoomCoord;
 
@@ -112,7 +112,7 @@ pub(crate) fn portals_of<'a>(objects: impl IntoIterator<Item = &'a GameRoomObjec
 
 #[cfg(test)]
 mod tests {
-    use overseer_net::core::api::types::GameRoomObject;
+    use overseer_net::model::world::GameRoomObject;
 
     use super::{Portal, PortalDestination, may_have_portals};
     use crate::map::RoomCoord;

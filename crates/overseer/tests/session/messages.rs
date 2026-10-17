@@ -1,7 +1,7 @@
 //! Private messages: request shapes and the message feeds.
 
-use overseer::core::api::types::UserMessageType;
-use overseer::core::socket::{self as socket_types, Channel};
+use overseer::core::socket::Channel;
+use overseer::model::messages::{MessageUpdate, MessageUpdateType, UserMessageType};
 
 use crate::server::{self, Request, Server};
 use crate::{connect, receive, routes, soon};
@@ -115,13 +115,13 @@ async fn new_and_conversation_messages_reach_their_feeds() {
     let received = soon(incoming.recv()).await.unwrap();
     assert_eq!(received.id, "m3");
     assert_eq!(received.text.as_deref(), Some("ping"));
-    assert_eq!(received.r#type, Some(socket_types::UserMessageType::In));
+    assert_eq!(received.r#type, Some(MessageUpdateType::In));
     assert_eq!(received.out_message.as_deref(), Some("m4"));
     assert_eq!(soon(conversation.recv()).await.unwrap(), received);
-    let read = socket_types::UserMessage {
+    let read = MessageUpdate {
         id: "m3".to_owned(),
         unread: Some(false),
-        ..socket_types::UserMessage::default()
+        ..MessageUpdate::default()
     };
     assert_eq!(soon(conversation.recv()).await.unwrap(), read);
     // Each handle of the channel receives every item.

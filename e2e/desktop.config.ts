@@ -4,9 +4,8 @@
 // (`desktop/fixtures.ts`): Playwright attaches to the app's own WebView2, no browser of its own.
 //
 // `OVERSEER_E2E_TARGET` picks the server as for the web tests (`playwright.config.ts`); the
-// `official` run (`--target official`) leaves out the `@openscreeps` tests and records no
-// screenshots, the `community` run (`--target community`) the `@wrong-password` tests (see
-// `tests/fixtures`).
+// `official` run (`--target official`) leaves out the `@openscreeps` tests (see
+// `tests/fixtures`) and records no screenshots.
 //
 // One worker: the test app keeps its profile, window state and keychain entries per identifier,
 // so one instance runs at a time.
@@ -18,7 +17,7 @@ import { currentTarget, type Target } from './tests/fixtures/api';
 const excluded: Record<Target, RegExp | undefined> = {
   openscreeps: undefined,
   official: /@openscreeps/,
-  community: /@wrong-password/,
+  community: undefined,
 };
 
 export default defineConfig({

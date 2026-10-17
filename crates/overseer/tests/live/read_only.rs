@@ -2,8 +2,8 @@
 //! start room. They only read (GET requests and the socket), so they also run against
 //! screeps.com (`cargo xtask e2e --target official`) and catch contract drift there.
 
-use overseer::core::api::Tile;
-use overseer::core::api::types::{GameRoomObject, UserWorldStatus};
+use overseer::model::account::UserWorldStatus;
+use overseer::model::world::{GameRoomObject, Tile};
 use overseer::{ConnectionStatus, Overseer};
 use tokio::time::timeout;
 

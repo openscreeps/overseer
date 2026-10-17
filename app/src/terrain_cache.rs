@@ -50,9 +50,9 @@
 //! viewers get them from; what the library fetches later (`WorldEvent::Terrain`, `NoTerrain`,
 //! `Stats`, `Portals`) is written in batches (`TerrainCache::store`, browsers only).
 
-use overseer::core::api::Terrain;
-use overseer::core::api::types::UserBadge;
 use overseer::map::{RoomCoord, RoomOwner, RoomReservation, RoomStat, RoomStatus};
+use overseer::model::account::UserBadge;
+use overseer::model::world::Terrain;
 use serde_json::{Map, Value, json};
 
 /// Record format, the first part of every key.
@@ -291,8 +291,8 @@ mod idb {
     use std::time::Duration;
 
     use js_sys::{Array, Function, Promise, Uint8Array};
-    use overseer::core::api::Terrain;
     use overseer::map::{Portal, RoomCoord, RoomStat, WorldEvent};
+    use overseer::model::world::Terrain;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
@@ -835,8 +835,8 @@ pub use idb::forget_server;
 
 #[cfg(test)]
 mod tests {
-    use overseer::core::api::{Terrain, Tile};
     use overseer::map::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
+    use overseer::model::world::{Terrain, Tile};
 
     use super::{
         Cached, MAX_BADGES, MAX_ROOMS, STAT_MAX_AGE_MS, STORES, WorldEntry, badge_key, key_room,

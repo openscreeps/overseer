@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::modules::{ModuleKind, Modules};
+use super::{ModuleKind, Modules};
 use crate::Error;
 
 /// Reads the modules of the code directory `dir`: every regular file (or link to one) named

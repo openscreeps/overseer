@@ -7,9 +7,8 @@
 //   `direct` serves the app from a plain static server, `proxy` from `overseer-proxy --static`
 //   in front of the game server.
 // - `community`: a disposable world of the stock community server (screeps-launcher with
-//   screepsmod-auth and screepsmod-admin-utils). Only the `proxy` project and no
-//   `@wrong-password` tests (they crash its backend, see the fixtures); retries, workers and
-//   traces as on `openscreeps`.
+//   screepsmod-auth and screepsmod-admin-utils). Only the `proxy` project; retries, workers
+//   and traces as on `openscreeps`.
 // - `official`: screeps.com, read-only. Only the `proxy` project (screeps.com sends no CORS
 //   headers), one worker (its rate limits are per account), no `@openscreeps` tests, and no
 //   traces, screenshots or videos (they would record the account's API token and data).
@@ -85,7 +84,6 @@ const directProjects = served('direct', directPort);
 const proxyProjects = served('proxy', proxyPort);
 const excluded = [
   ...(official ? ['@openscreeps'] : []),
-  ...(target === 'community' ? ['@wrong-password'] : []),
   ...(process.env.OVERSEER_E2E_SCREENS ? [] : ['@screens']),
 ];
 

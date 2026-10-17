@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use overseer::core::api::ApiError;
-use overseer::core::api::types::GameRoomObject;
+use overseer::model::platform::Subsystem;
+use overseer::model::world::GameRoomObject;
 use overseer::{Error, RoomSnapshot, Seek, net};
 use tokio::time::{sleep, timeout};
 
@@ -27,7 +27,8 @@ fn creeps(snapshot: &RoomSnapshot, user: &str) -> BTreeMap<String, (u64, u64)> {
 /// `/room-history` request with HTTP 500 `not implemented` unless a mod replaces its
 /// `onGetRoomHistory` (`lib/game/server.js`,
 /// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L34-L36>),
-/// and the world under test runs none. There the player reports that refusal and stays put.
+/// and the world under test runs none. There the server lacks the room-history subsystem: the
+/// player reports it unsupported, without a request, and stays put.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live private server: cargo xtask e2e"]
 async fn history_replays_the_players_room() {
@@ -36,7 +37,9 @@ async fn history_replays_the_players_room() {
     let user = overseer.user_id().expect("signed in").to_owned();
     let size = overseer.world().history_chunk_size();
     assert_eq!(size, 20, "the server advertises its chunk size");
-    if support::community() {
+    let history_kept = overseer.world().supports(Subsystem::RoomHistory);
+    assert_eq!(history_kept, !support::community());
+    if !history_kept {
         let mut history = overseer
             .history()
             .player(&player.room, None)
@@ -45,7 +48,7 @@ async fn history_replays_the_players_room() {
         assert!(
             matches!(
                 &refused,
-                Error::Net(net::Error::Api(ApiError::Status { status, .. })) if status.as_u16() == 500
+                Error::Net(net::Error::Unsupported(Subsystem::RoomHistory))
             ),
             "{refused:?}"
         );

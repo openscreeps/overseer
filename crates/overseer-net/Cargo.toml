@@ -15,6 +15,9 @@ reqwest = { workspace = true, features = ["gzip"] }
 reqwest-websocket.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Encodes the token prefix in screeps.com's rate-limit reset page (`Api::rate_limit_lift`);
+# already a dependency of reqwest.
+url.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Tells a connection lost before the socket upgrade's response from other send errors (see

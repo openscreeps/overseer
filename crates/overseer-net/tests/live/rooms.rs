@@ -3,10 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use overseer_net::core::api::types::GameRoomObject;
-use overseer_net::core::api::{ApiError, MemoryValue, Tile};
+use overseer_net::api::{ConsoleApi as _, MemoryApi as _, RoomObjectsSource as _, WorldApi as _};
+use overseer_net::core::api::ApiError;
+use overseer_net::model::memory::MemoryValue;
+use overseer_net::model::platform::Subsystem;
+use overseer_net::model::world::{GameRoomObject, Tile};
 use overseer_net::serde_json::{Value, json};
-use overseer_net::{Client, Error};
+use overseer_net::{Api, Error};
 
 use crate::support::{self, PATIENCE};
 
@@ -36,7 +39,10 @@ async fn room_objects_and_terrain_decode() {
         .user()
         .expect("a user")
         .to_owned();
-    let snapshot = client
+    // Native on `OpenScreeps`, screepsmod-admin-utils' on the community server.
+    let api = client.api().await.expect("the server's API");
+    let objects = api.room_objects_source().expect("room objects");
+    let snapshot = objects
         .room_objects(None, &player.room)
         .await
         .expect("the room's objects decode");
@@ -83,7 +89,7 @@ async fn room_objects_and_terrain_decode() {
         .or_else(|| others.first())
         .map(|(room, _)| room.as_str())
         .expect("another room");
-    let snapshot = client
+    let snapshot = objects
         .room_objects(None, other)
         .await
         .expect("the other room's objects decode");
@@ -129,7 +135,8 @@ async fn room_objects_and_terrain_decode() {
 /// `/room-history` request with HTTP 500 `not implemented` unless a mod replaces its
 /// `onGetRoomHistory` (`lib/game/server.js`,
 /// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L34-L36>),
-/// and the world under test runs none: there the client reports that refusal.
+/// and the world under test runs none: there the server lacks the room-history subsystem and
+/// the client refuses without a request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_history_replays_the_room() {
@@ -137,23 +144,25 @@ async fn room_history_replays_the_room() {
     let client = player.account.client();
     let world = client.world().await.expect("sign-in");
     let size = world.history_chunk_size();
+    let api = client.api().await.expect("the server's API");
+    assert_eq!(
+        world.supports(Subsystem::RoomHistory),
+        !support::community()
+    );
+    if !world.supports(Subsystem::RoomHistory) {
+        let refused = api.room_history(None, &player.room, size + 1).await;
+        assert!(
+            matches!(&refused, Err(Error::Unsupported(Subsystem::RoomHistory))),
+            "{refused:?}"
+        );
+        return;
+    }
     // The first chunk that starts after the spawn was placed, once it holds a few ticks (the
     // server serves the chunk being written).
     let placed = support::game_time(&client).await;
     let base = placed - placed % size + size;
     support::wait_for_tick(&client, base + 4).await;
-    if support::community() {
-        let refused = client.room_history(None, &player.room, base + 1).await;
-        assert!(
-            matches!(
-                &refused,
-                Err(Error::Api(ApiError::Status { status, .. })) if status.as_u16() == 500
-            ),
-            "{refused:?}"
-        );
-        return;
-    }
-    let history = client
+    let history = api
         .room_history(None, &player.room, base + 1)
         .await
         .expect("the history chunk");
@@ -192,7 +201,7 @@ async fn room_history_replays_the_room() {
     }
 
     // A chunk that is not kept is HTTP 404.
-    let missing = client.room_history(None, &player.room, 0).await;
+    let missing = api.room_history(None, &player.room, 0).await;
     assert!(
         matches!(
             &missing,
@@ -204,35 +213,37 @@ async fn room_history_replays_the_room() {
 }
 
 /// The player's Memory at `path`.
-async fn memory(client: &Client, path: &str) -> MemoryValue {
-    client
-        .memory(None, Some(path))
-        .await
-        .expect("Memory decodes")
+async fn memory(api: &Api, path: &str) -> MemoryValue {
+    api.memory(path, None).await.expect("Memory decodes")
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live private server: cargo xtask e2e"]
 async fn memory_and_console_requests_reach_the_runtime() {
     let player = support::player().await;
-    let client = player.account.client();
+    let api = player
+        .account
+        .client()
+        .api()
+        .await
+        .expect("the server's API");
     // The bot counts its runs.
     eventually(|| {
-        let client = client.clone();
+        let api = api.clone();
         async move {
-            match memory(&client, "ticks").await {
+            match memory(&api, "ticks").await {
                 MemoryValue::Json(ticks) => ticks.as_u64().filter(|&ticks| ticks > 0),
                 _ => None,
             }
         }
     })
     .await;
-    assert_eq!(memory(&client, "absent").await, MemoryValue::Undefined);
+    assert_eq!(memory(&api, "absent").await, MemoryValue::Undefined);
     assert_eq!(
-        memory(&client, "absent.deeper").await,
+        memory(&api, "absent.deeper").await,
         MemoryValue::IncorrectPath
     );
-    let MemoryValue::Json(all) = client.memory(None, None).await.expect("all of Memory") else {
+    let MemoryValue::Json(all) = memory(&api, "").await else {
         panic!("Memory is an object");
     };
     assert!(all.get("ticks").is_some_and(Value::is_number));
@@ -240,53 +251,49 @@ async fn memory_and_console_requests_reach_the_runtime() {
     // The community server writes `live.value` as `Memory['live']['value'] = …`, which sets
     // nothing while `Memory.live` is missing (`@screeps/backend` 3.3.0 `lib/game/api/user.js`,
     // `POST /memory`): the parent comes first, as both servers then agree.
-    client
-        .set_memory(None, "live", json!({}))
+    api.set_memory("live", json!({}), None)
         .await
         .expect("the write is queued");
     eventually(|| {
-        let client = client.clone();
-        async move { (memory(&client, "live").await == MemoryValue::Json(json!({}))).then_some(()) }
+        let api = api.clone();
+        async move { (memory(&api, "live").await == MemoryValue::Json(json!({}))).then_some(()) }
     })
     .await;
     let value = json!({ "flag": true, "list": [1, "two"] });
-    client
-        .set_memory(None, "live.value", value.clone())
+    api.set_memory("live.value", value.clone(), None)
         .await
         .expect("the write is queued");
     eventually(|| {
-        let (client, value) = (client.clone(), value.clone());
-        async move { (memory(&client, "live.value").await == MemoryValue::Json(value)).then_some(()) }
+        let (api, value) = (api.clone(), value.clone());
+        async move { (memory(&api, "live.value").await == MemoryValue::Json(value)).then_some(()) }
     })
     .await;
     assert_eq!(
-        memory(&client, "live.value.flag").await,
+        memory(&api, "live.value.flag").await,
         MemoryValue::Json(json!(true))
     );
-    client
-        .delete_memory(None, "live.value")
+    api.delete_memory("live.value", None)
         .await
         .expect("the deletion is queued");
     eventually(|| {
-        let client = client.clone();
-        async move { (memory(&client, "live.value").await == MemoryValue::Undefined).then_some(()) }
+        let api = api.clone();
+        async move { (memory(&api, "live.value").await == MemoryValue::Undefined).then_some(()) }
     })
     .await;
 
     // A console expression runs in the player's runtime: it writes Memory.
-    client
-        .console(None, "Memory.fromConsole = 6 * 7")
+    api.console("Memory.fromConsole = 6 * 7", None)
         .await
         .expect("the expression is queued");
     eventually(|| {
-        let client = client.clone();
+        let api = api.clone();
         async move {
-            (memory(&client, "fromConsole").await == MemoryValue::Json(json!(42))).then_some(())
+            (memory(&api, "fromConsole").await == MemoryValue::Json(json!(42))).then_some(())
         }
     })
     .await;
     let long = format!("'{}'", "x".repeat(1100));
-    let result = client.console(None, long).await;
+    let result = api.console(&long, None).await;
     assert!(
         matches!(&result, Err(Error::Api(ApiError::Server(message))) if message == "expression size is too large"),
         "{result:?}"

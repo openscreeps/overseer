@@ -1,7 +1,8 @@
 //! The signed-in user's private messages.
 
-use overseer_net::core::api::{endpoints, types};
-use overseer_net::core::socket::{self, Channel, Payload};
+use overseer_net::api::MessagesApi as _;
+use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::messages::{MessageUpdate, UserMessage, UserMessagesIndexResponse};
 
 use crate::{Error, Feed, Overseer};
 
@@ -29,8 +30,8 @@ impl Messages {
     ///
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails.
-    pub async fn conversations(&self) -> Result<types::UserMessagesIndexResponse, Error> {
-        self.overseer.send(&endpoints::UserMessagesIndex).await
+    pub async fn conversations(&self) -> Result<UserMessagesIndexResponse, Error> {
+        Ok(self.overseer.user_api()?.conversations().await?)
     }
 
     /// The latest 100 messages exchanged with user `respondent`, oldest first
@@ -40,11 +41,9 @@ impl Messages {
     ///
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails.
-    pub async fn conversation(&self, respondent: &str) -> Result<Vec<types::UserMessage>, Error> {
-        let list = endpoints::UserMessagesList {
-            respondent: respondent.to_owned(),
-        };
-        Ok(self.overseer.send(&list).await?.messages)
+    pub async fn conversation(&self, respondent: &str) -> Result<Vec<UserMessage>, Error> {
+        let api = self.overseer.user_api()?;
+        Ok(api.conversation(respondent.to_owned()).await?)
     }
 
     /// Sends `text` to user `respondent` (`POST /api/user/messages/send`). Both participants'
@@ -56,12 +55,8 @@ impl Messages {
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails or the server refuses (`invalid respondent`, `text too long` over 100 KiB).
     pub async fn send(&self, respondent: &str, text: &str) -> Result<(), Error> {
-        let body = types::UserMessagesSendRequest {
-            respondent: respondent.to_owned(),
-            text: text.to_owned(),
-        };
-        self.overseer
-            .send(&endpoints::UserMessagesSend { body })
+        let api = self.overseer.user_api()?;
+        api.send_message(respondent.to_owned(), text.to_owned())
             .await?;
         Ok(())
     }
@@ -74,10 +69,7 @@ impl Messages {
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails.
     pub async fn mark_read(&self, id: &str) -> Result<(), Error> {
-        let body = types::UserMessagesMarkReadRequest { id: id.to_owned() };
-        self.overseer
-            .send(&endpoints::UserMessagesMarkRead { body })
-            .await?;
+        self.overseer.user_api()?.mark_read(id.to_owned()).await?;
         Ok(())
     }
 
@@ -88,11 +80,7 @@ impl Messages {
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails.
     pub async fn unread_count(&self) -> Result<u64, Error> {
-        Ok(self
-            .overseer
-            .send(&endpoints::UserMessagesUnreadCount)
-            .await?
-            .count)
+        Ok(self.overseer.user_api()?.unread_count().await?)
     }
 
     /// Every message the user receives from now on, from any sender (`user:<user>/newMessage`):
@@ -101,7 +89,7 @@ impl Messages {
     /// # Errors
     ///
     /// Returns [`Error::Anonymous`] and [`Error::Closed`].
-    pub fn feed(&self) -> Result<Feed<socket::UserMessage>, Error> {
+    pub fn feed(&self) -> Result<Feed<MessageUpdate>, Error> {
         let user = self.user()?;
         Ok(self.overseer.feed(Channel::NewMessage { user }, message))
     }
@@ -113,7 +101,7 @@ impl Messages {
     /// # Errors
     ///
     /// Returns [`Error::Anonymous`] and [`Error::Closed`].
-    pub fn conversation_feed(&self, respondent: &str) -> Result<Feed<socket::UserMessage>, Error> {
+    pub fn conversation_feed(&self, respondent: &str) -> Result<Feed<MessageUpdate>, Error> {
         let user = self.user()?;
         let channel = Channel::Conversation {
             user,
@@ -130,7 +118,7 @@ impl Messages {
 }
 
 /// The message of a message channel's payload.
-fn message(payload: Payload) -> Option<socket::UserMessage> {
+fn message(payload: Payload) -> Option<MessageUpdate> {
     if let Payload::Message(message) = payload {
         Some(message)
     } else {

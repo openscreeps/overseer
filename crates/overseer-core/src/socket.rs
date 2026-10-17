@@ -5,19 +5,21 @@
 //! (`gzip on`, `auth <token>`, `subscribe <channel>`, `unsubscribe <channel>`) and JSON channel
 //! events `[channel, data]`, possibly compressed as `gz:` frames. [`SocketSession`] owns the
 //! protocol state of one connection; the driver moves frames between it and the transport.
-//! Event data are the [`types`] generated from the socket reference, re-exported here.
+//!
+//! Each contract has its own generated event payloads ([`official`], [`openscreeps`],
+//! [`community`]). The session decodes every event with the contract of the server it is
+//! connected to and hands out the [domain types](crate::model::socket) they convert into.
 
 mod channel;
-mod code;
+pub mod community;
 mod flag;
-mod payload;
+pub mod official;
+pub mod openscreeps;
 pub mod room;
 mod session;
-pub mod types;
 mod visual;
 
 pub use channel::Channel;
 pub use flag::{Flag, FlagError};
 pub use room::RoomState;
 pub use session::{Event, Payload, SessionState, SocketError, SocketSession};
-pub use types::*;

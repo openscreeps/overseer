@@ -3,8 +3,13 @@
 
 use std::time::Duration;
 
-use overseer_net::core::api::types::{AuthSigninRequest, RegisterSubmitRequest};
-use overseer_net::core::api::{ApiError, MemoryValue, endpoints};
+use overseer_net::api::{
+    AccountApi as _, ConsoleApi as _, MemoryApi as _, PasswordSignIn as _, WorldApi as _,
+};
+use overseer_net::core::api::ApiError;
+use overseer_net::model::account::Registration;
+use overseer_net::model::memory::MemoryValue;
+use overseer_net::model::platform::Subsystem;
 use overseer_net::serde_json::json;
 use overseer_net::{Client, Error};
 
@@ -50,15 +55,13 @@ async fn discovery_registration_and_sign_in_pass_through() {
     // the error's stack trace (`lib/register.js`,
     // <https://unpkg.com/screepsmod-auth@2.10.1/lib/register.js>).
     let account = support::register_with(&server, None).await;
-    let again = RegisterSubmitRequest {
+    let again = Registration {
+        username: account.username.clone(),
         email: format!("other-{}", account.email),
         password: account.password.clone(),
-        username: account.username.clone(),
-        ..RegisterSubmitRequest::default()
+        modules: None,
     };
-    let result = anonymous
-        .send(&endpoints::RegisterSubmit { body: again })
-        .await;
+    let result = support::submit(&server, again).await;
     let taken = |message: &str| {
         if support::community() {
             message.lines().next() == Some("Error: User already exists")
@@ -86,15 +89,14 @@ async fn discovery_registration_and_sign_in_pass_through() {
     assert_eq!(proxied.user(), straight.user());
 
     // HTTP 401 passes unchanged.
-    let wrong = endpoints::AuthSignin {
-        body: AuthSigninRequest {
-            email: account.username.clone(),
-            password: "not-the-password".to_owned(),
-            recaptcha: None,
-            steam_ticket: None,
-        },
-    };
-    let result = anonymous.send(&wrong).await;
+    let result = anonymous
+        .api()
+        .await
+        .expect("the server's operations")
+        .password_sign_in()
+        .expect("password sign-in")
+        .sign_in(&account.username, "not-the-password")
+        .await;
     assert!(
         matches!(result, Err(Error::Api(ApiError::Unauthorized))),
         "{result:?}"
@@ -120,7 +122,8 @@ async fn tokens_rotate_through_the_proxy_and_authenticate_requests() {
     // `X-Token` reaches the client through the proxy.
     assert!(client.rotates_tokens());
     let first = client.token().expect("a token");
-    client.send(&endpoints::AuthMe).await.expect("auth/me");
+    let api = client.api().await.expect("the server's API");
+    api.me().await.expect("auth/me");
     let second = client.token().expect("a token");
     assert_ne!(first, second);
     assert!(updates.has_changed().expect("the client is alive"));
@@ -131,44 +134,35 @@ async fn tokens_rotate_through_the_proxy_and_authenticate_requests() {
         .token(second)
         .build()
         .expect("a client");
-    let me = straight
-        .send(&endpoints::AuthMe)
-        .await
-        .expect("auth/me")
-        .body;
-    assert_eq!(Some(me.id), user);
+    let me = straight.world().await.expect("auth/me");
+    assert_eq!(me.user().map(str::to_owned), user);
     let back = Client::builder(server.clone())
         .token(straight.token().expect("a token"))
         .build()
         .expect("a client");
-    let me = back.send(&endpoints::AuthMe).await.expect("auth/me").body;
-    assert_eq!(Some(me.id), user);
+    let me = back.world().await.expect("auth/me");
+    assert_eq!(me.user().map(str::to_owned), user);
 
     // Authenticated writes and reads: Memory through the console.
-    client
-        .console(None, "Memory.viaProxy = 'yes'")
+    api.console("Memory.viaProxy = 'yes'", None)
         .await
         .expect("the expression is queued");
     eventually(|| {
-        let client = client.clone();
+        let api = api.clone();
         async move {
-            let value = client
-                .memory(None, Some("viaProxy"))
-                .await
-                .expect("Memory decodes");
+            let value = api.memory("viaProxy", None).await.expect("Memory decodes");
             (value == MemoryValue::Json(json!("yes"))).then_some(())
         }
     })
     .await;
-    client
-        .set_memory(None, "viaProxy", json!({ "nested": [1, 2] }))
+    api.set_memory("viaProxy", json!({ "nested": [1, 2] }), None)
         .await
         .expect("the write is queued");
     eventually(|| {
-        let client = client.clone();
+        let api = api.clone();
         async move {
-            let value = client
-                .memory(None, Some("viaProxy.nested"))
+            let value = api
+                .memory("viaProxy.nested", None)
                 .await
                 .expect("Memory decodes");
             (value == MemoryValue::Json(json!([1, 2]))).then_some(())
@@ -185,7 +179,8 @@ async fn tokens_rotate_through_the_proxy_and_authenticate_requests() {
 /// `/room-history` request with HTTP 500 `not implemented` unless a mod replaces its
 /// `onGetRoomHistory` (`lib/game/server.js`,
 /// <https://github.com/screeps/backend-local/blob/9d079282303ec04e577ac2bb97f64312b25e4ccd/lib/game/server.js#L34-L36>),
-/// and the world under test runs none: there that refusal passes through unchanged.
+/// and the world under test runs none: there that refusal passes through unchanged, so
+/// Overseer tells through the proxy that the server has no room history.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live private server: cargo xtask e2e"]
 async fn room_history_is_forwarded() {
@@ -212,23 +207,28 @@ async fn room_history_is_forwarded() {
             assert_eq!(reply.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
             assert_eq!(reply.text().await.expect("a body"), "not implemented");
         }
-        let refused = client.room_history(None, &player.room, base).await;
+        let api = client.api().await.expect("the server's API");
+        assert!(!api.supports(Subsystem::RoomHistory));
+        let refused = api.room_history(None, &player.room, base).await;
         assert!(
-            matches!(
-                &refused,
-                Err(Error::Api(ApiError::Status { status, .. })) if status.as_u16() == 500
-            ),
+            matches!(&refused, Err(Error::Unsupported(Subsystem::RoomHistory))),
             "{refused:?}"
         );
         proxy.shutdown().await;
         return;
     }
     let proxied = client
+        .api()
+        .await
+        .expect("the server's API")
         .room_history(None, &player.room, base)
         .await
         .expect("the history chunk through the proxy");
     // Fetched later, the direct chunk holds at least the same ticks.
     let expected = straight
+        .api()
+        .await
+        .expect("the server's API")
         .room_history(None, &player.room, base)
         .await
         .expect("the history chunk");
@@ -255,7 +255,12 @@ async fn room_history_is_forwarded() {
     assert_eq!(replayed, state_at(expected));
 
     // A chunk that is not kept is HTTP 404 with the server's message.
-    let missing = client.room_history(None, &player.room, 0).await;
+    let missing = client
+        .api()
+        .await
+        .expect("the server's API")
+        .room_history(None, &player.room, 0)
+        .await;
     assert!(
         matches!(
             &missing,

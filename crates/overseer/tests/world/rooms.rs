@@ -1,8 +1,7 @@
 //! Room information and the request bodies of room actions.
 
-use overseer::core::api::Tile;
-use overseer::core::api::types::{
-    GameBuildableStructureType, GameIntentCancelOrder, GameIntentNotifyWhenAttacked,
+use overseer::model::world::{
+    GameBuildableStructureType, GameIntentCancelOrder, GameIntentNotifyWhenAttacked, Tile,
 };
 use overseer::{Error, FlagColor, StatInterval};
 use serde_json::{Value, json};

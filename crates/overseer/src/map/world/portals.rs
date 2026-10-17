@@ -13,9 +13,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use overseer_net::core::api::{ApiError, endpoints};
-use overseer_net::core::socket::types::RoomMap;
+use overseer_net::api::WorldOperation;
+use overseer_net::core::api::ApiError;
 use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::world::RoomMap;
 use overseer_net::rt::{self, BoxFuture, Instant};
 use overseer_net::{Client, Error as NetError};
 
@@ -943,7 +944,7 @@ impl Portals {
     /// latest limit has no request left, after its reset.
     fn ready_at(&self, client: &Client, now: Instant) -> Instant {
         let mut ready = self.not_before.unwrap_or(now);
-        if let Some(limit) = client.rate_limit::<endpoints::GameRoomObjects>()
+        if let Some(limit) = WorldOperation::RoomObjects.rate_limit(client)
             && limit.remaining == 0
         {
             ready = ready.max(reset_at(limit.reset, now));

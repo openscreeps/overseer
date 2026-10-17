@@ -7,6 +7,8 @@
 //!   replies: error envelopes delivered with HTTP 200, rotated tokens and rate limits.
 //! - [`socket::SocketSession`] produces the text frames to send on the socket connection, turns
 //!   received frames into typed [`socket::Event`]s and keeps subscription and room state.
+//! - [`model`] holds Overseer's domain types: the values the rest of Overseer works with,
+//!   converted from whichever contract the server speaks.
 //!
 //! A driver owns the transport, the clock and any retry policy. The protocol follows the
 //! `openscreeps/openapi` reference: `openapi.json` (HTTP), `asyncapi.json` (socket) and the
@@ -14,6 +16,7 @@
 
 pub mod api;
 pub mod gz;
+pub mod model;
 pub mod server;
 pub mod socket;
 pub mod token;

@@ -5,8 +5,9 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::Auth;
-use overseer::core::api::{endpoints, types};
-use overseer::net::Client;
+use overseer::model::account::Availability;
+use overseer::net::Api;
+use overseer::net::api::{AccountApi as _, PasswordAccount as _};
 
 use crate::register::{Registration, confirm_error, email_error, password_error, username_error};
 use crate::route::Route;
@@ -21,15 +22,15 @@ use crate::ui::style;
 /// Pause after typing before a value is checked with the server.
 const CHECK_DELAY: Duration = Duration::from_millis(400);
 
-/// The errors of a check whose value an account already uses: `exists` (screeps.com,
-/// `openscreeps/server` and the Screeps server) and `User Exists` (screepsmod-auth, which serves
-/// the checks on community servers).
-const TAKEN: [&str; 2] = ["exists", "User Exists"];
+/// Why a server cannot register accounts: it lacks password accounts
+/// ([`Subsystem::PasswordAccounts`](overseer::model::platform::Subsystem)).
+const NO_REGISTRATION: &str = "This server does not register accounts.";
 
 /// What the server said about a username or e-mail address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Check {
-    /// Nothing to check (empty or breaking a local rule).
+    /// Nothing to check (empty or breaking a local rule), or not yet: the server is not
+    /// connected.
     Idle,
     /// Waiting for the answer.
     Checking,
@@ -51,20 +52,22 @@ enum CheckKind {
 }
 
 /// Checks `value` with the server whenever it changes and follows its local `rule`, once
-/// typing pauses; the latest answer wins.
+/// typing pauses and the server is connected (`api`); the latest answer wins.
 fn live_check(
     value: RwSignal<String>,
     kind: CheckKind,
     rule: fn(&str) -> Option<&'static str>,
-    client: RwSignal<Option<Client>, LocalStorage>,
+    api: RwSignal<Option<Api>, LocalStorage>,
 ) -> RwSignal<Check> {
     let check = RwSignal::new(Check::Idle);
     let generation = StoredValue::new(0_u64);
     Effect::new(move |_| {
         let text = value.get().trim().to_owned();
+        // Typed before the server was discovered: checked once it is.
+        let connected = api.with(Option::is_some);
         let current = generation.get_value() + 1;
         generation.set_value(current);
-        if text.is_empty() || rule(&text).is_some() {
+        if text.is_empty() || rule(&text).is_some() || !connected {
             check.set(Check::Idle);
             return;
         }
@@ -74,30 +77,21 @@ fn live_check(
                 if generation.try_get_value() != Some(current) {
                     return;
                 }
-                let Some(client) = client.try_get_untracked().flatten() else {
-                    check.set(Check::Failed("Not connected to the server".to_owned()));
+                let Some(api) = api.try_get_untracked().flatten() else {
                     return;
                 };
                 spawn_local(async move {
                     let result = match kind {
-                        CheckKind::Username => client
-                            .send(&endpoints::RegisterCheckUsername { username: text })
-                            .await
-                            .map(drop),
-                        CheckKind::Email => client
-                            .send(&endpoints::RegisterCheckEmail { email: text })
-                            .await
-                            .map(drop),
+                        CheckKind::Username => api.username_available(&text).await,
+                        CheckKind::Email => api.email_available(&text).await,
                     };
                     if generation.try_get_value() != Some(current) {
                         return;
                     }
                     check.set(match result {
-                        Ok(()) => Check::Available,
-                        Err(error) => match session::message(&error) {
-                            message if TAKEN.contains(&message.as_str()) => Check::Taken,
-                            message => Check::Failed(message),
-                        },
+                        Ok(Availability::Available) => Check::Available,
+                        Ok(Availability::Taken) => Check::Taken,
+                        Err(error) => Check::Failed(session::message(&error)),
                     });
                 });
             },
@@ -124,18 +118,26 @@ pub fn Register(
     server: String,
 ) -> impl IntoView {
     let state = AppState::expect();
-    let name = state
-        .server(&server)
-        .map_or_else(|| server.clone(), |server| server.name);
-    let client = RwSignal::new_local(None::<Client>);
+    let saved = state.server(&server);
+    let server_kind = saved.as_ref().and_then(|server| server.kind.forced());
+    let name = saved.map_or_else(|| server.clone(), |server| server.name);
+    let api = RwSignal::new_local(None::<Api>);
     let error = RwSignal::new(None::<String>);
+    // The server has no password accounts: nothing to submit.
+    let unsupported = RwSignal::new(false);
     {
         let platform = state.platform();
         let url = server.clone();
         spawn_scoped(async move {
-            match session::anonymous_client(&platform, &url, None).await {
-                Ok(anonymous) => client.set(Some(anonymous)),
-                Err(message) => error.set(Some(message)),
+            match session::anonymous_api(&platform, &url, server_kind, None).await {
+                Ok(anonymous) => {
+                    if anonymous.password_account().is_none() {
+                        unsupported.set(true);
+                        error.set(Some(NO_REGISTRATION.to_owned()));
+                    }
+                    api.set(Some(anonymous));
+                }
+                Err(failure) => error.set(Some(failure.to_string())),
             }
         });
     }
@@ -145,8 +147,8 @@ pub fn Register(
     let confirm = RwSignal::new(String::new());
     let submitted = RwSignal::new(false);
     let busy = RwSignal::new(false);
-    let username_check = live_check(username, CheckKind::Username, username_error, client);
-    let email_check = live_check(email, CheckKind::Email, email_error, client);
+    let username_check = live_check(username, CheckKind::Username, username_error, api);
+    let email_check = live_check(email, CheckKind::Email, email_error, api);
     let form = move || Registration {
         username: username.get().trim().to_owned(),
         email: email.get().trim().to_owned(),
@@ -181,7 +183,7 @@ pub fn Register(
             error.set(Some("Correct the marked fields.".to_owned()));
             return;
         }
-        let Some(anonymous) = client.get_untracked() else {
+        let Some(anonymous) = api.get_untracked() else {
             error.set(Some("Not connected to the server yet.".to_owned()));
             return;
         };
@@ -190,13 +192,18 @@ pub fn Register(
         let url = url.clone();
         let platform = state.platform();
         spawn_local(async move {
-            let body = types::RegisterSubmitRequest {
+            let Some(accounts) = anonymous.password_account() else {
+                busy.set(false);
+                error.set(Some(NO_REGISTRATION.to_owned()));
+                return;
+            };
+            let account = overseer::model::account::Registration {
                 username: registration.username.clone(),
                 email: registration.email,
                 password: registration.password.clone(),
-                ..Default::default()
+                modules: None,
             };
-            if let Err(failure) = anonymous.send(&endpoints::RegisterSubmit { body }).await {
+            if let Err(failure) = accounts.register(account).await {
                 busy.set(false);
                 error.set(Some(session::message(&failure)));
                 return;
@@ -205,7 +212,7 @@ pub fn Register(
                 email: registration.username.clone(),
                 password: registration.password,
             };
-            match session::connect(&platform, &url, auth, None).await {
+            match session::connect(&platform, &url, server_kind, auth, None).await {
                 Ok(overseer) => {
                     state.begin(&url, overseer, Start::Password(Some(registration.username)));
                 }
@@ -289,7 +296,11 @@ pub fn Register(
                     error=confirm_message
                 />
                 <FormError error />
-                <button type="submit" class=CARD_SUBMIT disabled=move || busy.get()>
+                <button
+                    type="submit"
+                    class=CARD_SUBMIT
+                    disabled=move || busy.get() || unsupported.get()
+                >
                     {move || if busy.get() { "Registering…" } else { "Register" }}
                 </button>
             </form>
@@ -309,18 +320,18 @@ pub fn Register(
 #[component]
 pub fn SetUsername() -> impl IntoView {
     let state = AppState::expect();
-    let client = RwSignal::new_local(
+    let api = RwSignal::new_local(
         state
             .session
             .get_untracked()
-            .map(|session| session.overseer.client().clone()),
+            .map(|session| session.overseer.api().clone()),
     );
     let username = RwSignal::new(String::new());
     let email = RwSignal::new(String::new());
     let submitted = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let username_check = live_check(username, CheckKind::Username, username_error, client);
+    let username_check = live_check(username, CheckKind::Username, username_error, api);
     let username_message = Signal::derive(move || {
         let rule = username_error(username.get().trim());
         (submitted.get() || !username.with(String::is_empty))
@@ -355,19 +366,11 @@ pub fn SetUsername() -> impl IntoView {
         error.set(None);
         busy.set(true);
         spawn_local(async move {
-            let body = types::RegisterSetUsernameRequest {
-                username: name,
-                email: (!address.is_empty()).then_some(address),
-                ..Default::default()
-            };
             let overseer = session.overseer;
-            if let Err(failure) = overseer
-                .client()
-                .send(&endpoints::RegisterSetUsername { body })
-                .await
-            {
+            let email = (!address.is_empty()).then_some(address.as_str());
+            if let Err(failure) = overseer.account().set_username(&name, email).await {
                 busy.set(false);
-                error.set(Some(session::message(&failure)));
+                error.set(Some(session::error_message(&failure)));
                 return;
             }
             match overseer.account().refresh().await {

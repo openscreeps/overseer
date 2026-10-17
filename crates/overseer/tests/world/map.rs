@@ -2,9 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use overseer::core::api::Tile;
-use overseer::core::api::types::GameRoomStatName;
 use overseer::map::{RoomCoord, ViewChange};
+use overseer::model::world::{GameRoomStatName, Tile};
 use overseer::{MapStat, StatInterval};
 use serde_json::{Value, json};
 

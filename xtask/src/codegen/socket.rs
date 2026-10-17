@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use super::merge::{Components, ref_name, shape};
 use super::model::Options;
+use super::schema::{Components, ref_name, shape};
+use super::share::references;
 use crate::Error;
 
 /// Socket schemas generated as raw JSON objects. A room object diff is applied with the
@@ -17,16 +18,14 @@ const RAW: &[&str] = &["RoomObjectsDiff"];
 const ROOM_OBJECT: &str = "RoomObject";
 
 /// The options of the socket model: `null` differs from absent (events are changes), the raw
-/// schemas, and every socket schema the HTTP types already define (see [`shared`]).
-pub fn options(socket: &Components, http: &Components) -> Result<Options, Error> {
-    Ok(Options {
+/// schemas, and `external`: the socket schemas another module's types stand for (such as the
+/// HTTP types, see [`shared`]), mapped to the Rust path of that type.
+pub fn options(external: BTreeMap<String, String>) -> Options {
+    Options {
         absent_vs_null: true,
         raw: RAW.iter().map(|name| (*name).to_owned()).collect(),
-        external: shared(socket, http)?
-            .into_iter()
-            .map(|(name, counterpart)| (name, format!("api::{counterpart}")))
-            .collect(),
-    })
+        external,
+    }
 }
 
 /// The HTTP schema a socket schema may duplicate: `GameRoomObject…` for `RoomObject…`, the
@@ -43,7 +42,7 @@ fn counterpart(name: &str) -> String {
 /// identical (ignoring documentation, the form of `discriminator`, and with references mapped
 /// the same way) and every schema it references is mapped too. A `RoomObject…` schema whose
 /// counterpart exists but differs is an error, so the two references cannot drift apart.
-fn shared(socket: &Components, http: &Components) -> Result<BTreeMap<String, String>, Error> {
+pub fn shared(socket: &Components, http: &Components) -> Result<BTreeMap<String, String>, Error> {
     let mut mapped: BTreeSet<&String> = socket
         .iter()
         .filter(|(name, _)| !RAW.contains(&name.as_str()))
@@ -130,26 +129,6 @@ fn comparable(schema: &Value) -> Value {
         }
         Value::Array(items) => Value::Array(items.iter().map(comparable).collect()),
         other => other,
-    }
-}
-
-/// Appends the component names `schema` references.
-fn references<'v>(schema: &'v Value, out: &mut Vec<&'v str>) {
-    match schema {
-        Value::Object(map) => {
-            for (key, value) in map {
-                match (key.as_str(), value.as_str().and_then(ref_name)) {
-                    ("$ref", Some(target)) => out.push(target),
-                    _ => references(value, out),
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                references(item, out);
-            }
-        }
-        _ => {}
     }
 }
 

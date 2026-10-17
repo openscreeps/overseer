@@ -7,9 +7,9 @@ use async_tungstenite::tungstenite::{Error as WsError, Message};
 use futures_util::StreamExt as _;
 use http::{HeaderValue, StatusCode};
 use overseer_net::SocketEvent;
-use overseer_net::core::api::types::GameRoomObject;
-use overseer_net::core::socket::types::UserCpuCpu;
 use overseer_net::core::socket::{Event, Payload};
+use overseer_net::model::socket::UserCpuCpu;
+use overseer_net::model::world::GameRoomObject;
 use overseer_proxy::Proxy;
 
 use crate::support::{self, PATIENCE};

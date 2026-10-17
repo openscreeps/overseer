@@ -4,16 +4,10 @@
 // - `target` (worker): what the tests run against (`OVERSEER_E2E_TARGET`): `openscreeps`, the
 //   disposable OpenScreeps world `cargo xtask e2e` starts (with its admin API); `community`, a
 //   disposable world of the stock community server (`cargo xtask e2e --target community`, with
-//   its CLI); or `official`, screeps.com (`cargo xtask e2e --target official`, read-only). Two
-//   tags leave tests out:
-//   - `@openscreeps`: needs a disposable world (created players, registration, account changes,
-//     intents, the server's administration). The `official` run leaves these out.
-//   - `@wrong-password`: sends a wrong current password to `POST /api/user/password`. The
-//     `community` run leaves these out: screepsmod-auth 2.10.1 answers 401, then its promise
-//     chain goes on (https://unpkg.com/screepsmod-auth@2.10.1/lib/backend.js, L285-306): it
-//     stores the reply object's `pass` and `salt` (`undefined`) as the account's password and
-//     replies again, which throws `ERR_HTTP_HEADERS_SENT` in an unhandled rejection. The backend
-//     process exits and every request fails until the launcher has restarted it.
+//   its CLI); or `official`, screeps.com (`cargo xtask e2e --target official`, read-only). The
+//   tag `@openscreeps` leaves tests out: they need a disposable world (created players,
+//   registration, account changes, intents, the server's administration), so the `official`
+//   run leaves them out.
 // - `mode` (worker option): how the app is served. `direct`: a plain static server, the app
 //   talks to the game server cross-origin. `proxy`: `overseer-proxy --static` serves the app
 //   same-origin in front of the game server. Each Playwright project sets it and its baseURL;

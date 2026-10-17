@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use overseer::core::api::types::{GameBuildableStructureType, GameRoomObject};
-use overseer::core::api::{ApiError, Tile};
+use overseer::model::platform::Subsystem;
+use overseer::model::world::{GameBuildableStructureType, GameRoomObject, Tile};
 use overseer::{Error, FlagColor, RoomSnapshot, StatInterval, Watch, net};
 use tokio::time::timeout;
 
@@ -207,19 +207,24 @@ async fn room_information_describes_the_players_room() {
     }
 
     let decorations = rooms.decorations(&player.room, None).await;
-    if support::community() {
-        // The community server has no decorations: `@screeps/backend` 3.3.0 routes no
-        // `/api/game/room-decorations` (`lib/game/api/game.js`), so the request is HTTP 404.
+    // The community contract has no decorations (`@screeps/backend` 3.3.0 routes no
+    // `/api/game/room-decorations`).
+    let has_decorations = overseer.world().supports(Subsystem::RoomDecorations);
+    assert_eq!(has_decorations, !support::community());
+    if has_decorations {
+        let decorations = decorations.expect("room decorations decode");
+        assert!(decorations.is_empty(), "{decorations:?}");
+    } else {
+        // Overseer does not ask.
         assert!(
             matches!(
                 &decorations,
-                Err(Error::Net(net::Error::Api(ApiError::Status { status, .. }))) if status.as_u16() == 404
+                Err(Error::Net(net::Error::Unsupported(
+                    Subsystem::RoomDecorations
+                )))
             ),
             "{decorations:?}"
         );
-    } else {
-        let decorations = decorations.expect("room decorations decode");
-        assert!(decorations.is_empty(), "{decorations:?}");
     }
 }
 

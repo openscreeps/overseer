@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use overseer::Notice;
-use overseer::core::api::Tile;
 use overseer::core::socket::Channel;
+use overseer::model::world::Tile;
 
 use crate::server::{self, Server};
 use crate::{connect, receive, routes, soon};

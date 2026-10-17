@@ -2,7 +2,7 @@
 //! effect instances of frames.
 
 use glam::Vec2;
-use overseer::core::api::types::GameRoomObjectActionLog;
+use overseer::model::world::GameRoomObjectActionLog;
 use serde_json::json;
 
 use super::{ME, object, show, snapshot, terrain};
@@ -116,7 +116,7 @@ fn effects_end_before_the_next_tick() {
     }
 }
 
-fn worker(x: u8, actions: &serde_json::Value) -> overseer::core::api::types::GameRoomObject {
+fn worker(x: u8, actions: &serde_json::Value) -> overseer::model::world::GameRoomObject {
     object(json!({
         "_id": "w", "type": "creep", "room": "W1N1", "x": x, "y": 10, "user": ME,
         "name": "w", "hits": 100, "hitsMax": 100, "store": {},

@@ -1,5 +1,5 @@
-//! Client flows over HTTP: rate-limit retries, the terrain cache, room history, Memory and
-//! console.
+//! Client flows over HTTP: rate-limit retries, the terrain cache, room history, and the
+//! Memory, console and code operations of the domain API.
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -9,7 +9,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use overseer_core::Token;
-use overseer_core::api::{ApiError, MemoryValue, RateLimit, Tile, endpoints};
+use overseer_core::api::official::endpoints;
+use overseer_core::api::{ApiError, RateLimit};
+use overseer_core::model::code::{CodeTarget, Modules};
+use overseer_core::model::memory::MemoryValue;
+use overseer_core::model::world::Tile;
+use overseer_net::api::{CodeApi as _, ConsoleApi as _, MemoryApi as _, WorldApi as _};
 use overseer_net::{Client, Error, RateLimitPolicy};
 use tokio::time::Instant;
 
@@ -248,7 +253,8 @@ async fn single_world_history_is_fetched_by_chunk_and_replayed() {
     .await;
     let client = Client::builder(server.url()).build().unwrap();
     // 20-tick chunks: tick 47 is in the chunk from 40.
-    let history = client.room_history(None, "W1N1", 47).await.unwrap();
+    let api = client.api().await.unwrap();
+    let history = api.room_history(None, "W1N1", 47).await.unwrap();
     let request = server.requests().pop().unwrap();
     assert_eq!(request.path, "/room-history");
     assert_eq!(request.query, "room=W1N1&time=40");
@@ -289,56 +295,180 @@ async fn sharded_history_reads_the_gzip_encoded_static_chunk_files() {
     )
     .await;
     let client = Client::builder(server.official_url()).build().unwrap();
-    let history = client.room_history(None, "W1N1", 150).await.unwrap();
+    let api = client.api().await.unwrap();
+    let history = api.room_history(None, "W1N1", 150).await.unwrap();
     assert_eq!((history.room(), history.base()), ("W1N1", 100));
     let states: Vec<_> = history.replay().collect();
     assert_eq!(states.len(), 1);
     assert_eq!(states[0].1.object("a").unwrap()["type"], "road");
-    let error = client.room_history(None, "W1N1", 250).await.unwrap_err();
+    let error = api.room_history(None, "W1N1", 250).await.unwrap_err();
     assert!(
         matches!(&error, Error::Api(ApiError::Status { status, .. }) if status.as_u16() == 404),
         "{error:?}"
     );
 }
 
-#[tokio::test]
-async fn memory_and_console_flows_send_the_documented_bodies() {
+/// Sends every Memory, segment, console and code operation through the domain API of an
+/// `OpenScreeps` server, or of an official one with shard `shard0`, and returns the requests
+/// under `/api/user/`.
+async fn user_requests(official: bool) -> Vec<Request> {
+    let version = if official { SHARDED_VERSION } else { VERSION };
+    // screeps.com echoes the queued console document; the others answer `{ok: 1}`.
+    let console = if official {
+        r#"{"ok":1,"result":{"ok":1,"n":1},"ops":[{"user":"u1","expression":"Game.time","shard":"shard0","_id":"c1"}],"insertedCount":1,"insertedIds":["c1"]}"#
+    } else {
+        r#"{"ok":1}"#
+    };
     let server = Server::start(
-        |request: &Request| match (request.method.as_str(), request.path.as_str()) {
-            ("GET", "/api/version") => (200, VERSION.to_owned()),
+        move |request: &Request| match (request.method.as_str(), request.path.as_str()) {
+            ("GET", "/api/version") => (200, version.to_owned()),
             ("GET", "/api/auth/me") => (200, ME.to_owned()),
             ("GET", "/api/user/memory") => {
                 (200, r#"{"ok":1,"data":"Incorrect memory path"}"#.to_owned())
             }
-            ("POST", "/api/user/memory" | "/api/user/console") => (200, r#"{"ok":1}"#.to_owned()),
+            ("GET", "/api/user/memory-segment") => (200, r#"{"ok":1,"data":null}"#.to_owned()),
+            ("GET", "/api/user/branches") => (
+                200,
+                r#"{"ok":1,"list":[{"_id":"b1","branch":"default","activeWorld":true}]}"#
+                    .to_owned(),
+            ),
+            ("GET", "/api/user/code") => (
+                200,
+                r#"{"ok":1,"branch":"default","modules":{"main":"x"}}"#.to_owned(),
+            ),
+            ("POST", "/api/user/console") => (200, console.to_owned()),
+            ("POST", _) => (200, r#"{"ok":1,"timestamp":1}"#.to_owned()),
             _ => (404, "{}".to_owned()),
         },
         |_| true,
     )
     .await;
-    let client = Client::builder(server.url())
-        .token(Token::new("t"))
-        .build()
-        .unwrap();
+    let url = if official {
+        server.official_url()
+    } else {
+        server.url()
+    };
+    let client = Client::builder(url).token(Token::new("t")).build().unwrap();
+    let api = client.api().await.unwrap();
+
     assert_eq!(
-        client.memory(None, Some("a.b")).await.unwrap(),
+        api.memory("a.b", None).await.unwrap(),
         MemoryValue::IncorrectPath
     );
-    client.set_memory(None, "a.b", 5.into()).await.unwrap();
-    client.delete_memory(None, "a.b").await.unwrap();
-    client.console(None, "Game.time").await.unwrap();
+    api.set_memory("a.b", 5.into(), None).await.unwrap();
+    api.delete_memory("a.b", None).await.unwrap();
+    assert_eq!(api.memory_segment(3, None).await.unwrap(), None);
+    api.set_memory_segment(3, "text", None).await.unwrap();
+    api.console("Game.time", None).await.unwrap();
 
-    let requests: Vec<_> = server
+    let branches = api.branches().await.unwrap();
+    assert_eq!(branches.len(), 1);
+    assert_eq!(branches[0].active_world, Some(true));
+    let code = api.code(CodeTarget::World.selector()).await.unwrap();
+    assert_eq!(
+        (code.branch.as_str(), code.modules.js("main")),
+        ("default", Some("x"))
+    );
+    let mut modules = Modules::new();
+    modules.insert_js("main", "loop");
+    let sent = api.set_code("default", modules.clone()).await.unwrap();
+    assert_eq!(sent, modules);
+    api.clone_branch("default", "next").await.unwrap();
+    api.create_branch("fresh", modules).await.unwrap();
+    api.delete_branch("old").await.unwrap();
+    api.set_active_branch(CodeTarget::Simulation, "next")
+        .await
+        .unwrap();
+
+    server
         .requests()
         .into_iter()
         .filter(|request| request.path.starts_with("/api/user/"))
+        .collect()
+}
+
+/// The JSON body of `request`.
+fn body(request: &Request) -> serde_json::Value {
+    serde_json::from_str(&request.body).unwrap()
+}
+
+#[tokio::test]
+async fn user_operations_send_the_documented_requests() {
+    use serde_json::json;
+
+    let requests = user_requests(false).await;
+    let summary: Vec<_> = requests
+        .iter()
+        .map(|request| (request.method.as_str(), request.path.as_str()))
         .collect();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        summary,
+        [
+            ("GET", "/api/user/memory"),
+            ("POST", "/api/user/memory"),
+            ("POST", "/api/user/memory"),
+            ("GET", "/api/user/memory-segment"),
+            ("POST", "/api/user/memory-segment"),
+            ("POST", "/api/user/console"),
+            ("GET", "/api/user/branches"),
+            ("GET", "/api/user/code"),
+            ("POST", "/api/user/code"),
+            ("POST", "/api/user/clone-branch"),
+            ("POST", "/api/user/clone-branch"),
+            ("POST", "/api/user/delete-branch"),
+            ("POST", "/api/user/set-active-branch"),
+        ]
+    );
+    // Single-world servers get no shard.
     assert_eq!(requests[0].query, "path=a.b");
-    let set: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
-    assert_eq!(set, serde_json::json!({"path": "a.b", "value": 5}));
-    let delete: serde_json::Value = serde_json::from_str(&requests[2].body).unwrap();
-    assert_eq!(delete, serde_json::json!({"path": "a.b"}));
-    let console: serde_json::Value = serde_json::from_str(&requests[3].body).unwrap();
-    assert_eq!(console, serde_json::json!({"expression": "Game.time"}));
+    assert_eq!(body(&requests[1]), json!({"path": "a.b", "value": 5}));
+    assert_eq!(body(&requests[2]), json!({"path": "a.b"}));
+    assert_eq!(requests[3].query, "segment=3");
+    assert_eq!(body(&requests[4]), json!({"data": "text", "segment": 3}));
+    assert_eq!(body(&requests[5]), json!({"expression": "Game.time"}));
+    assert_eq!(requests[6].query, "withCode=false");
+    assert_eq!(requests[7].query, "branch=%24activeWorld");
+    assert_eq!(
+        body(&requests[8]),
+        json!({"branch": "default", "modules": {"main": "loop"}})
+    );
+    assert_eq!(
+        body(&requests[9]),
+        json!({"branch": "default", "newName": "next"})
+    );
+    assert_eq!(
+        body(&requests[10]),
+        json!({"defaultModules": {"main": "loop"}, "newName": "fresh"})
+    );
+    assert_eq!(body(&requests[11]), json!({"branch": "old"}));
+    assert_eq!(
+        body(&requests[12]),
+        json!({"activeName": "activeSim", "branch": "next"})
+    );
+}
+
+#[tokio::test]
+async fn official_user_operations_name_the_default_shard() {
+    use serde_json::json;
+
+    let requests = user_requests(true).await;
+    assert_eq!(requests.len(), 13);
+    assert_eq!(requests[0].query, "path=a.b&shard=shard0");
+    assert_eq!(
+        body(&requests[1]),
+        json!({"path": "a.b", "shard": "shard0", "value": 5})
+    );
+    assert_eq!(
+        body(&requests[2]),
+        json!({"path": "a.b", "shard": "shard0"})
+    );
+    assert_eq!(requests[3].query, "segment=3&shard=shard0");
+    assert_eq!(
+        body(&requests[4]),
+        json!({"data": "text", "segment": 3, "shard": "shard0"})
+    );
+    assert_eq!(
+        body(&requests[5]),
+        json!({"expression": "Game.time", "shard": "shard0"})
+    );
 }

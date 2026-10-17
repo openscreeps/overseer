@@ -11,8 +11,7 @@ mod world;
 
 pub use coord::RoomCoord;
 pub use knowledge::WorldKnowledge;
-pub use overseer_net::core::api::Terrain;
-pub use overseer_net::core::socket::types::RoomMap;
+pub use overseer_net::model::world::{RoomMap, Terrain};
 pub use portal::{Portal, PortalDestination, may_have_portals};
 pub use rect::RoomRect;
 pub use stat::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
@@ -28,12 +27,11 @@ pub use world::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use overseer_net::core::api::endpoints;
-use overseer_net::core::api::types::{
-    GameMapStatsResponse, GameRoomStatName, GameWorldSizeResponse,
-};
-use overseer_net::core::socket::types::MapVisualItem;
+use overseer_net::api::WorldApi as _;
 use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::world::{
+    GameRoomStatName, GameWorldSizeResponse, MapStats, MapVisualItem,
+};
 
 use crate::{Error, Overseer, StatInterval, Watch};
 
@@ -102,14 +100,11 @@ impl Map {
         rooms: impl IntoIterator<Item = R>,
         stat: MapStat,
         shard: Option<&str>,
-    ) -> Result<GameMapStatsResponse, Error> {
-        self.overseer.ensure_open()?;
-        self.overseer.require_user()?;
+    ) -> Result<MapStats, Error> {
+        let api = self.overseer.user_api()?;
         let shard = self.overseer.resolve_shard(shard);
-        let client = self.overseer.client();
-        Ok(client
-            .map_stats(shard.as_deref(), rooms, &stat.name())
-            .await?)
+        let rooms = rooms.into_iter().map(Into::into).collect();
+        Ok(api.map_stats(shard.as_deref(), rooms, &stat.name()).await?)
     }
 
     /// The decoded terrain of `rooms`, by room name. Rooms already fetched in this session
@@ -145,10 +140,9 @@ impl Map {
     /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
     /// [`Error::Net`] when the request fails.
     pub async fn world_size(&self, shard: Option<&str>) -> Result<GameWorldSizeResponse, Error> {
-        let request = endpoints::GameWorldSize {
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer.send(&request).await
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(self.overseer.api().world_size(shard.as_deref()).await?)
     }
 
     /// The badge of the user named `username` as an SVG document, optionally with a border
@@ -171,8 +165,10 @@ impl Map {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
-    /// [`Error::Net`] when the request fails.
+    /// As [`Rooms::objects`](crate::Rooms::objects): [`Error::Closed`] after
+    /// [`Overseer::shutdown`](crate::Overseer::shutdown) and [`Error::Net`] when the request
+    /// fails or the server has no room objects (a community server without
+    /// screepsmod-admin-utils).
     pub async fn portals(&self, room: &str, shard: Option<&str>) -> Result<Vec<Portal>, Error> {
         let objects = self.overseer.rooms().objects(room, shard).await?;
         Ok(portal::portals_of(&objects.objects))
@@ -201,7 +197,7 @@ impl Map {
 
 #[cfg(test)]
 mod tests {
-    use overseer_net::core::api::types::GameRoomStatName;
+    use overseer_net::model::world::GameRoomStatName;
 
     use super::MapStat;
     use crate::StatInterval;

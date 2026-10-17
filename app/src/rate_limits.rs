@@ -1,14 +1,12 @@
-//! Per-token rate limits: how long a pause lasts, screeps.com's official reset page, and where
-//! its actions apply.
+//! Per-token rate limits: how long a pause lasts, lifting them, and where its actions apply.
 //!
 //! screeps.com limits each API token per endpoint (map stats: 60 requests per hour) and lets
-//! the user lift the limits early on its reset page
-//! (`https://screeps.com/a/#!/account/auth-tokens/noratelimit?token=<first 8 characters>`,
-//! the page of the token list and of node-screeps-api's `rateLimitResetUrl`). The user solves
-//! a reCAPTCHA there; the page then posts [`RESET_SUCCESS`] to the window that opened it and
-//! closes. Only the token's first 8 characters leave the app, in the page's address; the page
-//! sends them with the captcha (`POST /api/user/noratelimit`). It applies to API tokens only:
-//! password sign-ins hold session tokens, which the page does not know.
+//! the user lift the limits early; so does screepsmod-auth on community servers. Whether and
+//! how is the server's [`Subsystem::RateLimitLift`](overseer::model::platform::Subsystem):
+//! [`overseer::Account::rate_limit_lift`] answers a web page (screeps.com: the user solves a
+//! reCAPTCHA there, and the page posts its success to the window that opened it) or a request
+//! (screepsmod-auth). Only the token's first 8 characters leave the app. It applies to API
+//! tokens only: password sign-ins hold session tokens, which match no API token.
 //!
 //! A lift lasts about two hours: the token's entry of `GET /api/user/auth-token` says until
 //! when (`noRatelimitUntil`, [`overseer::Account::rate_limit_exemption`]). The user may lift
@@ -24,73 +22,49 @@ use std::collections::HashSet;
 use overseer::core::api::RateLimit;
 use overseer::map::{STATS_FAR_SHARE, WorldProgress};
 
-use crate::profiles::ServerKind;
-
-/// The reset page, up to the token prefix.
-const RESET_PAGE: &str = "https://screeps.com/a/#!/account/auth-tokens/noratelimit?token=";
-
-/// How many leading characters of the token the reset page gets.
-pub const TOKEN_PREFIX_CHARS: usize = 8;
-
-/// The origin of the reset page's message.
-pub const RESET_ORIGIN: &str = "https://screeps.com";
-
-/// What the reset page posts to its opener once the limits are lifted.
-pub const RESET_SUCCESS: &str = "screepsTokenSuccess";
-
-/// The reset page for `token`: its first [`TOKEN_PREFIX_CHARS`] characters only. `None` for
-/// a token not longer than that, which would go out whole.
-pub fn reset_url(token: &str) -> Option<String> {
-    let (end, _) = token.char_indices().nth(TOKEN_PREFIX_CHARS)?;
-    let prefix: String =
-        url::form_urlencoded::byte_serialize(token.get(..end)?.as_bytes()).collect();
-    Some(format!("{RESET_PAGE}{prefix}"))
-}
-
-/// Whether a `message` event from `origin` carrying `data` says the reset page lifted the
-/// limits.
-pub fn is_reset_success(origin: &str, data: Option<&str>) -> bool {
-    origin == RESET_ORIGIN && data == Some(RESET_SUCCESS)
+/// The host of a lift page `url` for the texts naming it (`screeps.com`); `the website` when
+/// it has none.
+pub fn page_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "the website".to_owned())
 }
 
 /// The rate-limit actions a session offers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Actions {
-    /// `Reset limit` in the status bar: the world's overviews wait for the limit, the reset
-    /// page applies and the limits are not lifted.
+    /// `Reset limit` in the status bar: the world's overviews wait for the limit, lifting
+    /// applies and the limits are not lifted.
     pub status_reset: bool,
-    /// `Reset on screeps.com` in the Rate limits panel: the reset page applies and the limits
-    /// are not lifted.
+    /// The lift action in the Rate limits panel (`Reset on screeps.com`): lifting applies and
+    /// the limits are not lifted.
     pub reset: bool,
     /// `Check again` in the Rate limits panel: the world's overviews wait for the limit.
     pub check_again: bool,
 }
 
-/// Whether screeps.com's reset page (and the lifted state) applies to a session on a server
-/// of `kind`, signed in with an API token or not
+/// Whether lifting the rate limits (and the lifted state) applies to a session on a server
+/// that `lifts` them ([`Subsystem::RateLimitLift`](overseer::model::platform::Subsystem)),
+/// signed in with an API token or not
 /// ([`SavedUser::api_token`](crate::profiles::SavedUser::api_token); `None`, recorded before
-/// the app tracked it, keeps it since the page reports a token it does not know): the reset
-/// page lifts the limits of screeps.com API tokens only.
-pub const fn lift_applies(kind: ServerKind, api_token: Option<bool>) -> bool {
-    matches!(kind, ServerKind::Official) && !matches!(api_token, Some(false))
+/// the app tracked it, keeps it since lifting reports a token it does not know): lifting
+/// applies to API tokens only.
+pub const fn lift_applies(lifts: bool, api_token: Option<bool>) -> bool {
+    lifts && !matches!(api_token, Some(false))
 }
 
 /// Whether a window follows the lift of its session (checks it, shows it, prompts): the main
 /// window (not a `popout`) of a session the lift applies to ([`lift_applies`]).
-pub const fn follows_lift(kind: ServerKind, api_token: Option<bool>, popout: bool) -> bool {
-    !popout && lift_applies(kind, api_token)
+pub const fn follows_lift(lifts: bool, api_token: Option<bool>, popout: bool) -> bool {
+    !popout && lift_applies(lifts, api_token)
 }
 
-/// The actions of a session on a server of `kind` signed in with `api_token` (see
-/// [`lift_applies`]), with the world's overview loading `paused` by the rate limit or not,
-/// and the token's limits `lifted` or not.
-pub const fn actions(
-    kind: ServerKind,
-    api_token: Option<bool>,
-    paused: bool,
-    lifted: bool,
-) -> Actions {
-    let reset = lift_applies(kind, api_token) && !lifted;
+/// The actions of a session on a server that `lifts` rate limits or not, signed in with
+/// `api_token` (see [`lift_applies`]), with the world's overview loading `paused` by the rate
+/// limit or not, and the token's limits `lifted` or not.
+pub const fn actions(lifts: bool, api_token: Option<bool>, paused: bool, lifted: bool) -> Actions {
+    let reset = lift_applies(lifts, api_token) && !lifted;
     Actions {
         status_reset: reset && paused,
         reset,
@@ -386,59 +360,25 @@ mod tests {
 
     use super::{
         Actions, CheckSchedule, Warning, Warnings, actions, ending_label, follows_lift, held_back,
-        is_low, is_reset_success, lift_applies, lifted_label, reset_url, time_until, waiting_label,
+        is_low, lift_applies, lifted_label, page_host, time_until, waiting_label,
     };
-    use crate::profiles::ServerKind;
 
     #[test]
-    fn the_reset_page_gets_exactly_the_first_8_characters() {
-        let token = "0123abcd-4567-89ef-0123-456789abcdef";
-        let url = reset_url(token).unwrap();
+    fn lift_texts_name_the_pages_host() {
         assert_eq!(
-            url,
-            "https://screeps.com/a/#!/account/auth-tokens/noratelimit?token=0123abcd"
+            page_host("https://screeps.com/a/#!/account/auth-tokens/noratelimit?token=0123abcd"),
+            "screeps.com"
         );
-        let (_, prefix) = url.split_once("token=").unwrap();
-        assert_eq!(prefix.chars().count(), 8);
-        assert!(!url.contains(token));
-        assert!(!url.contains("0123abcd-"));
-        // Never the whole token: one of 8 characters or fewer has no reset page.
-        assert_eq!(reset_url("0123abcd"), None);
-        assert_eq!(reset_url("abc"), None);
-        assert_eq!(reset_url(""), None);
-        assert!(reset_url("0123abcde").is_some_and(|url| url.ends_with("=0123abcd")));
-        // Characters, not bytes; anything outside URL-safe ones is escaped.
-        assert!(
-            reset_url("ééé a&b#cd")
-                .is_some_and(|url| url.ends_with("=%C3%A9%C3%A9%C3%A9+a%26b%23"))
-        );
+        assert_eq!(page_host("not a url"), "the website");
     }
 
     #[test]
-    fn only_the_reset_page_success_from_screeps_com_counts() {
-        assert!(is_reset_success(
-            "https://screeps.com",
-            Some("screepsTokenSuccess")
-        ));
-        assert!(!is_reset_success(
-            "https://screeps.com.evil.example",
-            Some("screepsTokenSuccess")
-        ));
-        assert!(!is_reset_success(
-            "http://screeps.com",
-            Some("screepsTokenSuccess")
-        ));
-        assert!(!is_reset_success("https://screeps.com", Some("other")));
-        assert!(!is_reset_success("https://screeps.com", None));
-    }
-
-    #[test]
-    fn reset_actions_apply_to_screeps_com_api_tokens_only() {
+    fn reset_actions_apply_to_api_tokens_on_servers_lifting_rate_limits() {
         // API tokens, and sign-ins saved before the app recorded how they signed in.
         for api_token in [Some(true), None] {
-            assert!(lift_applies(ServerKind::Official, api_token));
+            assert!(lift_applies(true, api_token));
             assert_eq!(
-                actions(ServerKind::Official, api_token, true, false),
+                actions(true, api_token, true, false),
                 Actions {
                     status_reset: true,
                     reset: true,
@@ -446,7 +386,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                actions(ServerKind::Official, api_token, false, false),
+                actions(true, api_token, false, false),
                 Actions {
                     status_reset: false,
                     reset: true,
@@ -455,7 +395,7 @@ mod tests {
             );
             // Lifted: nothing to reset.
             assert_eq!(
-                actions(ServerKind::Official, api_token, true, true),
+                actions(true, api_token, true, true),
                 Actions {
                     status_reset: false,
                     reset: false,
@@ -463,24 +403,23 @@ mod tests {
                 }
             );
         }
-        // Password sign-ins hold session tokens; other servers have no reset page.
-        for (kind, api_token) in [
-            (ServerKind::Official, Some(false)),
-            (ServerKind::Season, Some(true)),
-            (ServerKind::Season, None),
-            (ServerKind::Private, Some(true)),
-            (ServerKind::Private, None),
+        // Password sign-ins hold session tokens; other servers do not lift rate limits.
+        for (lifts, api_token) in [
+            (true, Some(false)),
+            (false, Some(true)),
+            (false, Some(false)),
+            (false, None),
         ] {
-            assert!(!lift_applies(kind, api_token));
+            assert!(!lift_applies(lifts, api_token));
             assert_eq!(
-                actions(kind, api_token, true, false),
+                actions(lifts, api_token, true, false),
                 Actions {
                     status_reset: false,
                     reset: false,
                     check_again: true,
                 }
             );
-            assert_eq!(actions(kind, api_token, false, false), Actions::default());
+            assert_eq!(actions(lifts, api_token, false, false), Actions::default());
         }
     }
 
@@ -568,19 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn only_main_windows_of_screeps_com_api_token_sessions_follow_the_lift() {
+    fn only_main_windows_of_api_token_sessions_on_lifting_servers_follow_the_lift() {
         for api_token in [Some(true), None] {
-            assert!(follows_lift(ServerKind::Official, api_token, false));
-            assert!(!follows_lift(ServerKind::Official, api_token, true));
+            assert!(follows_lift(true, api_token, false));
+            assert!(!follows_lift(true, api_token, true));
         }
-        for (kind, api_token) in [
-            (ServerKind::Official, Some(false)),
-            (ServerKind::Season, Some(true)),
-            (ServerKind::Private, Some(true)),
-            (ServerKind::Private, None),
-        ] {
+        for (lifts, api_token) in [(true, Some(false)), (false, Some(true)), (false, None)] {
             for popout in [false, true] {
-                assert!(!follows_lift(kind, api_token, popout));
+                assert!(!follows_lift(lifts, api_token, popout));
             }
         }
     }

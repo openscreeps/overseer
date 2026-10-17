@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use super::merge::{Components, ref_name};
+use super::schema::{Components, ref_name};
 
 /// How the members of a union are told apart.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -29,12 +29,20 @@
 //!
 //! # Discover
 //!
-//! [`Client::world`] fetches `GET /api/version` (and `GET /api/auth/me` when authenticated)
-//! once: the shards (none on single-world private servers), the server's capabilities and the
-//! signed-in user. Helpers that take `shard: Option<&str>` use the world's default shard for
-//! `None` ([`ClientBuilder::default_shard`], else the first shard listed) and never send one to
-//! a single-world server. Every endpoint of the reference is available as a typed struct in
-//! [`endpoints`](overseer_core::api::endpoints), executed with [`Client::send`].
+//! [`Client::world`] discovers the server once: which [`Subsystem`]s it offers (password
+//! sign-in, API tokens, room objects, room history, …), what its `GET /api/version` reports,
+//! its shards (none on single-world servers) and, when authenticated, the signed-in user
+//! (`GET /api/auth/me`). Code against the subsystems and the operations every server offers
+//! alike: whether the server is screeps.com, `OpenScreeps` or a community server with plugins
+//! is connection info ([`World::connection`]) for display and diagnostics, discovered by
+//! default and forced with [`ClientBuilder::server_kind`] (and [`ClientBuilder::plugins`]).
+//! Helpers that take `shard: Option<&str>` use the world's default shard for `None`
+//! ([`ClientBuilder::default_shard`], else the first shard listed) and never send one to a
+//! single-world server. [`Client::api`] returns the server's operations in Overseer's own types
+//! ([`model`]), whichever contract it speaks; see [`api`]. [`Client::send`] sends one endpoint
+//! of a generated contract module of [`overseer_core::api`] as is.
+//!
+//! [`Subsystem`]: overseer_core::model::platform::Subsystem
 //!
 //! ```no_run
 //! # async fn run(client: overseer_net::Client) -> Result<(), overseer_net::Error> {
@@ -42,8 +50,11 @@
 //!
 //! let world = client.world().await?;
 //! println!("shards {:?}, signed in: {}", world.shards(), world.user().is_some());
-//! let time = client.send(&endpoints::GameTime { shard: world.shard().map(str::to_owned) }).await?;
-//! println!("tick {}", time.body.time);
+//! if world.supports(Subsystem::RoomHistory) {
+//!     println!("room history in chunks of {} ticks", world.history_chunk_size());
+//! }
+//! let info = client.api().await?.version().await?;
+//! println!("protocol {}, {} users", info.protocol, info.users);
 //! # Ok(())
 //! # }
 //! ```
@@ -77,9 +88,12 @@
 //!
 //! [`Socket::watch_room`] subscribes to a room and fetches its decoded terrain once (cached per
 //! client by [`Client::terrain`]); [`Socket::room_view`] then combines the terrain with the live
-//! state: typed objects ([`GameRoomObject`](overseer_core::api::types::GameRoomObject)), users,
+//! state: typed objects ([`GameRoomObject`](overseer_core::model::world::GameRoomObject)), users,
 //! room visuals and flags. `examples/room_view.rs` renders a room as ASCII this way. For a
-//! one-off snapshot without a socket use [`Client::room_objects`].
+//! one-off snapshot without a socket use
+//! [`RoomObjectsSource::room_objects`](api::RoomObjectsSource::room_objects) through
+//! [`Api::room_objects_source`] (screeps.com, `OpenScreeps` and community servers with
+//! screepsmod-admin-utils).
 //!
 //! ```no_run
 //! # async fn run(client: overseer_net::Client) -> Result<(), overseer_net::Error> {
@@ -106,35 +120,38 @@
 //!
 //! # Console and Memory
 //!
-//! [`Client::console`] queues an expression; its output arrives on the console channel
-//! ([`Socket::subscribe_console`]). [`Client::memory`] reads and decodes Memory at a path;
-//! [`Client::set_memory`] and [`Client::delete_memory`] queue writes that run in the player's
-//! runtime on a later tick.
+//! [`ConsoleApi::console`](api::ConsoleApi::console) queues an expression; its output arrives
+//! on the console channel ([`Socket::subscribe_console`]). [`MemoryApi`](api::MemoryApi) reads
+//! and decodes Memory at a path and queues writes that run in the player's runtime on a later
+//! tick.
 //!
 //! ```no_run
 //! # async fn run(client: overseer_net::Client) -> Result<(), overseer_net::Error> {
 //! use overseer_net::prelude::*;
 //! use overseer_net::serde_json::json;
 //!
-//! client.console(None, "Game.time").await?;
-//! if let MemoryValue::Json(value) = client.memory(None, Some("stats")).await? {
+//! let api = client.api().await?;
+//! api.console("Game.time", None).await?;
+//! if let MemoryValue::Json(value) = api.memory("stats", None).await? {
 //!     println!("{value}");
 //! }
-//! client.set_memory(None, "settings.paused", json!(true)).await?;
+//! api.set_memory("settings.paused", json!(true), None).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! # History
 //!
-//! [`Client::room_history`] fetches the room-history chunk holding a tick (official static
-//! files on sharded servers, `GET /room-history` on single-world servers) and
-//! [`RoomHistory::replay`] rebuilds the room tick by tick with the same diff application as
-//! live updates.
+//! [`WorldApi::room_history`](api::WorldApi::room_history) fetches the room-history chunk
+//! holding a tick (static files per shard on screeps.com, `GET /room-history` on the other
+//! servers) and [`RoomHistory::replay`] rebuilds the room tick by tick with the same diff
+//! application as live updates.
 //!
 //! ```no_run
 //! # async fn run(client: overseer_net::Client) -> Result<(), overseer_net::Error> {
-//! let history = client.room_history(None, "W8N3", 1_000_050).await?;
+//! use overseer_net::prelude::*;
+//!
+//! let history = client.api().await?.room_history(None, "W8N3", 1_000_050).await?;
 //! let mut replay = history.replay();
 //! while let Some(tick) = replay.advance() {
 //!     println!("tick {tick}: {} objects", replay.state().objects().count());
@@ -198,18 +215,24 @@
 //!   send them: [`ClientBuilder::keep_alive`] is ignored and a dead connection is noticed when
 //!   the browser reports it closed. Reconnects, resubscriptions and token sharing work the same.
 
+pub mod api;
 mod client;
 mod history;
 pub mod rt;
 mod socket;
 mod world;
 
-use overseer_core::api::{ApiError, MemoryError, RequestError, TerrainError};
+use overseer_core::api::{ApiError, RequestError};
+use overseer_core::model::memory::MemoryError;
+use overseer_core::model::platform::Subsystem;
+use overseer_core::model::world::TerrainError;
 use overseer_core::socket::SocketError;
 
 pub use overseer_core as core;
+pub use overseer_core::model;
 pub use serde_json;
 
+pub use api::Api;
 pub use client::{
     Client, ClientBuilder, EndpointRateLimit, GLOBAL_RATE_LIMIT_WAIT, Priority, REQUEST_BUDGET,
     REQUEST_WINDOW, RateLimitPolicy,
@@ -221,15 +244,20 @@ pub use world::World;
 /// The names a client application uses every day: `use overseer_net::prelude::*;`.
 pub mod prelude {
     pub use futures_util::{Stream, StreamExt};
-    pub use overseer_core::api::types::GameRoomObject;
-    pub use overseer_core::api::{
-        ApiError, Endpoint, MemoryValue, RateLimit, Reply, Terrain, Tile, endpoints, types,
-    };
+    pub use overseer_core::api::{ApiError, Endpoint, RateLimit, Reply};
+    pub use overseer_core::model::memory::MemoryValue;
+    pub use overseer_core::model::platform::{Subsystem, Subsystems};
+    pub use overseer_core::model::world::{GameRoomObject, Terrain, Tile};
     pub use overseer_core::socket::{self, Channel, Event, Flag, Payload, RoomState};
     pub use overseer_core::{ServerUrl, Token};
 
+    pub use crate::api::{
+        AccountApi as _, CodeApi as _, ConsoleApi as _, MarketApi as _, MemoryApi as _,
+        MessagesApi as _, PlatformApi as _, PowerCreepsApi as _, RoomObjectsSource as _,
+        UsersApi as _, WorldApi as _,
+    };
     pub use crate::{
-        Client, ClientBuilder, DisconnectReason, Error, HistoryReplay, RateLimitPolicy,
+        Api, Client, ClientBuilder, DisconnectReason, Error, HistoryReplay, RateLimitPolicy,
         ReconnectPolicy, RoomHistory, RoomView, Socket, SocketEvent, World,
     };
 }
@@ -267,6 +295,13 @@ pub enum Error {
     /// A reply decoded but lacks what the helper needs.
     #[error("unexpected reply: {0}")]
     UnexpectedReply(&'static str),
+    /// The server does not offer the operation's subsystem (a plugin it does not run, or one
+    /// its contract lacks), for example password sign-in. Nothing was sent.
+    #[error("the server does not offer {0}")]
+    Unsupported(Subsystem),
+    /// A password change was refused: the current password given is not the account's.
+    #[error("the current password is wrong")]
+    WrongPassword,
 }
 
 impl From<reqwest_websocket::Error> for Error {

@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use overseer_net::core::api::types::{
-    GameRoomDecoration, GameRoomObjectsResponse, GameRoomOverviewResponse, GameRoomStatus,
+use overseer_net::api::{RoomObjectsSource as _, WorldApi as _};
+use overseer_net::model::platform::Subsystem;
+use overseer_net::model::world::{
+    GameRoomDecoration, GameRoomOverviewResponse, GameRoomStatus, RoomObjects, Terrain,
 };
-use overseer_net::core::api::{Terrain, endpoints};
 
 use super::Rooms;
 use crate::Error;
@@ -38,25 +39,25 @@ impl StatInterval {
 /// is ignored by single-world servers.
 impl Rooms {
     /// A one-off snapshot of every object in `room`, typed by the reference, and the public
-    /// profiles of the users they reference (`GET /api/game/room-objects`). Flags are not
-    /// included; [`Self::watch`] follows a room live.
+    /// profiles of the users they reference (`GET /api/game/room-objects`), on servers with
+    /// room objects over HTTP ([`Subsystem::RoomObjects`]). Flags are not included;
+    /// [`Self::watch`] follows a room live.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
-    /// [`Error::Net`] when the request fails.
-    pub async fn objects(
-        &self,
-        room: &str,
-        shard: Option<&str>,
-    ) -> Result<GameRoomObjectsResponse, Error> {
+    /// [`Error::Net`] when the request fails, with
+    /// [`Unsupported`](overseer_net::Error::Unsupported) on a server without room objects
+    /// (nothing is sent).
+    pub async fn objects(&self, room: &str, shard: Option<&str>) -> Result<RoomObjects, Error> {
         self.overseer.ensure_open()?;
         let shard = self.overseer.resolve_shard(shard);
-        Ok(self
+        let source = self
             .overseer
-            .client()
-            .room_objects(shard.as_deref(), room)
-            .await?)
+            .api()
+            .room_objects_source()
+            .ok_or(overseer_net::Error::Unsupported(Subsystem::RoomObjects))?;
+        Ok(source.room_objects(shard.as_deref(), room).await?)
     }
 
     /// The decoded terrain of `room`, fetched once per session and then served from the
@@ -86,11 +87,9 @@ impl Rooms {
     /// [`Overseer::shutdown`](crate::Overseer::shutdown) and [`Error::Net`] when the request
     /// fails.
     pub async fn status(&self, room: &str, shard: Option<&str>) -> Result<GameRoomStatus, Error> {
-        let request = endpoints::GameRoomStatus {
-            room: room.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        Ok(self.overseer.send(&request).await?.room)
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        Ok(api.room_status(shard.as_deref(), room).await?)
     }
 
     /// The room overview: the controller owner and a graph of every room statistic over
@@ -105,29 +104,29 @@ impl Rooms {
         interval: StatInterval,
         shard: Option<&str>,
     ) -> Result<GameRoomOverviewResponse, Error> {
-        let request = endpoints::GameRoomOverview {
-            room: room.to_owned(),
-            interval: Some(interval.minutes()),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        self.overseer.send(&request).await
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.user_api()?;
+        let overview = api.room_overview(shard.as_deref(), room, interval.minutes());
+        Ok(overview.await?)
     }
 
-    /// The decorations players activated in `room` (`GET /api/game/room-decorations`).
+    /// The decorations players activated in `room` (`GET /api/game/room-decorations`), on
+    /// servers with room decorations ([`Subsystem::RoomDecorations`]).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
-    /// [`Error::Net`] when the request fails.
+    /// [`Error::Net`] when the request fails, with
+    /// [`Unsupported`](overseer_net::Error::Unsupported) on a server without room decorations
+    /// (nothing is sent).
     pub async fn decorations(
         &self,
         room: &str,
         shard: Option<&str>,
     ) -> Result<Vec<GameRoomDecoration>, Error> {
-        let request = endpoints::GameRoomDecorations {
-            room: room.to_owned(),
-            shard: self.overseer.resolve_shard(shard),
-        };
-        Ok(self.overseer.send(&request).await?.decorations)
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
+        let api = self.overseer.api();
+        Ok(api.room_decorations(shard.as_deref(), room).await?)
     }
 }

@@ -27,8 +27,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use overseer_net::core::api::Terrain;
-use overseer_net::core::socket::types::RoomMap;
+use overseer_net::model::world::{RoomMap, Terrain};
 use overseer_net::rt::{self, Instant, Sleep};
 use tokio::sync::watch;
 

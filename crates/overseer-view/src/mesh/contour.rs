@@ -20,7 +20,7 @@
 //! the room repeat the border tile, which keeps cells over the room edge straight.
 
 use glam::{Vec2, Vec3};
-use overseer::core::api::{Terrain, Tile};
+use overseer::model::world::{Terrain, Tile};
 
 use super::{Mesh, TerrainVertex, WALL_HEIGHT, WALL_SIDE, WALL_TOP, linear};
 

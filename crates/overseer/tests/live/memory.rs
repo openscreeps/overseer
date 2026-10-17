@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use overseer::core::api::{ApiError, MemoryValue};
+use overseer::core::api::ApiError;
+use overseer::memory::MemoryValue;
 use overseer::{Error, Memory, Watch, net};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};

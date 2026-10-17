@@ -1,4 +1,5 @@
-//! The shared HTTP client: token, sign-in, rate limits and world discovery.
+//! The shared HTTP client: token, sign-in, rate limits and the discovery of the server's kind
+//! and world.
 
 mod budget;
 mod flows;
@@ -11,15 +12,17 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use http::HeaderValue;
-use overseer_core::api::{
-    self, ApiError, Auth, Endpoint, RateLimit, Reply, RequestError, Terrain, endpoints, types,
-};
+use overseer_core::api::{self, ApiError, Auth, Endpoint, RateLimit, Reply, RequestError};
+use overseer_core::model::account::Profile;
+use overseer_core::model::platform::{ConnectionInfo, Plugins, ServerKind, Subsystem};
+use overseer_core::model::world::Terrain;
 use overseer_core::{ServerUrl, Token};
 use reqwest_websocket::{Upgrade, WebSocket};
 
 pub use budget::{GLOBAL_RATE_LIMIT_WAIT, Priority, REQUEST_BUDGET, REQUEST_WINDOW};
 pub use rate_limit::{EndpointRateLimit, RateLimitPolicy};
 
+use crate::api::{AccountApi as _, Api, PasswordSignIn as _};
 use crate::rt::{Instant, SystemTime, UNIX_EPOCH, sleep};
 use crate::socket::{ReconnectPolicy, Socket};
 use crate::{Error, USER_AGENT, World};
@@ -56,6 +59,12 @@ struct Inner {
     credentials: Option<Credentials>,
     /// Serializes sign-ins, so concurrent rejections sign in once.
     sign_in: tokio::sync::Mutex<()>,
+    /// The server's kind, plugins and `GET /api/version`, once discovered.
+    connection: Mutex<Option<ConnectionInfo>>,
+    /// The kind [`ClientBuilder::server_kind`] forced, if any.
+    forced_kind: Option<ServerKind>,
+    /// The plugins [`ClientBuilder::plugins`] forced, if any.
+    forced_plugins: Option<Plugins>,
     world: Mutex<Option<World>>,
     default_shard: Option<String>,
     reconnect: ReconnectPolicy,
@@ -100,6 +109,8 @@ impl Client {
             rate_limit: Some(RateLimitPolicy::default()),
             user_agent: None,
             default_shard: None,
+            server_kind: None,
+            plugins: None,
         }
     }
 
@@ -258,10 +269,12 @@ impl Client {
         lock(&self.inner.budget).ready_at(priority, pending, Instant::now())
     }
 
-    /// The server's shards and capabilities and the signed-in user, fetched once and cached.
+    /// The server's connection info (kind, plugins, `GET /api/version`), subsystems and shards,
+    /// and the signed-in user, fetched once and cached.
     ///
-    /// Requests `GET /api/version`, and `GET /api/auth/me` when the client holds a token or
-    /// credentials. A cached anonymous world is fetched again once the client can authenticate.
+    /// Discovers the server ([`Self::api`]), and requests `GET /api/auth/me` when the client
+    /// holds a token or credentials. A cached anonymous world is fetched again once the client
+    /// can authenticate.
     ///
     /// # Errors
     ///
@@ -277,7 +290,7 @@ impl Client {
     /// # Errors
     ///
     /// Returns the errors of [`Self::send`].
-    pub async fn discover(&self) -> Result<(World, Option<types::AuthMeResponse>), Error> {
+    pub async fn discover(&self) -> Result<(World, Option<Profile>), Error> {
         let authenticated = self.inner.credentials.is_some() || self.token().is_some();
         if let Some(world) = lock(&self.inner.world)
             .as_ref()
@@ -285,22 +298,64 @@ impl Client {
         {
             return Ok((world.clone(), None));
         }
-        let version = self.send(&endpoints::PlatformVersion).await?.body;
+        let connection = self.connection(Clone::clone).await?;
         let me = if authenticated {
-            Some(self.send(&endpoints::AuthMe).await?.body)
+            Some(
+                Api::new(self.clone(), connection.kind, connection.plugins)
+                    .me()
+                    .await?,
+            )
         } else {
             None
         };
-        let mut world = World::new(
-            &self.inner.server,
-            version,
-            me.as_ref().map(|me| me.id.clone()),
-        );
+        let mut world = World::new(connection, me.as_ref().map(|me| me.id.clone()));
         if let Some(shard) = &self.inner.default_shard {
             world.set_shard(shard.clone());
         }
         *lock(&self.inner.world) = Some(world.clone());
         Ok((world, me))
+    }
+
+    /// The server's operations in Overseer's types, for the contract it speaks
+    /// ([`crate::api`]). The first call discovers the server without a token: official servers
+    /// by their address ([`ServerUrl::is_official`], also behind a proxy), every other server
+    /// by one `GET /api/version` (`OpenScreeps` lists the `openscreeps` feature, any other is a
+    /// community server, whose plugins are detected as well: screepsmod-admin-utils by its
+    /// feature, screepsmod-auth by `GET /api/authmod`). A kind forced with
+    /// [`ClientBuilder::server_kind`] (and, on a community server, plugins forced with
+    /// [`ClientBuilder::plugins`]) needs no request at all; [`Self::world`] still reads
+    /// `GET /api/version`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Http`] for transport failures and [`Error::Api`] for error replies and
+    /// a `GET /api/version` the contract does not describe.
+    pub async fn api(&self) -> Result<Api, Error> {
+        // A forced kind (with forced plugins on a community server) needs no request.
+        let forced = match (self.inner.forced_kind, self.inner.forced_plugins) {
+            (Some(ServerKind::Community), None) | (None, _) => None,
+            (Some(ServerKind::Community), Some(plugins)) => Some((ServerKind::Community, plugins)),
+            (Some(kind), _) => Some((kind, Plugins::NONE)),
+        };
+        if let Some((kind, plugins)) = forced {
+            return Ok(Api::new(self.clone(), kind, plugins));
+        }
+        let (kind, plugins) = self
+            .connection(|connection| (connection.kind, connection.plugins))
+            .await?;
+        Ok(Api::new(self.clone(), kind, plugins))
+    }
+
+    /// `read` of the discovered server (`api::discover`), discovered on first use.
+    async fn connection<T>(&self, read: impl FnOnce(&ConnectionInfo) -> T) -> Result<T, Error> {
+        if let Some(connection) = lock(&self.inner.connection).as_ref() {
+            return Ok(read(connection));
+        }
+        let connection =
+            crate::api::discover(self, self.inner.forced_kind, self.inner.forced_plugins).await?;
+        let value = read(&connection);
+        *lock(&self.inner.connection) = Some(connection);
+        Ok(value)
     }
 
     /// Opens a socket connection for the [`World`] ([`Self::world`]), authenticated with the
@@ -378,6 +433,10 @@ impl Client {
         }
     }
 
+    /// Signs in with `credentials` through the server's
+    /// [`PasswordSignIn`](crate::api::PasswordSignIn) unless the token already differs from
+    /// `rejected`. Discovers the server first when needed; a server without password sign-in
+    /// fails with [`Error::Unsupported`].
     async fn renew_token(
         &self,
         credentials: &Credentials,
@@ -389,17 +448,25 @@ impl Client {
         {
             return Ok(current);
         }
-        let sign_in = endpoints::AuthSignin {
-            body: types::AuthSigninRequest {
-                email: credentials.email.clone(),
-                password: credentials.password.clone(),
-                recaptcha: None,
-                steam_ticket: None,
-            },
-        };
-        let token = Token::new(self.execute(&sign_in).await.1?.body.token);
+        let api = self.api().await?;
+        let sign_in = api
+            .password_sign_in()
+            .ok_or(Error::Unsupported(Subsystem::PasswordSignIn))?;
+        let token = sign_in
+            .sign_in(&credentials.email, &credentials.password)
+            .await?;
         self.set_token(Some(token.clone()));
         Ok(token)
+    }
+
+    /// Sends `endpoint` like [`Self::send`] but never signs in: for the requests discovery and
+    /// the sign-in itself make, which take no token. Retries HTTP 429 per the
+    /// [`RateLimitPolicy`].
+    pub(crate) async fn send_without_sign_in<E: Endpoint + Sync>(
+        &self,
+        endpoint: &E,
+    ) -> Result<Reply<E::Response>, Error> {
+        self.execute(endpoint).await.1
     }
 
     /// The shard a request names: `shard`, else the [`World`]'s default shard; `None` on
@@ -515,6 +582,8 @@ pub struct ClientBuilder {
     rate_limit: Option<RateLimitPolicy>,
     user_agent: Option<String>,
     default_shard: Option<String>,
+    server_kind: Option<ServerKind>,
+    plugins: Option<Plugins>,
 }
 
 impl fmt::Debug for ClientBuilder {
@@ -524,6 +593,8 @@ impl fmt::Debug for ClientBuilder {
             .field("reconnect", &self.reconnect)
             .field("keep_alive", &self.keep_alive)
             .field("rate_limit", &self.rate_limit)
+            .field("server_kind", &self.server_kind)
+            .field("plugins", &self.plugins)
             .finish_non_exhaustive()
     }
 }
@@ -603,6 +674,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Forces the contract the server speaks instead of discovering it: discovery skips
+    /// telling the kind (by the address, or by the `openscreeps` feature) and reads
+    /// `GET /api/version` with `kind`'s contract for [`World::version`]. The subsystems follow
+    /// from the forced kind (and, on a community server, its plugins: detected unless
+    /// [`Self::plugins`] forces them too). For servers discovery misjudges, or to talk to one
+    /// with another contract it is compatible with; a wrong kind makes requests fail.
+    pub const fn server_kind(mut self, kind: ServerKind) -> Self {
+        self.server_kind = Some(kind);
+        self
+    }
+
+    /// Forces the plugins a community server runs instead of detecting them (no
+    /// `GET /api/authmod`, and screepsmod-admin-utils' feature is not looked for). Ignored on
+    /// the other kinds, which run none.
+    pub const fn plugins(mut self, plugins: Plugins) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+
     /// Builds the client.
     ///
     /// # Errors
@@ -643,6 +733,9 @@ impl ClientBuilder {
                 rotated: AtomicBool::new(false),
                 credentials: self.credentials,
                 sign_in: tokio::sync::Mutex::new(()),
+                connection: Mutex::new(None),
+                forced_kind: self.server_kind,
+                forced_plugins: self.plugins,
                 world: Mutex::new(None),
                 default_shard: self.default_shard,
                 reconnect: self.reconnect,

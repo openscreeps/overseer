@@ -2,11 +2,12 @@
 
 use std::collections::BTreeSet;
 
+use overseer_net::api::ConsoleApi as _;
 use overseer_net::core::Token;
-use overseer_net::core::api::Tile;
-use overseer_net::core::api::types::GameRoomObject;
-use overseer_net::core::socket::types::{UserConsole, UserCpuCpu};
 use overseer_net::core::socket::{Event, Payload};
+use overseer_net::model::console::ConsoleEvent;
+use overseer_net::model::socket::UserCpuCpu;
+use overseer_net::model::world::{GameRoomObject, Tile};
 use overseer_net::{Socket, SocketEvent};
 
 use crate::support::{self, Player};
@@ -46,7 +47,10 @@ async fn the_socket_authenticates_and_streams_user_channels() {
     assert_eq!(socket.world().user(), Some(user.as_str()));
 
     client
-        .console(None, "'live ' + (6 * 7)")
+        .api()
+        .await
+        .expect("the server's API")
+        .console("'live ' + (6 * 7)", None)
         .await
         .expect("the expression is queued");
     let mut seen = BTreeSet::new();
@@ -62,20 +66,17 @@ async fn the_socket_authenticates_and_streams_user_channels() {
                 );
                 seen.insert("cpu");
             }
-            Payload::Console(UserConsole::Output(output)) => {
-                if output
-                    .messages
-                    .log
-                    .iter()
-                    .any(|line| line.starts_with("tick "))
-                {
+            Payload::Console(ConsoleEvent::Output { log, results, .. }) => {
+                if log.iter().any(|line| line.starts_with("tick ")) {
                     seen.insert("log");
                 }
-                if output.messages.results.iter().any(|line| line == "live 42") {
+                if results.iter().any(|line| line == "live 42") {
                     seen.insert("result");
                 }
             }
-            Payload::Console(UserConsole::Error(error)) => panic!("the bot failed: {error:?}"),
+            Payload::Console(error @ ConsoleEvent::Error { .. }) => {
+                panic!("the bot failed: {error:?}")
+            }
             Payload::Memory(ticks) => {
                 if ticks.parse::<u64>().is_ok_and(|ticks| ticks > 0) {
                     seen.insert("memory");

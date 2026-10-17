@@ -2,13 +2,13 @@
 //! resources, badge, notification preferences) and the account edits of the profile page
 //! (e-mail and password).
 
-use overseer::core::api::types::{
-    UserBadgeColor, UserBadgeInput, UserBadgeInputParam, UserBadgeInputType, UserBadgeType,
-    UserEmailRequest, UserNotifyPrefs, UserPasswordSetRequest, UserRoomStatName, UserWorldStatus,
+use overseer::core::api::ApiError;
+use overseer::model::account::{
+    StartRoom, UserBadgeColor, UserBadgeInput, UserBadgeInputParam, UserBadgeInputType,
+    UserBadgeType, UserNotifyPrefs, UserRoomStatName, UserWorldStatus,
 };
-use overseer::core::api::{ApiError, endpoints};
-use overseer::core::socket::UserCpuCpu;
-use overseer::{Auth, Error, Overseer, ServerProfile, StartRoom, StatInterval, net};
+use overseer::model::socket::UserCpuCpu;
+use overseer::{Auth, Error, Overseer, ServerProfile, StatInterval, net};
 use tokio::time::timeout;
 
 use crate::support::{self, PATIENCE};
@@ -23,14 +23,16 @@ async fn sign_in(login: &str, password: &str) -> Result<Overseer, Error> {
         },
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     })
     .await
 }
 
 /// The `{error}` text of a logical failure the server reported with HTTP 200.
-fn server_error(error: &net::Error) -> &str {
+fn server_error(error: &Error) -> &str {
     match error {
-        net::Error::Api(ApiError::Server(message)) => message,
+        Error::Net(net::Error::Api(ApiError::Server(message))) => message,
         error => panic!("not a server error: {error:?}"),
     }
 }
@@ -53,7 +55,11 @@ async fn fresh_account_profile() {
     assert_eq!(overseer.user_id(), Some(me.id.as_str()));
     assert_eq!(me.username.as_deref(), Some(account.username.as_str()));
     assert_eq!(me.email.as_deref(), Some(account.email.as_str()));
-    assert_eq!(me.password, Some(true), "password sign-in is configured");
+    assert_eq!(
+        me.has_password,
+        Some(true),
+        "password sign-in is configured"
+    );
     assert_eq!(me.gcl, Some(0.0));
     assert!(me.cpu.is_some_and(|cpu| cpu > 0.0), "CPU {:?}", me.cpu);
     assert!(me.money.abs() < f64::EPSILON, "credits {}", me.money);
@@ -85,7 +91,7 @@ async fn fresh_account_profile() {
         .overview(StatInterval::default(), UserRoomStatName::EnergyHarvested)
         .await
         .expect("the overview");
-    assert_eq!(overview.rooms.unwrap_or_default(), Vec::<String>::new());
+    assert_eq!(overview.rooms, []);
 
     let svg = handle.badge_svg(false).await.expect("the badge");
     assert!(svg.contains("<svg"), "not an SVG document: {svg}");
@@ -125,7 +131,12 @@ async fn player_profile() {
         .overview(StatInterval::default(), UserRoomStatName::CreepsProduced)
         .await
         .expect("the overview");
-    assert_eq!(overview.rooms, Some(vec![player.room.clone()]));
+    let rooms: Vec<_> = overview
+        .rooms
+        .iter()
+        .map(|room| (room.shard.as_deref(), room.room.as_str()))
+        .collect();
+    assert_eq!(rooms, [(None, player.room.as_str())]);
 
     let mut cpu = handle.cpu().expect("the CPU watch");
     let used = timeout(PATIENCE, async {
@@ -194,9 +205,6 @@ async fn badge_round_trip() {
         })
         .await
         .expect_err("an invalid badge is rejected");
-    let Error::Net(rejected) = rejected else {
-        panic!("not a server error: {rejected:?}");
-    };
     assert_eq!(server_error(&rejected), "invalid params");
 }
 
@@ -260,14 +268,7 @@ async fn email_change_round_trip() {
     let overseer = account.connect().await;
     let set_email = |email: String| {
         let overseer = overseer.clone();
-        async move {
-            let body = UserEmailRequest { email };
-            overseer
-                .client()
-                .send(&endpoints::UserEmailSet { body })
-                .await
-                .map(drop)
-        }
+        async move { overseer.account().set_email(&email).await }
     };
 
     let changed = format!("{}@E2E.invalid", support::unique("Mail"));
@@ -301,16 +302,11 @@ async fn set_password(
     overseer: &Overseer,
     old_password: String,
     password: String,
-) -> Result<(), net::Error> {
-    let body = UserPasswordSetRequest {
-        old_password,
-        password,
-    };
+) -> Result<(), Error> {
     overseer
-        .client()
-        .send(&endpoints::UserPasswordSet { body })
+        .account()
+        .set_password(Some(&old_password), &password)
         .await
-        .map(drop)
 }
 
 /// The password changes: a new session signs in with the new password, the old one fails.
@@ -338,11 +334,10 @@ async fn password_change() {
     assert!(is_unauthorized(&old), "unexpected error: {old:?}");
 }
 
-/// A wrong current password is refused with the server's text and changes nothing.
-///
-/// Not run on `community` (see `COMMUNITY_SKIPPED` in `xtask/src/e2e.rs`): screepsmod-auth
-/// 2.10.1 answers it with HTTP 401, then stores an undefined password and replies again, which
-/// ends the server's backend (`lib/backend.js`, `POST /api/user/password`,
+/// A wrong current password is refused alike on every server and changes nothing. On
+/// `community` Overseer checks it before sending the change: screepsmod-auth 2.10.1 would
+/// answer it with HTTP 401, then store an undefined password and reply again, which ends the
+/// server's backend (`lib/backend.js`, `POST /api/user/password`,
 /// <https://unpkg.com/screepsmod-auth@2.10.1/lib/backend.js>).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live private server: cargo xtask e2e"]
@@ -356,8 +351,16 @@ async fn wrong_current_password_is_refused() {
     )
     .await
     .expect_err("a wrong current password is refused");
-    assert_eq!(server_error(&wrong), "invalid password");
+    assert!(
+        matches!(wrong, Error::Net(net::Error::WrongPassword)),
+        "unexpected error: {wrong:?}"
+    );
     sign_in(&account.username, &account.password)
         .await
         .expect("the password is unchanged");
+    overseer
+        .account()
+        .me()
+        .await
+        .expect("the session and the server are still up");
 }

@@ -8,8 +8,9 @@ use base64::engine::general_purpose::STANDARD;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::Overseer;
-use overseer::core::api::{endpoints, types};
-use overseer::core::socket::{UserCpu, UserCpuCpu};
+use overseer::model::account::{Profile, UserNotifyPrefs, UserWorldStatus};
+use overseer::model::platform::Subsystem;
+use overseer::model::socket::{UserCpu, UserCpuCpu};
 
 use crate::levels::{self, LevelProgress};
 use crate::register::{confirm_error, email_error, password_error};
@@ -100,7 +101,7 @@ pub fn Profile() -> impl IntoView {
         .into_any();
     };
     let overseer = session.overseer;
-    let me = RwSignal::new(None::<Result<Arc<types::AuthMeResponse>, String>>);
+    let me = RwSignal::new(None::<Result<Arc<Profile>, String>>);
     let reload = {
         let overseer = overseer.clone();
         move |fresh: bool| {
@@ -118,13 +119,16 @@ pub fn Profile() -> impl IntoView {
     };
     reload(false);
     let reload = StoredValue::new_local(reload);
+    // Password changes through the API, where the server has password accounts (screeps.com
+    // changes them on its website).
+    let password_accounts = overseer.world().supports(Subsystem::PasswordAccounts);
     view! {
         <div class=style::PAGE>
             <Summary overseer=overseer.clone() me />
             <div class="grid grid-cols-[repeat(auto-fit,minmax(17rem,1fr))] items-start gap-4">
                 <NotifyPrefs overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
                 <Email overseer=overseer.clone() me reload=Callback::new(move |()| reload.with_value(|reload| reload(true))) />
-                <Password overseer me />
+                {password_accounts.then(|| view! { <Password overseer me /> })}
             </div>
         </div>
     }
@@ -135,7 +139,7 @@ pub fn Profile() -> impl IntoView {
 #[component]
 fn Summary(
     overseer: Overseer,
-    me: RwSignal<Option<Result<Arc<types::AuthMeResponse>, String>>>,
+    me: RwSignal<Option<Result<Arc<Profile>, String>>>,
 ) -> impl IntoView {
     let state = AppState::expect();
     let badge = RwSignal::new(None::<String>);
@@ -398,11 +402,11 @@ fn cpu_text(cpu: &UserCpu) -> String {
 }
 
 /// How the world status reads.
-const fn world_status_text(status: types::UserWorldStatus) -> &'static str {
+const fn world_status_text(status: UserWorldStatus) -> &'static str {
     match status {
-        types::UserWorldStatus::Normal => "Playing",
-        types::UserWorldStatus::Lost => "Lost every spawn",
-        types::UserWorldStatus::Empty => "Not in the world (place a spawn)",
+        UserWorldStatus::Normal => "Playing",
+        UserWorldStatus::Lost => "Lost every spawn",
+        UserWorldStatus::Empty => "Not in the world (place a spawn)",
     }
 }
 
@@ -410,7 +414,7 @@ const fn world_status_text(status: types::UserWorldStatus) -> &'static str {
 #[component]
 fn NotifyPrefs(
     overseer: Overseer,
-    me: RwSignal<Option<Result<Arc<types::AuthMeResponse>, String>>>,
+    me: RwSignal<Option<Result<Arc<Profile>, String>>>,
     reload: Callback<()>,
 ) -> impl IntoView {
     let enabled = RwSignal::new(true);
@@ -424,7 +428,7 @@ fn NotifyPrefs(
     // Fill the form from the profile whenever it (re)loads.
     Effect::new(move |_| {
         if let Some(Ok(me)) = me.get() {
-            let prefs = me.notify_prefs.clone().unwrap_or_default();
+            let prefs = &me.notify_prefs;
             enabled.set(!prefs.disabled.unwrap_or(false));
             messages.set(!prefs.disabled_on_messages.unwrap_or(false));
             online.set(prefs.send_online.unwrap_or(false));
@@ -439,7 +443,7 @@ fn NotifyPrefs(
     });
     let submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
-        let prefs = types::UserNotifyPrefs {
+        let prefs = UserNotifyPrefs {
             disabled: Some(!enabled.get_untracked()),
             disabled_on_messages: Some(!messages.get_untracked()),
             send_online: Some(online.get_untracked()),
@@ -522,7 +526,7 @@ fn NotifyPrefs(
 #[component]
 fn Email(
     overseer: Overseer,
-    me: RwSignal<Option<Result<Arc<types::AuthMeResponse>, String>>>,
+    me: RwSignal<Option<Result<Arc<Profile>, String>>>,
     reload: Callback<()>,
 ) -> impl IntoView {
     let email = RwSignal::new(String::new());
@@ -559,18 +563,14 @@ fn Email(
         error.set(None);
         saved.set(None);
         spawn_local(async move {
-            let body = types::UserEmailRequest { email: address };
-            let result = overseer
-                .client()
-                .send(&endpoints::UserEmailSet { body })
-                .await;
+            let result = overseer.account().set_email(&address).await;
             busy.set(false);
             match result {
-                Ok(_) => {
+                Ok(()) => {
                     saved.set(Some("E-mail address saved.".to_owned()));
                     reload.run(());
                 }
-                Err(failure) => error.set(Some(session::message(&failure))),
+                Err(failure) => error.set(Some(session::error_message(&failure))),
             }
         });
     };
@@ -593,7 +593,7 @@ fn Email(
 #[component]
 fn Password(
     overseer: Overseer,
-    me: RwSignal<Option<Result<Arc<types::AuthMeResponse>, String>>>,
+    me: RwSignal<Option<Result<Arc<Profile>, String>>>,
 ) -> impl IntoView {
     let state = AppState::expect();
     let old = RwSignal::new(String::new());
@@ -606,7 +606,7 @@ fn Password(
     let has_password = move || {
         me.get()
             .and_then(Result::ok)
-            .is_none_or(|me| me.password.unwrap_or(true))
+            .is_none_or(|me| me.has_password.unwrap_or(true))
     };
     let new_error = Signal::derive(move || {
         (!new.with(String::is_empty))
@@ -629,28 +629,31 @@ fn Password(
             error.set(Some(rule.to_owned()));
             return;
         }
-        let body = types::UserPasswordSetRequest {
-            old_password: old.get_untracked(),
-            password: password.clone(),
-        };
+        // Accounts without a password yet have no current one to send.
+        let old_password = me
+            .get_untracked()
+            .and_then(Result::ok)
+            .is_none_or(|me| me.has_password.unwrap_or(true))
+            .then(|| old.get_untracked());
         let overseer = overseer.clone();
-        // Private servers revoke every session of the account: sign in again with the new
-        // password under the account's name.
+        // Servers with password accounts may revoke every session of the account: sign in
+        // again with the new password under the account's name, where password sign-in is
+        // offered.
         let renew_as = state
             .session_server()
-            .filter(|server| !server.kind.uses_screeps_accounts())
+            .filter(|_| overseer.world().supports(Subsystem::PasswordSignIn))
             .and_then(|server| server.user.and_then(|user| user.username).or(server.login));
         busy.set(true);
         error.set(None);
         saved.set(None);
         spawn_local(async move {
             let result = overseer
-                .client()
-                .send(&endpoints::UserPasswordSet { body })
+                .account()
+                .set_password(old_password.as_deref(), &password)
                 .await;
             busy.set(false);
             match result {
-                Ok(_) => {
+                Ok(()) => {
                     old.set(String::new());
                     new.set(String::new());
                     confirm.set(String::new());
@@ -663,7 +666,7 @@ fn Password(
                         ));
                     }
                 }
-                Err(failure) => error.set(Some(session::message(&failure))),
+                Err(failure) => error.set(Some(session::error_message(&failure))),
             }
         });
     };

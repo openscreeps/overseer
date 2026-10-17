@@ -11,8 +11,8 @@ use std::ops::Range;
 
 use glam::Vec2;
 use overseer::RoomSnapshot;
-use overseer::core::api::Terrain;
 use overseer::map::{RoomCoord, RoomMap, RoomRect, RoomStat};
+use overseer::model::world::Terrain;
 
 pub use cells::Cells;
 pub use minimap::{Minimaps, POINTS};

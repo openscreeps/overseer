@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use overseer_net::core::api::types::GameMapStatsResponse;
-use overseer_net::core::api::{ApiError, RateLimit, endpoints};
+use overseer_net::api::WorldOperation;
+use overseer_net::core::api::{ApiError, RateLimit};
+use overseer_net::model::world::MapStats;
 use overseer_net::rt::{BoxFuture, Instant, SystemTime, UNIX_EPOCH};
 use overseer_net::{Client, Error as NetError};
 
@@ -96,7 +97,7 @@ impl Known {
 struct Fetch {
     rooms: Vec<RoomCoord>,
     sent_at: u64,
-    request: BoxFuture<'static, Result<GameMapStatsResponse, Error>>,
+    request: BoxFuture<'static, Result<MapStats, Error>>,
 }
 
 /// The rooms due a request as of the latest look at every room of the world (see
@@ -291,7 +292,7 @@ impl Stats {
         if self.paused.is_none() {
             return false;
         }
-        client.forget_rate_limit::<endpoints::GameMapStats>();
+        WorldOperation::MapStats.forget_rate_limit(client);
         self.not_before = None;
         self.paced = None;
         self.seen = None;
@@ -335,7 +336,7 @@ impl Stats {
     /// counted as spent (a response's count may already include requests whose responses
     /// are still on their way: it errs on the side of the budget).
     fn window(&self, client: &Client) -> Option<(RateLimit, u32)> {
-        let limit = client.rate_limit::<endpoints::GameMapStats>()?;
+        let limit = WorldOperation::MapStats.rate_limit(client)?;
         let in_flight = u32::try_from(self.fetches.len()).unwrap_or(u32::MAX);
         Some((limit, limit.remaining.saturating_sub(in_flight)))
     }
@@ -574,7 +575,7 @@ impl Stats {
     fn record(
         &mut self,
         rooms: &[RoomCoord],
-        response: &GameMapStatsResponse,
+        response: &MapStats,
         sent_at: u64,
         now: Instant,
         events: &mut VecDeque<WorldEvent>,

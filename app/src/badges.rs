@@ -22,8 +22,8 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use overseer::core::api::types::UserBadge;
 use overseer::map::{RoomCoord, RoomRect, RoomStat};
+use overseer::model::account::UserBadge;
 
 /// Side of a rasterized badge, in pixels: the viewer's badge size (no resampling there).
 pub const BADGE_SIZE: u32 = overseer_view::BADGE_SIZE;
@@ -311,7 +311,7 @@ mod loader {
 /// A badge for tests: shape `shape`, otherwise fixed.
 #[cfg(test)]
 pub fn test_badge(shape: i64) -> UserBadge {
-    use overseer::core::api::types::{UserBadgeColor, UserBadgeType};
+    use overseer::model::account::{UserBadgeColor, UserBadgeType};
     UserBadge {
         color1: UserBadgeColor::String("#ff0000".to_owned()),
         color2: UserBadgeColor::String("#00ff00".to_owned()),

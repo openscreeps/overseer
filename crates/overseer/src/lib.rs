@@ -22,6 +22,8 @@
 //!     auth: Auth::Credentials { email: "player@example.com".into(), password: "secret".into() },
 //!     server_password: None,
 //!     default_shard: None,
+//!     server_kind: None,
+//!     plugins: None,
 //! };
 //! let overseer = Overseer::connect(profile).await?;
 //! let mut tokens = overseer.tokens();
@@ -36,6 +38,18 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Servers and subsystems
+//!
+//! Every server is used through the same operations, whether it is screeps.com, an
+//! `OpenScreeps` server or a community server with plugins. What differs is which
+//! [`Subsystem`](model::platform::Subsystem)s it offers (password sign-in, password accounts,
+//! API tokens, lifting rate limits, room objects, room history, room decorations, …): ask
+//! [`net::World::supports`] through [`Overseer::world`] before offering a feature, and expect
+//! [`net::Error::Unsupported`] (sent without a request) from an operation of an absent one.
+//! The server's kind and plugins are connection info for display and diagnostics
+//! ([`net::World::connection`]); [`ServerProfile::server_kind`] and
+//! [`ServerProfile::plugins`] force them instead of discovering them.
 //!
 //! # Session lifecycle
 //!
@@ -145,8 +159,9 @@ pub mod users;
 
 pub use overseer_net as net;
 pub use overseer_net::core;
+pub use overseer_net::model;
 
-pub use account::{Account, PowerCreeps, StartRoom};
+pub use account::{Account, PowerCreeps};
 pub use code::{Code, CodeTarget, Modules};
 pub use console::{Console, ConsoleEntry, ConsoleKind};
 pub use error::Error;
@@ -163,7 +178,7 @@ pub use users::Users;
 
 /// The names an app uses every day: `use overseer::prelude::*;`.
 ///
-/// Includes [`overseer_net::prelude`] (typed endpoints and types, socket names, the client);
+/// Includes [`overseer_net::prelude`] (the domain API traits, socket names, the client);
 /// [`Error`] is this crate's error.
 pub mod prelude {
     pub use overseer_net::prelude::*;

@@ -1,8 +1,7 @@
 //! The overview of one room on the world map, from `owner0` map statistics or a live room.
 
-use overseer_net::core::api::types::{
-    GameMapStatsRoom, GamePublicUsers, GameRoomObject, UserBadge,
-};
+use overseer_net::model::account::UserBadge;
+use overseer_net::model::world::{GamePublicUsers, GameRoomObject, MapStatsRoom};
 
 use crate::RoomSnapshot;
 
@@ -92,7 +91,7 @@ impl RoomStat {
 
     /// The overview of `room` at `now` (milliseconds since the Unix epoch, also its
     /// [`Self::fetched_at`]), naming users and their badges from the response's `users`.
-    pub(crate) fn new(room: &GameMapStatsRoom, users: &GamePublicUsers, now: u64) -> Self {
+    pub(crate) fn new(room: &MapStatsRoom, users: &GamePublicUsers, now: u64) -> Self {
         let (status, status_until) = status(room, now);
         let username = |id: &str| users.get(id).and_then(|user| user.username.clone());
         let badge = |id: &str| users.get(id).and_then(|user| user.badge.clone());
@@ -119,14 +118,14 @@ impl RoomStat {
                 Err(_) => {}
             }
         }
-        let mineral = room.minerals0.as_ref();
+        let mineral = room.mineral.as_ref();
         Self {
             status,
             status_until,
             owner,
             reservation,
             safe_mode: room.safe_mode == Some(true),
-            mineral: mineral.and_then(|mineral| mineral.r#type.clone()),
+            mineral: mineral.and_then(|mineral| mineral.kind.clone()),
             mineral_density: mineral
                 .and_then(|mineral| mineral.density)
                 .and_then(|density| u8::try_from(density).ok()),
@@ -210,7 +209,7 @@ impl RoomStat {
 }
 
 /// The status at `now` in the engine's order: novice, respawn, not yet open, out of borders.
-fn status(room: &GameMapStatsRoom, now: u64) -> (RoomStatus, Option<u64>) {
+fn status(room: &MapStatsRoom, now: u64) -> (RoomStatus, Option<u64>) {
     let future = |time: Option<f64>| time.and_then(millis).filter(|&time| time > now);
     if let Some(until) = future(room.novice) {
         (RoomStatus::Novice, Some(until))
@@ -240,9 +239,9 @@ fn millis(time: f64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use overseer_net::core::api::types::{
-        GameMapStatsResponse, UserBadgeColor, UserBadgeCustomPaths, UserBadgeType,
-    };
+    use overseer_net::core::api::official::types::GameMapStatsResponse;
+    use overseer_net::model::account::{UserBadgeColor, UserBadgeCustomPaths, UserBadgeType};
+    use overseer_net::model::world::MapStats;
 
     use super::{RoomStat, RoomStatus};
 
@@ -250,6 +249,7 @@ mod tests {
 
     fn stat(room: &str, response: &str) -> RoomStat {
         let response: GameMapStatsResponse = serde_json::from_str(response).unwrap();
+        let response = MapStats::from(response);
         RoomStat::new(&response.stats[room], &response.users, NOW)
     }
 

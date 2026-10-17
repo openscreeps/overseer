@@ -46,6 +46,8 @@ pub async fn run(
         auth,
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     };
     let overseer = Overseer::connect(profile).await?;
     log(&format!(

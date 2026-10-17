@@ -1,17 +1,20 @@
-//! Replies shaped like real official and standalone server replies (invented values, no
-//! account data) decode through [`Session::response`] into the generated types.
+//! Replies shaped like real official and `OpenScreeps` server replies (invented values, no
+//! account data) decode through [`Session::response`] into the generated types of their
+//! contract.
 
 use ::http::Response;
 
-use super::endpoints::{
-    AuthMe, GameRoomObjects, GameRoomTerrain, GameTick, MarketMyOrders, UserMemoryGet,
-    UserOverview, UserRooms, UserWorldStartRoom, UserWorldStatus,
+use super::official::endpoints::{
+    AuthMe, GameRoomObjects, GameRoomTerrain, MarketMyOrders, UserOverview, UserRooms,
+    UserWorldStartRoom, UserWorldStatus,
 };
-use super::types::{
-    AuthSteamAccountOwnership, GameRoomObject, GameRoomTerrainResponse, GameTerrainTileType,
-    UserBadgeType, UserWorldStatus as WorldStatus,
+use super::official::types::{
+    GameRoomObject, GameRoomTerrainResponse, GameTerrainTileType, UserBadgeType,
+    UserWorldStatus as WorldStatus,
 };
-use super::{Endpoint, MemoryValue, Session, Tile};
+use super::openscreeps::endpoints as openscreeps;
+use super::{Endpoint, Session};
+use crate::model::world::{Terrain, Tile};
 use crate::{ServerUrl, Token};
 
 /// Decodes `body` as a 200 reply to `E`.
@@ -39,20 +42,14 @@ fn auth_me_reads_the_underscore_id_and_both_steam_shapes() {
         Some(UserBadgeType::Integer(21))
     ));
     let steam = official.steam.unwrap();
-    assert_eq!(
-        steam.ownership,
-        Some(AuthSteamAccountOwnership::List(vec![464_350]))
-    );
+    assert_eq!(steam.ownership, Some(vec![464_350]));
 
-    let standalone = decode::<AuthMe>(
+    let standalone = decode::<openscreeps::AuthMe>(
         r#"{"ok":1,"_id":"u1","username":"Player","cpu":100,"gcl":0,"money":0,
             "powerExperimentations":0,"steam":{"id":"76561190000000000","ownership":true,
             "steamProfileLinkHidden":false}}"#,
     );
-    assert_eq!(
-        standalone.steam.unwrap().ownership,
-        Some(AuthSteamAccountOwnership::Bool(true))
-    );
+    assert_eq!(standalone.steam.unwrap().ownership, Some(true));
 }
 
 #[test]
@@ -106,7 +103,10 @@ fn room_objects_decode_into_the_member_of_their_type() {
     let GameRoomObject::Resource(resource_fields) = resource else {
         panic!("not a dropped resource: {resource:?}");
     };
-    assert_eq!((resource.kind(), resource_fields.amount()), ("energy", 17));
+    assert_eq!(
+        (resource.kind(), resource_fields.other.get("H").copied()),
+        ("energy", Some(17))
+    );
     let GameRoomObject::Other(other_fields) = other else {
         panic!("unknown types are not the fallback: {other:?}");
     };
@@ -133,7 +133,7 @@ fn room_terrain_has_an_encoded_and_a_tile_form() {
     let GameRoomTerrainResponse::Encoded(reply) = decode::<GameRoomTerrain>(&body) else {
         panic!("encoded terrain");
     };
-    let terrain = reply.terrain[0].decode().unwrap();
+    let terrain = Terrain::decode(&reply.terrain[0].terrain).unwrap();
     assert_eq!(terrain.get(0, 0), Some(Tile::Wall));
     assert_eq!(terrain.get(1, 1), Some(Tile::Swamp));
     assert_eq!(terrain.get(2, 2), Some(Tile::Plain));
@@ -148,13 +148,13 @@ fn room_terrain_has_an_encoded_and_a_tile_form() {
 }
 
 #[test]
-fn sharded_and_flat_replies_both_decode() {
+fn sharded_and_flat_replies_decode_into_their_contract() {
     let official = decode::<UserRooms>(
         r#"{"ok":1,"shards":{"shard0":["W1N1"],"shard3":[]},"reservations":{"shard0":[]}}"#,
     );
-    assert_eq!(official.shards.unwrap()["shard0"], ["W1N1"]);
-    let standalone = decode::<UserRooms>(r#"{"ok":1,"rooms":["W1N1","W2N2"]}"#);
-    assert_eq!(standalone.rooms.unwrap(), ["W1N1", "W2N2"]);
+    assert_eq!(official.shards["shard0"], ["W1N1"]);
+    let standalone = decode::<openscreeps::UserRooms>(r#"{"ok":1,"rooms":["W1N1","W2N2"]}"#);
+    assert_eq!(standalone.rooms, ["W1N1", "W2N2"]);
 
     let official = decode::<UserOverview>(
         r#"{"ok":1,"statsMax":1200,"totals":{"energyHarvested":5000},
@@ -162,22 +162,23 @@ fn sharded_and_flat_replies_both_decode() {
             "stats":{"W1N1":[{"value":10,"endTime":100}]}}}}"#,
     );
     assert_eq!(
-        official.shards.unwrap()["shard0"].rooms.as_deref(),
+        official.shards["shard0"].rooms.as_deref(),
         Some(&["W1N1".to_owned()][..])
     );
-    let standalone = decode::<UserOverview>(
+    let standalone = decode::<openscreeps::UserOverview>(
         r#"{"ok":1,"rooms":["W1N1"],"stats":{"W1N1":[{"value":10,"endTime":100}]},"statsMax":10,
             "totals":{"energyHarvested":10},"gametimes":[100]}"#,
     );
-    assert_eq!(standalone.stats.unwrap()["W1N1"][0].end_time, 100);
+    assert_eq!(standalone.stats["W1N1"][0].end_time, 100);
 
     let order = r#"{"_id":"o1","type":"sell","resourceType":"energy","roomName":"W1N1",
         "amount":1000,"remainingAmount":1000,"price":0.5,"active":true}"#;
     let official =
         decode::<MarketMyOrders>(&format!(r#"{{"ok":1,"shards":{{"shard0":[{order}]}}}}"#));
-    assert_eq!(official.shards.unwrap()["shard0"][0].remaining_amount, 1000);
-    let standalone = decode::<MarketMyOrders>(&format!(r#"{{"ok":1,"list":[{order}]}}"#));
-    assert_eq!(standalone.list.unwrap()[0].price, 0.5);
+    assert_eq!(official.shards["shard0"][0].remaining_amount, 1000);
+    let standalone =
+        decode::<openscreeps::MarketMyOrders>(&format!(r#"{{"ok":1,"list":[{order}]}}"#));
+    assert_eq!(standalone.list[0].price, 0.5);
 }
 
 #[test]
@@ -191,13 +192,7 @@ fn small_account_replies_decode() {
         ["shard3/W1N1"]
     );
     assert_eq!(
-        decode::<GameTick>(r#"{"ok":1,"tick":1003.5}"#).tick,
+        decode::<openscreeps::GameTick>(r#"{"ok":1,"tick":1003.5}"#).tick,
         Some(1003.5)
-    );
-    let memory = decode::<UserMemoryGet>(r#"{"ok":1,"data":"Incorrect memory path"}"#);
-    assert_eq!(memory.value().unwrap(), MemoryValue::IncorrectPath);
-    assert_eq!(
-        decode::<UserMemoryGet>(r#"{"ok":1}"#).value().unwrap(),
-        MemoryValue::Undefined
     );
 }

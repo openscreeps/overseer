@@ -7,9 +7,8 @@ use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 use overseer::RoomSnapshot;
-use overseer::core::api::Terrain;
-use overseer::core::api::types::GameRoomObject;
 use overseer::map::{RoomCoord, RoomMap, RoomOwner, RoomRect, RoomStat, RoomStatus};
+use overseer::model::world::{GameRoomObject, Terrain};
 use serde_json::{Value, json};
 
 use crate::camera::{rect_extent, room_centre};
@@ -1220,11 +1219,11 @@ fn terrains() -> [Terrain; 3] {
 }
 
 /// The code of a tile as `Terrain::packed` has it.
-fn code(tile: overseer::core::api::Tile) -> u8 {
+fn code(tile: overseer::model::world::Tile) -> u8 {
     match tile {
-        overseer::core::api::Tile::Plain => 0,
-        overseer::core::api::Tile::Wall => 1,
-        overseer::core::api::Tile::Swamp => 2,
+        overseer::model::world::Tile::Plain => 0,
+        overseer::model::world::Tile::Wall => 1,
+        overseer::model::world::Tile::Swamp => 2,
     }
 }
 

@@ -9,13 +9,16 @@ use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, SeqAccess, Visi
 
 use super::channel::Channel;
 use super::room::RoomState;
-use super::types::{
-    MapVisualItem, RoomEvent, RoomMap, UserActiveBranch, UserCode, UserConsole, UserCpu,
-    UserMessage, UserMessageEvent, UserResources,
-};
 use super::visual;
+use super::{community, official, openscreeps};
 use crate::Token;
 use crate::gz::{self, GzError};
+use crate::model::code::{ActiveBranchChange, CodeChange};
+use crate::model::console::ConsoleEvent;
+use crate::model::messages::MessageUpdate;
+use crate::model::platform::ServerKind;
+use crate::model::socket::{RoomEvent, UserCpu, UserResources};
+use crate::model::world::{MapVisualItem, RoomMap};
 
 /// Something the server sent, decoded by [`SocketSession::handle_frame`].
 #[derive(Clone, Debug, PartialEq)]
@@ -74,18 +77,18 @@ pub enum Payload {
     /// `user:<user>/cpu`.
     Cpu(UserCpu),
     /// `user:<user>/console`.
-    Console(UserConsole),
+    Console(ConsoleEvent),
     /// `user:<user>/memory/…`: the JavaScript string form of the value (`undefined` when
     /// absent, `[object Object]` for objects, `Incorrect memory path`).
     Memory(String),
     /// `user:<user>/resources`.
     Resources(UserResources),
     /// `user:<user>/code`.
-    Code(UserCode),
+    Code(CodeChange),
     /// `user:<user>/set-active-branch`.
-    ActiveBranch(UserActiveBranch),
+    ActiveBranch(ActiveBranchChange),
     /// `user:<user>/newMessage` and `user:<user>/message:<respondent>`.
-    Message(UserMessage),
+    Message(MessageUpdate),
 }
 
 /// Authentication state of the current connection.
@@ -149,8 +152,12 @@ struct Subscription {
 /// received text frame to [`handle_frame`](Self::handle_frame) and calls
 /// [`reconnect`](Self::reconnect) when it opens a new transport. Desired subscriptions survive
 /// reconnects; the session resubscribes once the new connection is authenticated.
+///
+/// Channel events are decoded with the socket contract of the server's [`ServerKind`] and
+/// converted into the [domain types](crate::model::socket).
 #[derive(Debug)]
 pub struct SocketSession {
+    kind: ServerKind,
     state: SessionState,
     token: Option<Token>,
     outgoing: VecDeque<Outgoing>,
@@ -162,12 +169,14 @@ pub struct SocketSession {
 }
 
 impl SocketSession {
-    /// New connection. Queues `gzip on`, then `auth <token>` when a token is given (state
+    /// New connection to a server speaking `kind`'s contract. Queues `gzip on`, then
+    /// `auth <token>` when a token is given (state
     /// [`Authenticating`](SessionState::Authenticating)); without a token the session is
     /// [`Ready`](SessionState::Ready) (anonymous) immediately.
     #[must_use]
-    pub fn new(token: Option<Token>) -> Self {
+    pub fn new(token: Option<Token>, kind: ServerKind) -> Self {
         let mut session = Self {
+            kind,
             state: SessionState::Ready,
             token,
             outgoing: VecDeque::new(),
@@ -177,6 +186,12 @@ impl SocketSession {
         };
         session.connect();
         session
+    }
+
+    /// The contract channel events are decoded with.
+    #[must_use]
+    pub const fn kind(&self) -> ServerKind {
+        self.kind
     }
 
     /// Authentication state of the current connection.
@@ -379,6 +394,7 @@ impl SocketSession {
         let mut failed = None;
         let mut deserializer = serde_json::Deserializer::from_str(text);
         let received = FrameSeed {
+            kind: self.kind,
             names: &self.names,
             subscriptions: &self.subscriptions,
             failed: &mut failed,
@@ -439,6 +455,7 @@ enum Received {
 
 /// Decodes `[channel, data]`, choosing the data type by the subscribed channel.
 struct FrameSeed<'s> {
+    kind: ServerKind,
     names: &'s HashMap<String, u64>,
     subscriptions: &'s BTreeMap<u64, Subscription>,
     /// Set when the data of a subscribed channel fails to decode.
@@ -481,7 +498,10 @@ impl<'de> Visitor<'de> for FrameSeed<'_> {
             seq.next_element::<String>()
                 .map(|message| message.map(Data::Error))
         } else {
-            seq.next_element_seed(DataSeed(channel))
+            seq.next_element_seed(DataSeed {
+                channel,
+                kind: self.kind,
+            })
         };
         let data = match data {
             Ok(Some(data)) => data,
@@ -542,35 +562,61 @@ enum Data {
     Error(String),
 }
 
-/// Decodes the data of one subscribed channel's event.
-struct DataSeed<'c>(&'c Channel);
+/// Decodes the data of one subscribed channel's event with the contract of `kind`.
+struct DataSeed<'c> {
+    channel: &'c Channel,
+    kind: ServerKind,
+}
+
+/// Deserializes `$type` of the socket contract of `$kind` from `$deserializer` and converts it
+/// into the domain type: for the payloads whose shape differs between contracts.
+macro_rules! by_contract {
+    ($kind:expr, $deserializer:expr, $type:ident) => {
+        match $kind {
+            ServerKind::Official => official::types::$type::deserialize($deserializer)?.into(),
+            ServerKind::OpenScreeps => {
+                openscreeps::types::$type::deserialize($deserializer)?.into()
+            }
+            ServerKind::Community => community::types::$type::deserialize($deserializer)?.into(),
+        }
+    };
+}
 
 impl<'de> DeserializeSeed<'de> for DataSeed<'_> {
     type Value = Data;
 
+    /// Payloads every contract defines identically are decoded with the official type, which
+    /// the other contracts re-export.
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Data, D::Error> {
-        let payload = match self.0 {
+        let payload = match self.channel {
             Channel::ServerMessage => Payload::ServerMessage(String::deserialize(deserializer)?),
-            Channel::Room { .. } => return RoomEvent::deserialize(deserializer).map(Data::Room),
+            Channel::Room { .. } => {
+                let event: RoomEvent = by_contract!(self.kind, deserializer, RoomEvent);
+                return Ok(Data::Room(event));
+            }
             Channel::RoomMap { .. } => Payload::RoomMap(RoomMap::deserialize(deserializer)?),
             Channel::MapVisual { .. } => {
                 let text = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
-                let items = visual::items(&text).collect::<Result<_, _>>();
+                let items = visual::items::<MapVisualItem>(&text).collect::<Result<_, _>>();
                 Payload::MapVisual(items.map_err(de::Error::custom)?)
             }
             Channel::Cpu { .. } => Payload::Cpu(UserCpu::deserialize(deserializer)?),
-            Channel::Console { .. } => Payload::Console(UserConsole::deserialize(deserializer)?),
+            Channel::Console { .. } => {
+                Payload::Console(by_contract!(self.kind, deserializer, UserConsole))
+            }
             Channel::Memory { .. } => Payload::Memory(String::deserialize(deserializer)?),
             Channel::Resources { .. } => {
                 Payload::Resources(UserResources::deserialize(deserializer)?)
             }
-            Channel::Code { .. } => Payload::Code(UserCode::deserialize(deserializer)?),
-            Channel::ActiveBranch { .. } => {
-                Payload::ActiveBranch(UserActiveBranch::deserialize(deserializer)?)
+            Channel::Code { .. } => {
+                Payload::Code(official::types::UserCode::deserialize(deserializer)?.into())
             }
-            Channel::NewMessage { .. } | Channel::Conversation { .. } => {
-                Payload::Message(UserMessageEvent::deserialize(deserializer)?.message)
-            }
+            Channel::ActiveBranch { .. } => Payload::ActiveBranch(
+                official::types::UserActiveBranch::deserialize(deserializer)?.into(),
+            ),
+            Channel::NewMessage { .. } | Channel::Conversation { .. } => Payload::Message(
+                official::types::UserMessageEvent::deserialize(deserializer)?.message,
+            ),
         };
         Ok(Data::Payload(payload))
     }
@@ -582,8 +628,14 @@ mod tests {
 
     use super::{Event, Payload, SessionState, SocketError, SocketSession};
     use crate::Token;
+    use crate::model::console::ConsoleEvent;
+    use crate::model::platform::ServerKind;
+    use crate::model::socket::{UserCpu, UserCpuCpu};
+    use crate::model::world::MapVisualItem;
     use crate::socket::Channel;
-    use crate::socket::types::{MapVisualItem, UserConsole, UserCpu, UserCpuCpu};
+
+    /// The contract of the tests that do not depend on it.
+    const KIND: ServerKind = ServerKind::Official;
 
     const USER: &str = "5a1b";
 
@@ -603,7 +655,11 @@ mod tests {
     }
 
     fn signed_in() -> SocketSession {
-        let mut session = SocketSession::new(Some(Token::new("tok-1")));
+        signed_in_to(KIND)
+    }
+
+    fn signed_in_to(kind: ServerKind) -> SocketSession {
+        let mut session = SocketSession::new(Some(Token::new("tok-1")), kind);
         session.handle_frame("auth ok tok-1").unwrap();
         drain(&mut session);
         session
@@ -611,7 +667,7 @@ mod tests {
 
     #[test]
     fn subscriptions_wait_for_auth_ok_and_adopt_the_rotated_token() {
-        let mut session = SocketSession::new(Some(Token::new("tok-1")));
+        let mut session = SocketSession::new(Some(Token::new("tok-1")), KIND);
         assert_eq!(session.state(), SessionState::Authenticating);
         session.subscribe(cpu());
         session.subscribe(room("W8N3"));
@@ -639,7 +695,7 @@ mod tests {
 
     #[test]
     fn anonymous_sessions_are_ready_at_once() {
-        let mut session = SocketSession::new(None);
+        let mut session = SocketSession::new(None, KIND);
         assert_eq!(session.state(), SessionState::Ready);
         session.subscribe(Channel::ServerMessage);
         assert_eq!(drain(&mut session), ["gzip on", "subscribe server-message"]);
@@ -647,7 +703,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_sends_only_what_was_subscribed() {
-        let mut session = SocketSession::new(Some(Token::new("tok-1")));
+        let mut session = SocketSession::new(Some(Token::new("tok-1")), KIND);
         session.subscribe(cpu());
         session.unsubscribe(&cpu());
         session.unsubscribe(&room("W1N1"));
@@ -665,7 +721,7 @@ mod tests {
 
     #[test]
     fn auth_failed_sends_nothing_until_authenticated_again() {
-        let mut session = SocketSession::new(Some(Token::new("bad")));
+        let mut session = SocketSession::new(Some(Token::new("bad")), KIND);
         session.subscribe(cpu());
         drain(&mut session);
         assert_eq!(
@@ -724,7 +780,7 @@ mod tests {
 
     #[test]
     fn greeting_and_status_lines() {
-        let mut session = SocketSession::new(None);
+        let mut session = SocketSession::new(None, KIND);
         let mut handle = |frame| session.handle_frame(frame).unwrap();
         assert_eq!(
             handle("time 1792035138367"),
@@ -742,7 +798,7 @@ mod tests {
 
     #[test]
     fn unknown_lines_fail_without_touching_state() {
-        let mut session = SocketSession::new(Some(Token::new("tok-1")));
+        let mut session = SocketSession::new(Some(Token::new("tok-1")), KIND);
         session.subscribe(cpu());
         for line in ["hello", "time soon", "auth okay", "auth ok two tokens"] {
             let error = session.handle_frame(line).unwrap_err();
@@ -789,18 +845,72 @@ mod tests {
         let frame = "gz:eJwlxbEKgCAUBdB/ubMQES3vV8TB7KGRJXh1Ev+9obMci06tsvv1WEJ5WbLCDDxK+qiEDOQSIRbtCjecQVX23Aixbhow+XpC/jdM9wFogxtT";
         let Some(Event::Channel {
             channel: Channel::Console { user },
-            payload: Payload::Console(UserConsole::Output(output)),
+            payload: Payload::Console(console),
         }) = session.handle_frame(frame).unwrap()
         else {
-            panic!("not console output");
+            panic!("not a console event");
         };
         assert_eq!(user, USER);
-        assert_eq!(output.messages.log, ["tick"]);
-        assert_eq!(output.shard.as_deref(), Some("shard3"));
+        assert_eq!(
+            console,
+            ConsoleEvent::Output {
+                log: vec!["tick".to_owned()],
+                results: Vec::new(),
+                shard: Some("shard3".to_owned()),
+            }
+        );
         assert!(matches!(
             session.handle_frame("gz:AAAA"),
             Err(SocketError::Gz(_))
         ));
+    }
+
+    #[test]
+    fn payloads_decode_with_the_contract_of_the_server() {
+        let console = Channel::Console { user: USER.into() };
+        let room = Channel::Room {
+            shard: None,
+            room: "W1N1".into(),
+        };
+        // Console output names the shard on official servers only.
+        let output = r#"["user:5a1b/console",{"messages":{"log":[],"results":["1"]},"shard":"s"}]"#;
+        // Only the official contract reads `decorations`; this one does not match it.
+        let decorated = r#"["room:W1N1",{"objects":{},"decorations":[{"x":1}],"gameTime":5}]"#;
+        for kind in [
+            ServerKind::Official,
+            ServerKind::OpenScreeps,
+            ServerKind::Community,
+        ] {
+            let mut session = signed_in_to(kind);
+            assert_eq!(session.kind(), kind);
+            session.subscribe(console.clone());
+            session.subscribe(room.clone());
+            let official = kind == ServerKind::Official;
+            assert_eq!(
+                session.handle_frame(output).unwrap(),
+                Some(Event::Channel {
+                    channel: console.clone(),
+                    payload: Payload::Console(ConsoleEvent::Output {
+                        log: Vec::new(),
+                        results: vec!["1".to_owned()],
+                        shard: official.then(|| "s".to_owned()),
+                    }),
+                }),
+                "{kind:?}"
+            );
+            let decoded = session.handle_frame(decorated);
+            if official {
+                assert!(
+                    matches!(decoded, Err(SocketError::Payload { .. })),
+                    "{decoded:?}"
+                );
+            } else {
+                assert!(matches!(decoded, Ok(Some(_))), "{kind:?}: {decoded:?}");
+                let state = session.room(&room).unwrap();
+                assert_eq!(state.game_time(), Some(5));
+                assert_eq!(state.decorations(), []);
+            }
+        }
     }
 
     #[test]

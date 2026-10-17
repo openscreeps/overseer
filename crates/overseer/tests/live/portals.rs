@@ -8,11 +8,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use overseer::core::api::types::{
-    GameRoomObject, UserBadgeColor, UserBadgeInput, UserBadgeInputParam, UserBadgeInputType,
-    UserBadgeType,
-};
 use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent};
+use overseer::model::account::{
+    UserBadgeColor, UserBadgeInput, UserBadgeInputParam, UserBadgeInputType, UserBadgeType,
+};
+use overseer::model::world::GameRoomObject;
 use tokio::time::{sleep, timeout};
 
 use crate::support::{self, PATIENCE};

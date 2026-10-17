@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use overseer_core::api::types::GameRoomObject;
-use overseer_core::api::{Terrain, Tile};
-use overseer_core::socket::types::{RoomUser, RoomVisualItem};
+use overseer_core::model::world::{GameRoomObject, RoomUser, RoomVisualItem, Terrain, Tile};
 use overseer_core::socket::{Channel, Flag, FlagError, RoomState};
 
 use super::Socket;

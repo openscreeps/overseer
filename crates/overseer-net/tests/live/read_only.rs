@@ -3,10 +3,10 @@
 //! screeps.com (`cargo xtask e2e --target official`) and catch contract drift there.
 
 use overseer_net::SocketEvent;
-use overseer_net::core::api::Tile;
-use overseer_net::core::api::endpoints;
-use overseer_net::core::api::types::GameRoomObject;
+use overseer_net::api::{AccountApi as _, RoomObjectsSource as _};
 use overseer_net::core::socket::{Channel, Event, Payload};
+use overseer_net::model::platform::{Plugins, ServerKind, Subsystems};
+use overseer_net::model::world::{GameRoomObject, Tile};
 
 use crate::support;
 
@@ -19,6 +19,26 @@ async fn the_readers_user_and_the_world_decode() {
     let world = client.world().await.expect("the world and the user");
     let user = world.user().expect("an authenticated user");
     assert_eq!(world.is_sharded(), support::official());
+    // What each backend under test is detected as, and the subsystems that makes up.
+    let (kind, plugins) = if support::official() {
+        (ServerKind::Official, Plugins::NONE)
+    } else if support::community() {
+        // The stock server's room history is backend-local's default: none.
+        let both = Plugins {
+            screepsmod_auth: true,
+            screepsmod_admin_utils: true,
+            room_history: false,
+        };
+        (ServerKind::Community, both)
+    } else {
+        (ServerKind::OpenScreeps, Plugins::NONE)
+    };
+    assert_eq!(
+        (world.connection().kind, world.connection().plugins),
+        (kind, plugins)
+    );
+    assert!(!world.connection().forced);
+    assert_eq!(world.subsystems(), Subsystems::of(kind, plugins));
     if world.is_sharded() {
         let shard = world.shard().expect("a default shard");
         assert!(
@@ -30,7 +50,8 @@ async fn the_readers_user_and_the_world_decode() {
         assert_eq!(world.shard(), None);
     }
 
-    let me = client.send(&endpoints::AuthMe).await.expect("auth/me").body;
+    let api = client.api().await.expect("the server's operations");
+    let me = api.me().await.expect("auth/me");
     assert_eq!(me.id.as_str(), user);
     let username = me.username.as_deref().expect("a username");
     assert_ne!(username, "");
@@ -72,7 +93,10 @@ async fn the_start_room_terrain_and_objects_decode() {
         .collect();
     assert!(tiles.contains(&Tile::Wall), "a room has walls");
 
-    let snapshot = client
+    let api = client.api().await.expect("the server's API");
+    let snapshot = api
+        .room_objects_source()
+        .expect("room objects")
         .room_objects(shard.as_deref(), &room)
         .await
         .expect("the start room's objects decode");

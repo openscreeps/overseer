@@ -37,19 +37,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         auth,
         server_password: env("SCREEPS_SERVER_PASSWORD"),
         default_shard: env("SCREEPS_SHARD"),
+        server_kind: None,
+        plugins: None,
     })
     .await?;
 
     let start = if let Some(tick) = env("SCREEPS_TICK") {
         tick.parse()?
     } else {
-        let shard = overseer.world().shard().map(str::to_owned);
-        let now = overseer
-            .client()
-            .send(&endpoints::GameTime { shard })
-            .await?;
+        let now = overseer.client().api().await?.game_time(None).await?;
         let chunk = overseer.world().history_chunk_size();
-        u64::try_from(now.body.time)?.saturating_sub(3 * chunk)
+        now.saturating_sub(3 * chunk)
     };
     let mut player = overseer.history().player(&room, None)?;
     if player.seek(start).await? == Seek::NotKept {

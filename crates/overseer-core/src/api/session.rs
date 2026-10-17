@@ -156,10 +156,12 @@ impl Session {
             StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
             StatusCode::TOO_MANY_REQUESTS => return Err(ApiError::RateLimited(rate_limit)),
             _ if !status.is_success() => {
-                return Err(ApiError::Status {
-                    status,
-                    message: error_of(body),
-                });
+                let message = match E::FORMAT {
+                    // A text endpoint's error reply may be text too.
+                    Format::Text => error_of(body).or_else(|| text_of(body)),
+                    Format::Envelope | Format::Json | Format::Empty => error_of(body),
+                };
+                return Err(ApiError::Status { status, message });
             }
             _ => {}
         }
@@ -275,6 +277,12 @@ fn error_of(body: &[u8]) -> Option<String> {
         .and_then(|envelope| envelope.error)
 }
 
+/// The body as trimmed text, if it is non-empty UTF-8.
+fn text_of(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 /// A request that cannot be built.
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
@@ -303,12 +311,13 @@ pub enum ApiError {
     /// server-wide limit, retry after a short delay.
     #[error("rate limited")]
     RateLimited(Option<RateLimit>),
-    /// Another non-2xx status, with the `{error}` message when the body is such JSON.
+    /// Another non-2xx status, with the `{error}` message when the body is such JSON (or, for
+    /// a [`Format::Text`] endpoint, the body's text).
     #[error("HTTP {status}{}", ErrorSuffix(.message.as_deref()))]
     Status {
         /// The status.
         status: StatusCode,
-        /// The `error` of a JSON body.
+        /// The `error` of a JSON body, else the text of a [`Format::Text`] endpoint's body.
         message: Option<String>,
     },
     /// A 2xx `{error}` body: a logical failure reported by the server.
@@ -407,11 +416,11 @@ mod tests {
     use ::http::{Method, Response, StatusCode};
 
     use super::{ApiError, RateLimit, RequestError, Session};
-    use crate::api::endpoints::{
+    use crate::api::official::endpoints::{
         AuthSignin, GameRoomTerrain, GameTime, PlatformOfficialRoomHistory, PlatformVersion,
         UserBadgeSvg, UserConsole, UserMemoryGet, UserWorldStatus,
     };
-    use crate::api::types::{AuthSigninRequest, GameTimeResponse, UserConsoleRequest};
+    use crate::api::official::types::{AuthSigninRequest, GameTimeResponse, UserConsoleRequest};
     use crate::{ServerUrl, Token};
 
     fn session(token: Option<&str>) -> Session {
@@ -719,9 +728,18 @@ mod tests {
             .response::<UserBadgeSvg, _>(reply(200, &[], "<svg/>"))
             .unwrap();
         assert_eq!(svg.body, "<svg/>");
-        let unknown = session(None).response::<UserBadgeSvg, _>(reply(404, &[], "Unknown user"));
+        // A text endpoint's error reply is text too: it is the message.
+        let unknown = session(None).response::<UserBadgeSvg, _>(reply(404, &[], "Unknown user\n"));
         assert!(matches!(
             unknown,
+            Err(ApiError::Status {
+                status: StatusCode::NOT_FOUND,
+                message: Some(message)
+            }) if message == "Unknown user"
+        ));
+        let empty = session(None).response::<UserBadgeSvg, _>(reply(404, &[], " "));
+        assert!(matches!(
+            empty,
             Err(ApiError::Status {
                 status: StatusCode::NOT_FOUND,
                 message: None

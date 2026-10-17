@@ -1,7 +1,7 @@
 //! Other players and leaderboards: request shapes.
 
 use overseer::StatInterval;
-use overseer::core::api::types::{LeaderboardFindResponse, LeaderboardMode};
+use overseer::model::users::LeaderboardMode;
 
 use crate::server::{Request, Server};
 use crate::{connect, routes};
@@ -50,7 +50,11 @@ async fn user_and_leaderboard_requests_have_the_documented_shape() {
     assert_eq!(bob.username.as_deref(), Some("Bob"));
     assert_eq!(users.find_by_id("u2").await.unwrap(), bob);
     let rooms = users.rooms("u2").await.unwrap();
-    assert_eq!(rooms.rooms.unwrap(), ["W2N2", "W3N2"]);
+    let rooms: Vec<_> = rooms
+        .iter()
+        .map(|room| (room.shard.as_deref(), room.room.as_str()))
+        .collect();
+    assert_eq!(rooms, [(None, "W2N2"), (None, "W3N2")]);
     let stats = users.stats("u2", StatInterval::OneDay).await.unwrap();
     assert_eq!(stats.len(), 2);
     assert_eq!(
@@ -65,14 +69,12 @@ async fn user_and_leaderboard_requests_have_the_documented_shape() {
     assert_eq!(page.count, 31);
     assert_eq!(page.list[0].rank, 20);
     assert_eq!(page.users["u2"].username.as_deref(), Some("Bob"));
-    let LeaderboardFindResponse::All(all) = users
+    let all = users
         .leaderboard_find(LeaderboardMode::Power, "Bob", None)
         .await
-        .unwrap()
-    else {
-        panic!("every season's results");
-    };
-    assert_eq!(all.list.len(), 2);
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].season, "2026-09");
     let seasons = users.leaderboard_seasons().await.unwrap();
     let ids: Vec<_> = seasons.iter().map(|season| season.id.as_str()).collect();
     assert_eq!(ids, ["2026-10", "2026-09"]);

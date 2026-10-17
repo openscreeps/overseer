@@ -11,7 +11,7 @@
 //! underneath them and text over them.
 
 use glam::Vec2;
-use overseer::core::socket::types::{
+use overseer::model::world::{
     RoomVisualItem, RoomVisualItemCircle, RoomVisualItemLine, RoomVisualItemPoly,
     RoomVisualItemRect, RoomVisualItemText, RoomVisualTextStyleFont,
 };

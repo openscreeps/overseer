@@ -6,11 +6,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use overseer_net::core::Token;
-use overseer_net::core::api::types::AuthMeResponse;
-use overseer_net::core::api::{Auth as EndpointAuth, Endpoint};
 use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::account::Profile;
 use overseer_net::rt::JoinHandle;
-use overseer_net::{Client, World};
+use overseer_net::{Api, Client, World};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::live::{self, Command, Feed, Registry, Watch};
@@ -82,7 +81,8 @@ pub struct Overseer {
 }
 
 struct Inner {
-    client: Client,
+    /// The server's operations, holding the HTTP client.
+    api: Api,
     world: World,
     registry: Arc<Registry>,
     status: watch::Receiver<ConnectionStatus>,
@@ -93,7 +93,7 @@ struct Inner {
     commands: Mutex<VecDeque<String>>,
     /// The signed-in user's profile once fetched ([`Account::me`]); the async lock makes
     /// concurrent first reads share one request.
-    me: tokio::sync::Mutex<Option<Arc<AuthMeResponse>>>,
+    me: tokio::sync::Mutex<Option<Arc<Profile>>>,
 }
 
 impl Drop for Inner {
@@ -138,9 +138,17 @@ impl Overseer {
         if let Some(shard) = profile.default_shard {
             builder = builder.default_shard(shard);
         }
+        if let Some(kind) = profile.server_kind {
+            builder = builder.server_kind(kind);
+        }
+        if let Some(plugins) = profile.plugins {
+            builder = builder.plugins(plugins);
+        }
         let client = builder.build()?;
         // The profile discovery fetched is the first `Account::me`: not requested twice.
         let (world, me) = client.discover().await?;
+        // Discovered just now: no request.
+        let api = client.api().await?;
         let socket = client.connect().await?;
         let (commands, receiver) = mpsc::unbounded_channel();
         let registry = Arc::new(Registry::new(commands));
@@ -153,14 +161,14 @@ impl Overseer {
         )];
         if signed_in {
             tasks.push(refresh::spawn(
-                client.clone(),
+                api.clone(),
                 status.clone(),
                 Arc::clone(&registry),
             ));
         }
         Ok(Self {
             inner: Arc::new(Inner {
-                client,
+                api,
                 world,
                 registry,
                 status,
@@ -174,10 +182,20 @@ impl Overseer {
     /// The HTTP client: every typed endpoint ([`Client::send`]) and the client flows.
     #[must_use]
     pub fn client(&self) -> &Client {
-        &self.inner.client
+        self.inner.api.client()
     }
 
-    /// The server's shards and capabilities and the signed-in user, as discovered on connect.
+    /// The server's operations in Overseer's types, whichever contract it speaks
+    /// ([`overseer_net::api`]).
+    #[must_use]
+    pub fn api(&self) -> &Api {
+        &self.inner.api
+    }
+
+    /// The server's subsystems, shards and connection info and the signed-in user, as
+    /// discovered on connect. Decide behaviour by [`World::subsystems`]; the connection info
+    /// ([`World::connection`]: kind, plugins, `GET /api/version`) is for display and
+    /// diagnostics.
     #[must_use]
     pub fn world(&self) -> &World {
         &self.inner.world
@@ -199,7 +217,7 @@ impl Overseer {
     /// `auth ok`) and issued by sign-ins. Persist each value if the app stores tokens.
     #[must_use]
     pub fn tokens(&self) -> watch::Receiver<Option<Token>> {
-        self.inner.client.token_updates()
+        self.inner.api.client().token_updates()
     }
 
     /// The notices published from now on.
@@ -333,18 +351,12 @@ impl Overseer {
         self.user_id().ok_or(Error::Anonymous)
     }
 
-    /// Sends `endpoint` and returns the reply body: [`Error::Closed`] after [`Self::shutdown`],
-    /// [`Error::Anonymous`] up front for an endpoint that needs a signed-in user, else the
-    /// client's result.
-    pub(crate) async fn send<E: Endpoint + Sync>(
-        &self,
-        endpoint: &E,
-    ) -> Result<E::Response, Error> {
+    /// [`Self::api`] for an operation of the signed-in user: [`Error::Closed`] after
+    /// [`Self::shutdown`] and [`Error::Anonymous`] up front.
+    pub(crate) fn user_api(&self) -> Result<&Api, Error> {
         self.ensure_open()?;
-        if E::AUTH == EndpointAuth::Required {
-            self.require_user()?;
-        }
-        Ok(self.inner.client.send(endpoint).await?.body)
+        self.require_user()?;
+        Ok(&self.inner.api)
     }
 
     /// Console command recall, newest last.
@@ -353,7 +365,7 @@ impl Overseer {
     }
 
     /// The cache of the signed-in user's profile.
-    pub(crate) fn me_cache(&self) -> &tokio::sync::Mutex<Option<Arc<AuthMeResponse>>> {
+    pub(crate) fn me_cache(&self) -> &tokio::sync::Mutex<Option<Arc<Profile>>> {
         &self.inner.me
     }
 }
@@ -361,7 +373,7 @@ impl Overseer {
 impl fmt::Debug for Overseer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Overseer")
-            .field("server", self.inner.client.server())
+            .field("server", self.inner.api.client().server())
             .field("status", &*self.inner.status.borrow())
             .finish_non_exhaustive()
     }

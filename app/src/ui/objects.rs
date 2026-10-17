@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 use overseer::RoomSnapshot;
-use overseer::core::api::types::GameRoomObject;
 use overseer::map::{PortalDestination, RoomCoord};
+use overseer::model::world::GameRoomObject;
 
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::inspector::{Context, Inspector, kind_key, kind_label, title};
@@ -618,8 +618,7 @@ fn ObjectRow(
 mod tests {
     use std::collections::BTreeMap;
 
-    use overseer::core::api::types::GameRoomObject;
-    use overseer::core::socket::types::RoomUser;
+    use overseer::model::world::{GameRoomObject, RoomUser};
     use serde_json::json;
 
     use super::{Context, groups, natural, plural, topmost};

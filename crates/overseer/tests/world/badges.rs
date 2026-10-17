@@ -1,8 +1,8 @@
 //! Player badges on the world map: the owners' and reservers' badge parameters from map
 //! statistics, and their SVG.
 
-use overseer::core::api::types::{UserBadgeColor, UserBadgeType};
 use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent};
+use overseer::model::account::{UserBadgeColor, UserBadgeType};
 
 use crate::server::Request;
 use crate::{connect, query, soon};

@@ -3,8 +3,10 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use overseer_net::core::api::{ApiError, Terrain};
+use overseer_net::api::WorldApi as _;
+use overseer_net::core::api::ApiError;
 use overseer_net::core::socket::RoomState;
+use overseer_net::model::world::Terrain;
 use overseer_net::{HistoryReplay, RoomHistory};
 
 use crate::{Error, Overseer, RoomSnapshot};
@@ -141,7 +143,10 @@ impl HistoryPlayer {
     ///
     /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
     /// [`Error::Net`] when a request fails (other than with HTTP 404, which is
-    /// [`Seek::NotKept`]) or the chunk does not decode. The player does not move then.
+    /// [`Seek::NotKept`]) or the chunk does not decode, with
+    /// [`Unsupported`](overseer_net::Error::Unsupported) on a server without room history
+    /// ([`Subsystem::RoomHistory`](overseer_net::model::platform::Subsystem::RoomHistory),
+    /// nothing is sent). The player does not move then.
     pub async fn seek(&mut self, tick: u64) -> Result<Seek, Error> {
         self.overseer.ensure_open()?;
         let size = self.overseer.world().history_chunk_size();
@@ -204,8 +209,8 @@ impl HistoryPlayer {
             self.chunks.push_back(entry);
             return Ok(Some(chunk));
         }
-        let client = self.overseer.client();
-        match client
+        let api = self.overseer.api();
+        match api
             .room_history(self.shard.as_deref(), &self.room, base)
             .await
         {

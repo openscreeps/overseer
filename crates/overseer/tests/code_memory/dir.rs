@@ -3,7 +3,7 @@
 use std::fs;
 
 use overseer::code::{ModuleKind, read_dir, write_dir};
-use overseer::core::api::types::UserCodeModules;
+use overseer::model::code::UserCodeModules;
 use overseer::{Error, Modules};
 
 use crate::{TempDir, WASM};

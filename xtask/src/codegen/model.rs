@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use super::merge::{Components, ObjectShape, ref_name, shape};
 use super::names;
+use super::schema::{Components, ObjectShape, ref_name, shape};
 use super::union::{self, Discriminator};
 use crate::Error;
 
@@ -118,11 +118,6 @@ impl Ty {
     /// Whether the type mentions `IndexedList`.
     pub fn uses_indexed_list(&self) -> bool {
         self.any(&|ty| matches!(ty, Self::IndexedList(_)))
-    }
-
-    /// Whether the type mentions a type of another module.
-    pub fn uses_external(&self) -> bool {
-        self.any(&|ty| matches!(ty, Self::External(_)))
     }
 }
 
@@ -299,7 +294,7 @@ pub struct Def {
 /// The type definitions of a document.
 #[derive(Debug)]
 pub struct Model {
-    /// The merged component schemas.
+    /// The component schemas.
     pub components: Components,
     /// Definitions by name.
     pub defs: BTreeMap<String, Def>,
@@ -312,6 +307,9 @@ pub struct Model {
     /// Structs that keep unknown properties in a flattened map: fallback members of tagged
     /// enums.
     keep_unknown: BTreeSet<String>,
+    /// The schema each definition was lowered from, by definition name (definitions the
+    /// lowering creates; not those [`Self::finish`] adds).
+    sources: BTreeMap<String, Value>,
 }
 
 impl Model {
@@ -336,6 +334,7 @@ impl Model {
             current: None,
             options,
             keep_unknown,
+            sources: BTreeMap::new(),
         };
         let components = model.components.clone();
         for (name, schema) in &components {
@@ -377,9 +376,33 @@ impl Model {
         Ok(())
     }
 
+    /// The schema the definition `name` was lowered from; `None` for components lowered to no
+    /// definition of their own and for definitions [`Self::finish`] added.
+    pub fn source(&self, name: &str) -> Option<&Value> {
+        self.sources.get(name)
+    }
+
+    /// The inline definitions (named after their location, not components) and the schemas they
+    /// were lowered from.
+    pub fn inline_sources(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.sources
+            .iter()
+            .filter(|(name, _)| !self.reserved.contains(name.as_str()))
+            .map(|(name, schema)| (name.as_str(), schema))
+    }
+
     /// Lowers `schema`; a definition it needs is named `name`, and definitions nested in it are
-    /// named after `name`.
+    /// named after `name`. Records the schema a new definition `name` comes from.
     pub fn lower(&mut self, schema: &Value, name: &str, fallback: &str) -> Result<Ty, Error> {
+        let ty = self.lower_schema(schema, name, fallback)?;
+        if self.defs.contains_key(name) && !self.sources.contains_key(name) {
+            self.sources.insert(name.to_owned(), schema.clone());
+        }
+        Ok(ty)
+    }
+
+    /// [`Self::lower`] without recording the source.
+    fn lower_schema(&mut self, schema: &Value, name: &str, fallback: &str) -> Result<Ty, Error> {
         let Some(map) = schema.as_object() else {
             return Ok(Ty::Json);
         };
@@ -1009,7 +1032,7 @@ pub fn unwrapped(ty: &Ty) -> &Ty {
 
 /// The fallback members of the tagged unions among `components` that are component schemas:
 /// their structs keep unknown properties.
-fn fallback_components(components: &Components) -> BTreeSet<String> {
+pub fn fallback_components(components: &Components) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for schema in components.values() {
         let Some(members) = schema

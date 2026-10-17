@@ -23,7 +23,7 @@
 //! effects end before the next tick's begin.
 
 use glam::{Vec2, Vec3};
-use overseer::core::api::types::{
+use overseer::model::world::{
     GameRoomObjectActionLog, GameRoomObjectActionLogEntry, GameRoomObjectActionLogValue,
 };
 

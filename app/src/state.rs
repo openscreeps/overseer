@@ -372,7 +372,7 @@ impl AppState {
             }
         };
         let auth = Auth::Token(overseer::core::Token::new(token));
-        match session::connect(&platform, &server.url, auth, None).await {
+        match session::connect(&platform, &server.url, server.kind.forced(), auth, None).await {
             Ok(overseer) => Ok(overseer),
             Err(Failure::Unauthorized) => {
                 if !self.is_popout() {
@@ -580,7 +580,10 @@ impl AppState {
             email: login,
             password,
         };
-        match session::connect(&self.platform(), &session.server, auth, None).await {
+        let server_kind = self
+            .server(&session.server)
+            .and_then(|server| server.kind.forced());
+        match session::connect(&self.platform(), &session.server, server_kind, auth, None).await {
             Ok(overseer) => {
                 self.begin(&session.server, overseer, Start::Password(None));
                 Ok(())

@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use futures_util::future::select_all;
-use overseer_net::core::socket::types::RoomMap;
 use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::world::RoomMap;
 
 use crate::{Closed, Overseer, Watch};
 

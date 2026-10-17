@@ -278,8 +278,8 @@ mod tests;
 
 use glam::Vec2;
 use overseer::RoomSnapshot;
-use overseer::core::api::Terrain;
 use overseer::map::{Interest, Portal, RoomCoord, RoomMap, RoomRect, RoomStat};
+use overseer::model::world::Terrain;
 
 use crate::gpu::{Draw, Gpu};
 use crate::view::View;

@@ -8,10 +8,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use overseer::core::api::Tile;
 use overseer::map::{
     DetailState, Interest, RoomCoord, RoomRect, RoomStatus, Terrain, WorldEvent, WorldMap,
 };
+use overseer::model::world::Tile;
 use tokio::time::timeout;
 
 use crate::support::{self, PATIENCE};
@@ -431,7 +431,7 @@ async fn a_viewed_room_updates_its_overview_and_portals_at_once() {
             && *room == mine
         {
             live_level = snapshot.objects.iter().find_map(|object| match object {
-                overseer::core::api::types::GameRoomObject::Controller(controller) => {
+                overseer::model::world::GameRoomObject::Controller(controller) => {
                     Some(controller.level)
                 }
                 _ => None,

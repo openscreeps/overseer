@@ -16,6 +16,8 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
+use overseer_net::core::api::official;
+use overseer_net::model::account::UserRoomStatName;
 use overseer_net::prelude::*;
 use tokio::time::{Instant, timeout};
 
@@ -74,13 +76,7 @@ async fn check_http(client: &Client) -> Result<Target, Box<dyn Error>> {
         world.history_chunk_size(),
     );
     let shard = world.shard().map(str::to_owned);
-    let time = client
-        .send(&endpoints::GameTime {
-            shard: shard.clone(),
-        })
-        .await?
-        .body
-        .time;
+    let time = client.api().await?.game_time(shard.as_deref()).await?;
     println!("game time {time}");
 
     let mut target = env("SCREEPS_ROOM").map(|room| Target {
@@ -88,36 +84,33 @@ async fn check_http(client: &Client) -> Result<Target, Box<dyn Error>> {
         room,
     });
     if signed_in {
-        client.send(&endpoints::AuthMe).await?;
+        let api = client.api().await?;
+        api.me().await?;
         println!(
             "auth/me ok (rate limit remaining {:?})",
             client
-                .rate_limit::<endpoints::AuthMe>()
+                .rate_limit::<official::endpoints::AuthMe>()
                 .map(|limit| limit.remaining)
         );
-        client.send(&endpoints::UserWorldStatus).await?;
+        api.world_status().await?;
         println!("world status ok (not shown)");
         if target.is_none() {
-            let start = client
-                .send(&endpoints::UserWorldStartRoom {
-                    shard: shard.clone(),
-                })
-                .await?;
-            target = start.body.room.first().map(|name| Target {
-                room: name.rsplit('/').next().unwrap_or(name).to_owned(),
+            let start = api.start_room(shard.as_deref()).await?;
+            target = start.map(|start| Target {
+                room: start.room,
                 label: "start room".to_owned(),
             });
         }
-        let kind = match client.memory(None, None).await? {
+        let kind = match api.memory("", None).await? {
             MemoryValue::Undefined => "undefined",
             MemoryValue::IncorrectPath => "incorrect path",
             MemoryValue::Json(_) => "JSON value",
         };
         println!("memory: {kind} (content not shown)");
-        let overview = client.overview(Some(8), None).await?;
+        let overview = api.overview(8, UserRoomStatName::EnergyHarvested).await?;
         println!(
-            "overview: {} shards (content not shown)",
-            overview.shards.map_or(0, |shards| shards.len())
+            "overview: {} rooms (content not shown)",
+            overview.rooms.len()
         );
     }
     let target = target.unwrap_or_else(|| Target {
@@ -133,16 +126,22 @@ async fn check_http(client: &Client) -> Result<Target, Box<dyn Error>> {
         tile_counts(&terrain),
         Arc::ptr_eq(&terrain, &cached)
     );
-    let objects = client.room_objects(None, &target.room).await?;
-    println!(
-        "room objects {}: {:?}, {} users",
-        target.label,
-        kind_counts(objects.objects.iter()),
-        objects.users.len()
-    );
+    let api = client.api().await?;
+    match api.room_objects_source() {
+        Some(source) => {
+            let objects = source.room_objects(None, &target.room).await?;
+            println!(
+                "room objects {}: {:?}, {} users",
+                target.label,
+                kind_counts(objects.objects.iter()),
+                objects.users.len()
+            );
+        }
+        None => println!("room objects {}: not offered by the server", target.label),
+    }
     if signed_in {
-        let stats = client
-            .map_stats(None, [target.room.as_str()], "owner0")
+        let stats = api
+            .map_stats(None, vec![target.room.clone()], "owner0")
             .await?;
         println!(
             "map stats {}: {} rooms, {} users",
@@ -151,7 +150,7 @@ async fn check_http(client: &Client) -> Result<Target, Box<dyn Error>> {
             stats.users.len()
         );
     }
-    check_history(client, &target, u64::try_from(time)?).await?;
+    check_history(client, &target, time).await?;
     println!(
         "rate limits known for {} endpoints",
         client.rate_limits().len()
@@ -164,7 +163,12 @@ async fn check_http(client: &Client) -> Result<Target, Box<dyn Error>> {
 async fn check_history(client: &Client, target: &Target, time: u64) -> Result<(), Box<dyn Error>> {
     let chunk = client.world().await?.history_chunk_size();
     let tick = time.saturating_sub(3 * chunk);
-    match client.room_history(None, &target.room, tick).await {
+    match client
+        .api()
+        .await?
+        .room_history(None, &target.room, tick)
+        .await
+    {
         Ok(history) => {
             let base = history.base();
             let mut replay = history.replay();

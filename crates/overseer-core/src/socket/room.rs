@@ -24,13 +24,12 @@ use std::mem;
 use serde_json::{Map, Value};
 
 use super::flag::{Flag, FlagError};
-use super::types::{RoomEvent, RoomUser, RoomVisualItem};
 use super::visual;
-use crate::api::types::{GameRoomDecoration, GameRoomObject};
+use crate::model::socket::RoomEvent;
+use crate::model::world::{GameRoomDecoration, GameRoomObject, RoomUser, RoomVisualItem};
 
-/// Top-level list properties of room objects (the members of `GameRoomObject` in the
-/// reference). The client merge holds them as objects keyed by array index; typed access turns
-/// them back into lists.
+/// Top-level list properties of room objects (the members of [`GameRoomObject`]). The client
+/// merge holds them as objects keyed by array index; typed access turns them back into lists.
 const LIST_PROPERTIES: [&str; 5] = ["body", "creepBody", "depositTypes", "effects", "population"];
 
 /// Largest integer a JavaScript number holds exactly (`Number.MAX_SAFE_INTEGER`).
@@ -54,8 +53,8 @@ pub struct RoomState {
 
 impl RoomState {
     /// Applies one update: `objects` per [`apply_objects_diff`], `users` replaced per id; `flags`,
-    /// `info`, `gameTime`, `visual` and `decorations` replaced when present and kept when absent
-    /// (`flags: null` clears the flags).
+    /// the mode, `gameTime`, `visual` and `decorations` replaced when present and kept when
+    /// absent (`flags: null` clears the flags, `info` without a mode clears the mode).
     pub fn apply(&mut self, update: RoomEvent) {
         apply_objects_diff(&mut self.objects, update.objects);
         if let Some(users) = update.users {
@@ -64,8 +63,8 @@ impl RoomState {
         if let Some(flags) = update.flags {
             self.flags = flags;
         }
-        if let Some(info) = update.info {
-            self.mode = info.mode;
+        if let Some(mode) = update.mode {
+            self.mode = mode;
         }
         if let Some(game_time) = update.game_time {
             self.game_time = Some(game_time);
@@ -358,8 +357,9 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{LIST_PROPERTIES, RoomState, apply_objects_diff};
-    use crate::api::types::GameRoomObject;
-    use crate::socket::types::{RoomEvent, RoomVisualItem};
+    use crate::model::socket::RoomEvent;
+    use crate::model::world::{GameRoomObject, RoomVisualItem};
+    use crate::socket::official::types as official;
 
     /// Applies each diff in turn to empty objects. Expected values below are the output of
     /// `../server/src/realtime/diff.ts` (`merge`/`indexTopLevelArrays`, the client's `U`) for the
@@ -455,8 +455,11 @@ mod tests {
         );
     }
 
+    /// An official room event, converted.
     fn update(value: Value) -> RoomEvent {
-        serde_json::from_value(value).unwrap()
+        serde_json::from_value::<official::RoomEvent>(value)
+            .unwrap()
+            .into()
     }
 
     #[test]

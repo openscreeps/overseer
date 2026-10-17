@@ -1,8 +1,8 @@
 //! Memory paths, segments and Memory watches.
 
 use overseer::Error;
-use overseer::core::api::MemoryValue;
 use overseer::core::socket::Channel;
+use overseer::memory::MemoryValue;
 use serde_json::json;
 
 use crate::server::{self, Server};

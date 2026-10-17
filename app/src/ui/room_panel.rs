@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 use overseer::RoomSnapshot;
-use overseer::core::api::types::GameRoomObject;
 use overseer::map::{
     DetailState, Interest, Portal, PortalDestination, RoomCoord, RoomRect, RoomStat, RoomStatus,
     WorldEvent,
 };
+use overseer::model::world::GameRoomObject;
 use overseer_view::{Scope, Viewer};
 
 use crate::feed::{Feed, Reach, Subscription};
@@ -819,8 +819,7 @@ fn date(milliseconds: u64) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use overseer::core::api::types::GameRoomObject;
-    use overseer::core::socket::types::RoomUser;
+    use overseer::model::world::{GameRoomObject, RoomUser};
     use serde_json::json;
 
     use super::{ControllerFacts, OwnerCount, facts};

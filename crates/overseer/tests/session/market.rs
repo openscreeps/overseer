@@ -1,10 +1,10 @@
-//! The market: request shapes on a sharded server.
+//! The market: request shapes on a sharded server, the replies of a single-world one.
 
 use overseer::core::ServerUrl;
-use overseer::core::api::types::MarketOrderType;
+use overseer::model::market::{MarketOrderType, MyOrders, UserMoneyHistoryEntryType};
 
 use crate::server::{Request, Server};
-use crate::{connect_as, routes};
+use crate::{connect, connect_as, routes};
 
 /// `GET /api/version` of a sharded server (default shard `shard0`).
 const SHARDED_VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":100,"shards":["shard0","shard3"],"renderer":{"resources":{},"metadata":{}}}}"#;
@@ -53,7 +53,11 @@ async fn market_requests_name_the_default_or_given_shard() {
     assert_eq!(orders[0].r#type, MarketOrderType::Sell);
     assert_eq!(orders[0].remaining_amount, 80);
     let mine = market.my_orders().await.unwrap();
-    assert_eq!(mine.shards.unwrap()["shard3"].len(), 1);
+    let MyOrders::Sharded(shards) = &mine else {
+        panic!("{mine:?}");
+    };
+    assert_eq!(shards["shard3"].len(), 1);
+    assert_eq!(shards["intershard"], []);
     let stats = market.stats("energy", None).await.unwrap();
     assert_eq!(stats[0].transactions, 7);
     let history = market.money_history(2).await.unwrap();
@@ -81,4 +85,36 @@ async fn market_requests_name_the_default_or_given_shard() {
     ]
     .map(|(path, query)| (path.to_owned(), query.to_owned()));
     assert_eq!(sent, expected);
+}
+
+#[tokio::test]
+async fn a_single_world_server_lists_its_orders_and_the_openscreeps_ledger_details() {
+    let mut server = Server::start(
+        |request| match (request.method.as_str(), request.path.as_str()) {
+            ("GET", "/api/game/market/my-orders") => {
+                (200, format!(r#"{{"ok":1,"list":[{ORDER}]}}"#))
+            }
+            ("GET", "/api/user/money-history") => (
+                200,
+                r#"{"ok":1,"page":0,"hasMore":true,"list":[{"_id":"h1","date":"2026-10-14T12:00:00.000Z","tick":500,"user":"u1","type":"market.buy","balance":960,"change":-40,"market":{"resourceType":"energy","roomName":"W1N1","targetRoomName":"W2N2","price":0.4,"amount":100,"owner":"u2","dealer":"u1","anotherUser":"u2","orderId":"o1"}}]}"#
+                    .to_owned(),
+            ),
+            _ => routes(request),
+        },
+        |_| true,
+    )
+    .await;
+    let (overseer, _websocket) = connect(&mut server).await;
+    let market = overseer.market();
+
+    let mine = market.my_orders().await.unwrap();
+    assert_eq!(mine.len(), 1);
+    let (shard, order) = mine.iter().next().unwrap();
+    assert_eq!((shard, order.id.as_deref()), (None, Some("o1")));
+    let history = market.money_history(0).await.unwrap();
+    assert!(history.has_more);
+    let entry = &history.list[0];
+    assert_eq!(entry.kind, UserMoneyHistoryEntryType::MarketBuy);
+    assert_eq!(entry.market.another_user.as_deref(), Some("u2"));
+    assert_eq!(entry.market.order_id.as_deref(), Some("o1"));
 }

@@ -1,8 +1,7 @@
 //! Branch requests, directory push and pull, and the code feeds.
 
-use overseer::code::{ActiveBranchChange, ActiveBranches, CodeChange, ModuleKind};
+use overseer::code::{ActiveBranchChange, ActiveBranches, CodeChange, ModuleKind, UserCodeHash};
 use overseer::core::socket::Channel;
-use overseer::core::socket::types::UserCodeHash;
 use overseer::{CodeTarget, Error, Modules};
 use serde_json::json;
 

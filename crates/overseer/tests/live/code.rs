@@ -50,7 +50,7 @@ async fn ok<T>(what: &str, operation: impl Future<Output = Result<T, Error>>) ->
 async fn default_branch_of_a_new_account() {
     let mut registered = Modules::new();
     registered.insert_js("main", "module.exports.loop = function () {};");
-    let account = support::register_with(Some(registered.as_map().clone())).await;
+    let account = support::register_with(Some(registered.clone())).await;
     let overseer = account.connect().await;
     let code = overseer.code();
 

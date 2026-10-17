@@ -7,7 +7,7 @@
 //! with an owner-coloured rim; resources and body parts have one colour each
 //! ([`resource_color`], `PART_COLORS` in `objects.wgsl`).
 
-use overseer::core::api::types::{
+use overseer::model::world::{
     GameRoomObject, GameRoomObjectStore, GameRoomObjectStoreCapacityResource,
 };
 

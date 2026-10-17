@@ -15,8 +15,7 @@ use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 use overseer::RoomSnapshot;
-use overseer::core::api::types::{GameRoomObject, GameRoomObjectActionLogValue};
-use overseer::core::api::{Terrain, Tile};
+use overseer::model::world::{GameRoomObject, GameRoomObjectActionLogValue, Terrain, Tile};
 
 use crate::mesh::{self, EffectInstance, Instance, Mesh, Shape, TerrainVertex, Token, rgba};
 use crate::text::Atlas;
@@ -605,9 +604,7 @@ fn gauge(value: f32) -> u8 {
 }
 
 /// The action log of an object, if its kind has one.
-fn action_log(
-    object: &GameRoomObject,
-) -> Option<&overseer::core::api::types::GameRoomObjectActionLog> {
+fn action_log(object: &GameRoomObject) -> Option<&overseer::model::world::GameRoomObjectActionLog> {
     use GameRoomObject as O;
     match object {
         O::Creep(creep) => creep.action_log.as_ref(),

@@ -3,8 +3,8 @@
 //! keeper lairs and power banks) must not show under the scene's tokens.
 
 use glam::Vec2;
-use overseer::core::api::types::GameRoomObject;
 use overseer::map::RoomMap;
+use overseer::model::world::GameRoomObject;
 use serde_json::{Value, json};
 
 use super::{ME, object, room, snapshot_of, terrain, world_view};

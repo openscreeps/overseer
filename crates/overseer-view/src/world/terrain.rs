@@ -19,8 +19,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use overseer::core::api::Terrain;
 use overseer::map::RoomCoord;
+use overseer::model::world::Terrain;
 
 use super::{Dirty, Upload};
 

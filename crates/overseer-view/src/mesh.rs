@@ -5,7 +5,7 @@ pub mod contour;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
-use overseer::core::api::{Terrain, Tile};
+use overseer::model::world::{Terrain, Tile};
 
 /// Height of a raised natural wall.
 pub const WALL_HEIGHT: f32 = 0.6;

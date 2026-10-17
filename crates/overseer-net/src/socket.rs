@@ -16,7 +16,7 @@ use std::time::Duration;
 use futures_util::stream::FusedStream;
 use futures_util::{Sink, Stream, StreamExt};
 use overseer_core::Token;
-use overseer_core::api::Terrain;
+use overseer_core::model::world::Terrain;
 use overseer_core::socket::{Channel, Event, SocketError, SocketSession};
 use reqwest_websocket::{CloseCode, Message, WebSocket};
 
@@ -207,7 +207,7 @@ impl Socket {
     pub(crate) fn new(client: Client, world: World, websocket: WebSocket) -> Self {
         let sent_token = client.token();
         Self {
-            session: SocketSession::new(sent_token.clone()),
+            session: SocketSession::new(sent_token.clone(), world.connection().kind),
             client,
             world,
             link: Link::Open {
@@ -537,6 +537,7 @@ mod tests {
 
     use super::{ReconnectPolicy, Socket};
     use crate::Client;
+    use crate::api::{Api, CodeApi as _, ConsoleApi as _, MemoryApi as _, WorldApi as _};
 
     /// Applications move sockets, and the futures of the socket and client helpers, into
     /// spawned tasks; checked at compile time.
@@ -550,8 +551,12 @@ mod tests {
         };
         let _: fn(&Client) = |client| {
             send(&client.terrain(None, "W1N1"));
-            send(&client.room_history(None, "W1N1", 0));
-            send(&client.memory(None, None));
+        };
+        let _: fn(&Api) = |api| {
+            send(&api.memory("", None));
+            send(&api.room_history(None, "W1N1", 0));
+            send(&api.console("Game.time", None));
+            send(&api.code("default"));
         };
     }
 

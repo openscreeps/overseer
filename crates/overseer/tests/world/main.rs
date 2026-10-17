@@ -19,8 +19,9 @@ use overseer::{Auth, Overseer, ServerProfile};
 
 use server::{Request, Response, Server, Ws};
 
-/// `GET /api/version` of a single-world server with history chunks of 20 ticks.
-const VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":20,"renderer":{"resources":{},"metadata":{}}}}"#;
+/// `GET /api/version` of a single-world `OpenScreeps` server (the `openscreeps` feature) with
+/// history chunks of 20 ticks.
+const VERSION: &str = r#"{"ok":1,"protocol":14,"users":1,"serverData":{"customObjectTypes":{},"historyChunkSize":20,"renderer":{"resources":{},"metadata":{}},"features":[{"name":"market","version":1},{"name":"auth","version":1},{"name":"openscreeps","version":1}]}}"#;
 
 /// `GET /api/auth/me` of user `u1`.
 const ME: &str = r#"{"ok":1,"_id":"u1","money":0,"powerExperimentations":0}"#;
@@ -63,6 +64,8 @@ async fn connect<R: Into<Response>>(
         auth: Auth::Token(Token::new("t1")),
         server_password: None,
         default_shard: None,
+        server_kind: None,
+        plugins: None,
     };
     let overseer = Overseer::connect(profile).await.unwrap();
     let mut websocket = server.socket().await;

@@ -2,7 +2,7 @@
 //! polygon fills, text layout through the glyph atlas and its distance fields.
 
 use glam::Vec2;
-use overseer::core::socket::types::RoomVisualItem;
+use overseer::model::world::RoomVisualItem;
 use serde_json::json;
 
 use super::{ME, object, show, snapshot, terrain};
