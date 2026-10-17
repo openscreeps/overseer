@@ -8,6 +8,10 @@
 // rewrites the token list (`GET /api/user/auth-token`) and refuses map stats (HTTP 429). The app
 // reaches the server through the shell's proxy, cross-origin: rewritten answers carry the CORS
 // headers the proxy would. The user coming back to the window is its `focus` event.
+//
+// Only an OpenScreeps server can stand in for screeps.com: the stock community server does not
+// decode as screeps.com (its `GET /api/version` features have no `version`). Thus the
+// `community` run skips this test. The web tests cover the community lift by request.
 
 import type { Request, Route } from '@playwright/test';
 import { expect, interceptOpener, open, Session, statusBar, test } from './fixtures';
@@ -23,7 +27,8 @@ function corsHeaders(request: Request): Record<string, string> {
 
 test('lifting the limits opens the reset page in the system browser, then checks on focus', {
   tag: '@openscreeps',
-}, async ({ app, server, credentials }) => {
+}, async ({ app, server, credentials, target }) => {
+  test.skip(target === 'community', "the stock community server lacks screeps.com's contract");
   if (credentials.kind !== 'password') throw new Error('needs a password account');
   const session = await Session.signIn(server.url, credentials.login, credentials.password);
   const me = await session.me();

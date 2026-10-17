@@ -8,9 +8,9 @@
 // (OpenScreeps: 11 × 11 rooms W5N5 to E5S5; community: W10N10 to W0N0) have no portals of their
 // own (the sector centre W5N5 has none): the portal test links W5N5 with the crossroads W0N0,
 // rooms of both worlds, once per world (both are rooms the map scans for portals); the status
-// test closes the highway room W0N4 of both worlds (no player can start there), which puts it
-// outside the world's borders. Both act as the server's administrator: the admin API on
-// `openscreeps`, the CLI on `community`.
+// test closes the highway room W0N4 (no player can start there), which puts it outside the
+// world's borders (`openscreeps` only: see the test). Both act as the server's administrator:
+// the admin API on `openscreeps`, the CLI on `community`.
 
 import type { Page } from '@playwright/test';
 import { api, cli, expect, Session, test, type Server } from './fixtures';
@@ -114,12 +114,10 @@ async function ensurePortals(server: Server): Promise<void> {
 
 /**
  * Closes {@link CLOSED_ROOM} unless it is closed already: its status turns from `normal` to
- * `out of borders`, once (`room-close` of the admin API on `openscreeps`, `map.closeRoom` in the
- * CLI on `community`; both idempotent).
+ * `out of borders`, once (`room-close` of the admin API on `openscreeps`, idempotent).
  */
 async function ensureClosed(server: Server): Promise<void> {
-  if (server.admin) await admin(server, { action: 'room-close', room: CLOSED_ROOM });
-  else await cli(server, `map.closeRoom(${JSON.stringify(CLOSED_ROOM)})`);
+  await admin(server, { action: 'room-close', room: CLOSED_ROOM });
 }
 
 /** Moves the mouse to the middle of tile `(x, y)` of `room` (its top centre and the next's). */
@@ -249,11 +247,18 @@ test.describe('map', () => {
     // (`STATS_VIEWED_FRESH`): a cold world asks the server.
     test.use({ cache: 'cold' });
 
+    // The stock community server cannot keep a room closed: every player respawn (the fixtures
+    // retire each test's player with one) sets every `out of borders` room back to `normal`.
+    // `respawnUser` of @screeps/backend iterates an unawaited `find()` promise, so it runs
+    // `rooms.update({ _id: undefined }, { $set: { status: 'normal' } })`, which matches every room
+    // (https://github.com/screeps/backend-local/issues/39).
     test('says in the tooltip that a room is outside the world @openscreeps', async ({
       signedInPage: page,
       server,
       home,
+      target,
     }) => {
+      test.skip(target === 'community', 'a player respawn reopens every closed room (stock backend)');
       await ensureClosed(server);
       // Zoomed out over the whole (small) world, where every room's overview loads.
       await openRoom(page, home.path);
