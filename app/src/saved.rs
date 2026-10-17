@@ -31,7 +31,7 @@ pub struct Settings {
     #[serde(deserialize_with = "lenient_width")]
     pub drawer_width: u16,
     /// The drawer's height as a bottom sheet (phone layout), in percent of the world screen
-    /// (clamped to the sheet's limits when shown).
+    /// (shown at the nearest snap height).
     #[serde(deserialize_with = "lenient_height")]
     pub drawer_height: u8,
     /// The drawer's tab.
@@ -76,20 +76,27 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de> + Default,
 {
-    let value = Value::deserialize(deserializer)?;
-    Ok(T::deserialize(value).unwrap_or_default())
+    decode_or(deserializer, T::default())
 }
 
 /// A width that does not decode is [`DRAWER_WIDTH`], leaving the other settings.
 fn lenient_width<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
-    let value = Value::deserialize(deserializer)?;
-    Ok(u16::deserialize(value).unwrap_or(DRAWER_WIDTH))
+    decode_or(deserializer, DRAWER_WIDTH)
 }
 
 /// A height that does not decode is [`DRAWER_HEIGHT`], leaving the other settings.
 fn lenient_height<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    decode_or(deserializer, DRAWER_HEIGHT)
+}
+
+/// The value as a `T`, else `default`; fails only where the document is not JSON.
+fn decode_or<'de, D, T>(deserializer: D, default: T) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     let value = Value::deserialize(deserializer)?;
-    Ok(u8::deserialize(value).unwrap_or(DRAWER_HEIGHT))
+    Ok(T::deserialize(value).unwrap_or(default))
 }
 
 /// How long known world bounds are trusted before the world is measured again, in

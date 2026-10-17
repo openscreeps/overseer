@@ -185,10 +185,9 @@ pub fn StatusBar() -> impl IntoView {
     let items = Memo::new(move |_| {
         MapItems::of(&Facts {
             map: map.phase.get() != Phase::Idle,
-            shard: map.shard.get().and_then(|shard| match shard {
-                Shard::Named(name) => Some(name),
-                Shard::Single => None,
-            }),
+            shard: map
+                .shard
+                .with(|shard| shard.as_ref().and_then(Shard::name).map(str::to_owned)),
             game_time: map.game_time.get(),
             lod: map.lod.get(),
             frame_ms: map.frame_ms.get(),
@@ -203,12 +202,10 @@ pub fn StatusBar() -> impl IntoView {
     // Known with the session (the server's shards) and the route (the shard shown), before
     // the first tick.
     let place_width = Memo::new(move |_| {
-        let shown = map.shard.get().and_then(|shard| match shard {
-            Shard::Named(name) => Some(name),
-            Shard::Single => None,
-        });
-        map.shards
-            .with(|shards| place_width(shards, shown.as_deref()))
+        map.shard.with(|shard| {
+            let shown = shard.as_ref().and_then(Shard::name);
+            map.shards.with(|shards| place_width(shards, shown))
+        })
     });
     let level = Memo::new(move |_| items.with(|items| items.level.clone()));
     let hover = Memo::new(move |_| items.with(|items| items.hover.clone()));
@@ -253,10 +250,9 @@ pub fn StatusBar() -> impl IntoView {
     };
     view! {
         <footer
-            class="flex flex-none items-center gap-5 max-md:gap-3 \
-                h-[calc(var(--spacing-statusbar)+var(--spacing-safe-b))] px-3 pb-safe-b \
-                overflow-hidden whitespace-nowrap text-sm tabular-nums text-muted bg-panel \
-                border-t border-edge"
+            class="flex flex-none items-center gap-5 max-md:gap-3 h-statusbar-safe px-3 \
+                pb-safe-b overflow-hidden whitespace-nowrap text-sm tabular-nums text-muted \
+                bg-panel border-t border-edge"
             aria-label="Status"
         >
             <span

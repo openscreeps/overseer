@@ -14,7 +14,8 @@
  * Safe areas (a notch, rounded corners, a home indicator; `viewport-fit=cover` in index.html):
  * `<body>` keeps the left and right insets, the top bar the top inset, the status bar the bottom
  * inset. Elements between them need no inset. A `fixed` element adds the insets of the edges it
- * touches (`--spacing-safe-*`).
+ * touches (`--spacing-safe-*`); under the top bar or over the status bar, it uses the bar's
+ * height with its inset (`--spacing-topbar-safe`, `--spacing-statusbar-safe`).
  */
 
 @import "tailwindcss" source(none);
@@ -36,7 +37,7 @@
   --color-*: initial;
   --color-bg: #15171c;
   --color-sunken: #0b0d11;
-  --color-panel: #1f2229;
+  --color-panel: #1f2229; /* Also the `theme-color` of index.html: change both. */
   --color-panel-2: #272b34;
   --color-panel-3: #30353f;
   --color-edge: #353a45;
@@ -111,6 +112,11 @@
   --spacing-safe-b: env(safe-area-inset-bottom, 0px);
   --spacing-safe-l: env(safe-area-inset-left, 0px);
 
+  /* The bars' heights with their safe-area insets (`h-topbar-safe`, `h-statusbar-safe`): what
+     the bars take of the window. */
+  --spacing-topbar-safe: calc(var(--spacing-topbar) + var(--spacing-safe-t));
+  --spacing-statusbar-safe: calc(var(--spacing-statusbar) + var(--spacing-safe-b));
+
   /* Radii. */
   --radius-*: initial;
   --radius-xs: 2px;
@@ -123,14 +129,6 @@
   --shadow-sm: 0 2px 8px rgb(0 0 0 / 30%);
   --shadow-lg: 0 8px 24px rgb(0 0 0 / 45%);
   --shadow-card: 0 12px 32px rgb(0 0 0 / 35%);
-
-  /* Breakpoints, used as `max-*:` (narrower than): phone, phone/tablet, narrow, compact. Below `sm`
-     the drawer is a bottom sheet (`app/src/ui/media.rs` asks the same query). */
-  --breakpoint-*: initial;
-  --breakpoint-xs: 521px;
-  --breakpoint-sm: 641px;
-  --breakpoint-md: 761px;
-  --breakpoint-lg: 1001px;
 
   /* Motion. */
   --ease-*: initial;
@@ -205,6 +203,19 @@
   --duration-fast: 120ms;
   --duration: 180ms;
   --duration-slow: 260ms;
+}
+
+/*
+ * Breakpoints, used as `max-*:` (narrower than): phone, phone/tablet, narrow, compact. Always
+ * emitted (`static`): `app/src/ui/media.rs` reads `--breakpoint-sm` for the same query as
+ * `max-sm:` (below it, the drawer is a bottom sheet).
+ */
+@theme static {
+  --breakpoint-*: initial;
+  --breakpoint-xs: 521px;
+  --breakpoint-sm: 641px;
+  --breakpoint-md: 761px;
+  --breakpoint-lg: 1001px;
 }
 
 /*

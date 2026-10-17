@@ -464,7 +464,7 @@ fn Banner() -> impl IntoView {
                         border-b border-warn/45"
                     role="alert"
                 >
-                    <Icon kind=IconKind::Alert class="inline flex-none size-[1.15em] text-warn" />
+                    <Icon kind=IconKind::Alert class=concatcp!(style::ICON, " text-warn") />
                     <span class="flex-1 min-w-0">{message}</span>
                     <button
                         type="button"

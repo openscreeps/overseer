@@ -8,7 +8,7 @@
 //!
 //! On a wide window the drawer is at the right of the map: drag its left edge (or use the
 //! arrow keys on it) to resize it; the width is saved and clamped again when the window
-//! shrinks. Below the `sm` breakpoint ([`SHEET_LAYOUT`]) it is a bottom sheet under the map:
+//! shrinks. Below the `sm` breakpoint ([`sheet_layout`]) it is a bottom sheet under the map:
 //! drag its grab handle (or use the arrow keys on it) to give it one of its snap heights,
 //! saved too. The sheet's Room tab shows the facts only: the map over it already shows the
 //! room, so no second room viewer is made. The drawer collapses with its button or the top
@@ -31,7 +31,7 @@ use crate::saved::DrawerTab;
 use crate::state::AppState;
 use crate::ui::console::{ConsolePanel, ConsoleState};
 use crate::ui::icon::{Icon, IconKind};
-use crate::ui::media::{SHEET_LAYOUT, media_query};
+use crate::ui::media::{media_query, sheet_layout};
 use crate::ui::memory::{MemoryPanel, MemoryState};
 use crate::ui::objects::{ObjectsPanel, Selection};
 use crate::ui::room_panel::{RoomData, RoomInfo, RoomPreview};
@@ -66,12 +66,11 @@ const TAB: &str = "inline-flex items-center justify-center gap-2 min-w-0 min-h-c
 /// A tab's label: cut when it does not fit; read by assistive technology only in the
 /// narrowest drawer.
 const TAB_LABEL: &str = "truncate @max-[25rem]:sr-only";
-/// A tab's count pill (`style::COUNT`, narrower).
-const TAB_COUNT: &str = "inline-flex items-center justify-center min-w-[1.3rem] px-1.5 text-xs \
-    font-semibold tabular-nums leading-[1.4] text-muted bg-panel-3 rounded-full";
 /// The drawer: at the right of the map, `--drawer-width` wide; under the map as a bottom sheet
 /// on phones, `--drawer-height` high. The sheet keeps its handle and tabs, and the map keeps
-/// at least 11rem (room for the map controls).
+/// at least 11rem (room for the map controls). `min-w-[280px]` and `max-w-[calc(100%-320px)]`
+/// repeat the width limits of [`resize`] (which follow the window) for the world screen, which
+/// is narrower than the window by the safe-area insets.
 const DRAWER: &str = "@container relative flex flex-none flex-col w-(--drawer-width) min-w-[280px] \
     max-w-[calc(100%-320px)] min-h-0 bg-panel border-l border-edge animate-drawer-in \
     max-sm:w-auto max-sm:max-w-none max-sm:min-w-0 max-sm:h-(--drawer-height) \
@@ -94,12 +93,8 @@ pub fn Drawer(server: Server) -> impl IntoView {
             state.update_saved(|saved| saved.settings.drawer_tab = next);
         }
     };
-    let DrawerSize {
-        width,
-        limit,
-        height,
-    } = DrawerSize::new(state);
-    let sheet = media_query(SHEET_LAYOUT);
+    let size = DrawerSize::new(state);
+    let sheet = media_query(&sheet_layout());
     let user = server.user.as_ref().map(|user| user.id.clone());
 
     // The room in focus and the selection, shared with the map.
@@ -233,16 +228,16 @@ pub fn Drawer(server: Server) -> impl IntoView {
                 style=move || {
                     format!(
                         "--drawer-width: {}px; --drawer-height: {:.2}%",
-                        width.get(),
-                        height.get(),
+                        size.width.get(),
+                        size.height.get(),
                     )
                 }
             >
                 {move || {
                     if sheet.get() {
-                        view! { <SheetHandle height /> }.into_any()
+                        view! { <SheetHandle size /> }.into_any()
                     } else {
-                        view! { <Resizer width limit=limit.into() /> }.into_any()
+                        view! { <Resizer size /> }.into_any()
                     }
                 }}
                 <div class="flex flex-none items-end gap-2 px-2 pt-1 border-b border-edge">
@@ -313,7 +308,7 @@ fn TabList(
                     } else {
                         count.to_string()
                     };
-                    view! { <span class=TAB_COUNT>{text}</span> }
+                    view! { <span class=style::COUNT_NARROW>{text}</span> }
                 })
             };
             view! {

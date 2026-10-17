@@ -29,11 +29,11 @@ const TOAST_ERROR: &str = "flex items-center gap-2 max-w-[min(26rem,calc(100vw-2
 /// A toast's action.
 const TOAST_ACTION: &str = concatcp!(style::LINK_BUTTON, " whitespace-nowrap");
 /// The icon of a success toast.
-const ICON_SUCCESS: &str = "inline flex-none size-[1.15em] text-ok";
+const ICON_SUCCESS: &str = concatcp!(style::ICON, " text-ok");
 /// The icon of an information toast.
-const ICON_INFO: &str = "inline flex-none size-[1.15em] text-info";
+const ICON_INFO: &str = concatcp!(style::ICON, " text-info");
 /// The icon of an error toast.
-const ICON_ERROR: &str = "inline flex-none size-[1.15em] text-error";
+const ICON_ERROR: &str = concatcp!(style::ICON, " text-error");
 
 /// What a toast reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,8 +133,8 @@ pub fn ToastRegion() -> impl IntoView {
     let toasts = Toasts::expect();
     view! {
         <div class="fixed right-[calc(1rem+var(--spacing-safe-r))] \
-            bottom-[calc(var(--spacing-statusbar)+var(--spacing-safe-b)+1rem)] z-60 flex flex-col \
-            items-end gap-2 pointer-events-none">
+            bottom-[calc(var(--spacing-statusbar-safe)+1rem)] z-60 flex flex-col items-end gap-2 \
+            pointer-events-none">
             <For each=move || toasts.list.get() key=|toast| toast.id let:toast>
                 {
                     let (class, icon, icon_class) = match toast.kind {

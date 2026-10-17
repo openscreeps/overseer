@@ -52,24 +52,22 @@ const MENU_BUTTON: &str = concatcp!(
 /// A menu's caret.
 const MENU_CARET: &str = "inline-flex text-muted transition-transform duration-(--duration) \
     ease-standard group-aria-expanded:rotate-180 max-xs:hidden";
-/// The list of a menu, under its button; never wider or taller than the window (it scrolls).
-const MENU_LIST: &str = "absolute top-[calc(100%+0.25rem)] left-0 z-30 min-w-60 \
-    max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-var(--spacing-topbar)-var(--spacing-safe-t)-1rem)] \
+/// What the lists of all menus share: under the button, never wider or taller than the window
+/// (it scrolls). Use [`MENU_LIST`] or [`MENU_LIST_END`].
+const MENU_LIST_BASE: &str = "absolute top-[calc(100%+0.25rem)] z-30 min-w-60 \
+    max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-var(--spacing-topbar-safe)-1rem)] \
     overflow-y-auto overscroll-contain p-1 list-none bg-panel-2 border border-edge rounded-lg \
-    shadow-lg origin-top-left animate-pop-in";
+    shadow-lg animate-pop-in";
+/// The list of a menu, aligned to its button's left edge.
+const MENU_LIST: &str = concatcp!(MENU_LIST_BASE, " left-0 origin-top-left");
 /// The list of a menu at the window's right edge: aligned to its button's right edge.
-const MENU_LIST_END: &str = "absolute top-[calc(100%+0.25rem)] right-0 z-30 min-w-60 \
-    max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-var(--spacing-topbar)-var(--spacing-safe-t)-1rem)] \
-    overflow-y-auto overscroll-contain p-1 list-none bg-panel-2 border border-edge rounded-lg \
-    shadow-lg origin-top-right animate-pop-in";
+const MENU_LIST_END: &str = concatcp!(MENU_LIST_BASE, " right-0 origin-top-right");
 /// An item of a menu: a full-width quiet button (`group`: its main text marks a checked item).
 const MENU_ITEM: &str = "group flex items-center justify-start gap-2 w-full min-h-control px-2 \
     leading-tight whitespace-nowrap text-left text-fg bg-transparent border border-transparent \
     rounded-md cursor-pointer transition-colors duration-(--duration-fast) ease-standard \
     enabled:hover:bg-hover focus-visible:bg-hover focus-visible:outline-offset-[-2px] \
     disabled:opacity-55 disabled:cursor-default";
-/// The icon of a [`MENU_ITEM`].
-const MENU_ICON: &str = "inline flex-none size-[1.15em] text-muted";
 /// The main text of a [`MENU_ITEM`], accent while the item is checked; a long one is cut.
 const ITEM_MAIN: &str = "flex-1 min-w-0 truncate font-medium group-aria-checked:text-accent";
 /// A note after the main text of a [`MENU_ITEM`].
@@ -132,9 +130,8 @@ pub fn TopBar() -> impl IntoView {
     let page = expect_context::<Memo<super::Page>>();
     let on_world = move || matches!(page.get(), super::Page::World { .. });
     view! {
-        <header class="relative z-30 flex flex-none items-center gap-2 max-md:gap-1 \
-            h-[calc(var(--spacing-topbar)+var(--spacing-safe-t))] min-w-0 pt-safe-t px-3 \
-            max-md:px-2 bg-panel border-b border-edge">
+        <header class="relative z-30 flex flex-none items-center gap-2 max-md:gap-1 h-topbar-safe \
+            min-w-0 pt-safe-t px-3 max-md:px-2 bg-panel border-b border-edge">
             <a class=BRAND href="#/" aria-label="Overseer: servers" data-tip="Servers">
                 <img src="icon.svg" alt="" width="22" height="22" />
                 <span class="max-lg:hidden">"Overseer"</span>
@@ -432,7 +429,7 @@ fn ServerSwitcher() -> impl IntoView {
                     role="menuitem"
                     on:click=move |_| state.navigate(Route::Servers)
                 >
-                    <Icon kind=IconKind::Server class=MENU_ICON />
+                    <Icon kind=IconKind::Server class=style::ICON_MUTED />
                     <span class=ITEM_MAIN>"Manage servers…"</span>
                 </button>
             </li>
@@ -498,8 +495,7 @@ fn ShardSwitcher() -> impl IntoView {
 fn Breadcrumb() -> impl IntoView {
     let state = AppState::expect();
     let map = MapState::expect();
-    move || {
-        match state.route.get() {
+    move || match state.route.get() {
         Route::World { .. } => {
             let world = map
                 .shard
@@ -537,21 +533,17 @@ fn Breadcrumb() -> impl IntoView {
             }
             .into_any()
         }
-        Route::Servers => view! {
-            <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Servers"</span>
-        }
-        .into_any(),
-        Route::Profile { .. } => view! {
-            <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Account"</span>
-        }
-        .into_any(),
-        Route::User { .. } => view! {
-            <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">"Player"</span>
-        }
-        .into_any(),
+        Route::Servers => screen_name("Servers"),
+        Route::Profile { .. } => screen_name("Account"),
+        Route::User { .. } => screen_name("Player"),
         Route::Window { .. } => ().into_any(),
     }
-    }
+}
+
+/// The breadcrumb of a screen without a map: the screen's name (gone on narrow windows).
+fn screen_name(name: &'static str) -> AnyView {
+    view! { <span class="flex-none px-2 font-semibold whitespace-nowrap max-lg:hidden">{name}</span> }
+        .into_any()
 }
 
 /// "W8N3" frames that room and hands the keyboard back to the map; Escape clears the search
@@ -713,7 +705,7 @@ fn AccountMenu() -> impl IntoView {
                                 move |_| state.navigate(Route::Profile { server: slug.clone() })
                             }
                         >
-                            <Icon kind=IconKind::User class=MENU_ICON />
+                            <Icon kind=IconKind::User class=style::ICON_MUTED />
                             <span class=ITEM_MAIN>"Profile"</span>
                         </button>
                     </li>
@@ -724,7 +716,7 @@ fn AccountMenu() -> impl IntoView {
                             role="menuitem"
                             on:click=move |_| limits.open.set(true)
                         >
-                            <Icon kind=IconKind::Gauge class=MENU_ICON />
+                            <Icon kind=IconKind::Gauge class=style::ICON_MUTED />
                             <span class=ITEM_MAIN>"Rate limits"</span>
                         </button>
                     </li>
@@ -736,7 +728,7 @@ fn AccountMenu() -> impl IntoView {
                             role="menuitem"
                             on:click=move |_| spawn_local(async move { state.sign_out().await })
                         >
-                            <Icon kind=IconKind::SignOut class=MENU_ICON />
+                            <Icon kind=IconKind::SignOut class=style::ICON_MUTED />
                             <span class=ITEM_MAIN>"Sign out"</span>
                         </button>
                     </li>

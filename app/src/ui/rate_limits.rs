@@ -39,12 +39,30 @@ use crate::ui::style::{self, concatcp};
 use crate::ui::toast::{ToastKind, Toasts};
 use crate::ui::world::MapState;
 
+/// What both floating panels share: at the window's right edge, clear of the bars and the
+/// safe-area insets, scrolled when taller than the space between the bars.
+const FLOATING: &str = "fixed right-[calc(0.75rem+var(--spacing-safe-r))] \
+    max-h-[calc(100dvh-var(--spacing-topbar-safe)-var(--spacing-statusbar-safe)-2rem)] \
+    overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-edge rounded-lg \
+    shadow-lg animate-pop-in";
+/// The rate-limits panel: a [`FLOATING`] panel under the top bar.
+const LIMITS_PANEL: &str = concatcp!(
+    FLOATING,
+    " top-[calc(var(--spacing-topbar-safe)+0.5rem)] z-40 \
+    w-[min(34rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] \
+    origin-top-right"
+);
+/// The lift prompt: a [`FLOATING`] panel over the status bar, with a warning edge.
+const LIFT_PANEL: &str = concatcp!(
+    FLOATING,
+    " bottom-[calc(var(--spacing-statusbar-safe)+1rem)] z-61 \
+    w-[min(26rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] border-l-3 \
+    border-l-warn origin-bottom-right"
+);
 /// The head of a floating panel: title, then its close button.
 const PANEL_HEAD: &str = "flex items-center justify-between gap-4 mb-3";
 /// The title of a floating panel, after its icon.
 const PANEL_TITLE: &str = "flex items-center gap-2 text-lg font-semibold leading-tight";
-/// The icon of a [`PANEL_TITLE`].
-const PANEL_TITLE_ICON: &str = "inline flex-none size-[1.15em] text-muted";
 /// A cell of the limits table.
 const LIMITS_CELL: &str = "py-2 pr-3 text-left border-b border-edge";
 /// A column head of the limits table.
@@ -678,14 +696,14 @@ pub fn RateLimitsPanel() -> impl IntoView {
         ui.open.get().then(|| {
             view! {
                 <section
-                    class="fixed top-[calc(var(--spacing-topbar)+var(--spacing-safe-t)+0.5rem)] right-[calc(0.75rem+var(--spacing-safe-r))] z-40 w-[min(34rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] max-h-[calc(100dvh-var(--spacing-topbar)-var(--spacing-safe-t)-var(--spacing-statusbar)-var(--spacing-safe-b)-2rem)] overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-edge rounded-lg shadow-lg origin-top-right animate-pop-in"
+                    class=LIMITS_PANEL
                     role="dialog"
                     aria-labelledby="rate-limits-title"
                     on:keydown=keydown
                 >
                     <div class=PANEL_HEAD>
                         <h2 id="rate-limits-title" class=PANEL_TITLE>
-                            <Icon kind=IconKind::Gauge class=PANEL_TITLE_ICON />
+                            <Icon kind=IconKind::Gauge class=style::ICON_MUTED />
                             "Rate limits"
                         </h2>
                         <button
@@ -766,7 +784,7 @@ pub fn LiftPrompt() -> impl IntoView {
         let text = move || warning.text(ui.now.get());
         Some(view! {
             <section
-                class="fixed bottom-[calc(var(--spacing-statusbar)+var(--spacing-safe-b)+1rem)] right-[calc(0.75rem+var(--spacing-safe-r))] z-61 w-[min(26rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] max-h-[calc(100dvh-var(--spacing-topbar)-var(--spacing-safe-t)-var(--spacing-statusbar)-var(--spacing-safe-b)-2rem)] overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-l-3 border-edge border-l-warn rounded-lg shadow-lg origin-bottom-right animate-pop-in"
+                class=LIFT_PANEL
                 role="dialog"
                 aria-labelledby="lift-prompt-title"
                 aria-describedby="lift-prompt-text"
@@ -776,7 +794,7 @@ pub fn LiftPrompt() -> impl IntoView {
             >
                 <div class=PANEL_HEAD>
                     <h2 id="lift-prompt-title" class=PANEL_TITLE>
-                        <Icon kind=IconKind::Gauge class=PANEL_TITLE_ICON />
+                        <Icon kind=IconKind::Gauge class=style::ICON_MUTED />
                         "Rate limit running low"
                     </h2>
                 </div>

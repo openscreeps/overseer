@@ -12,6 +12,8 @@ pub use const_format::concatcp;
 
 /// An icon (`ui::icon::Icon`), sized by the font.
 pub const ICON: &str = "inline flex-none size-[1.15em]";
+/// An [`ICON`] in the muted colour (beside a menu item's text, a panel's title).
+pub const ICON_MUTED: &str = concatcp!(ICON, " text-muted");
 
 /// What every button shares: layout, line height, shape and motion, without weight, colours,
 /// padding or size (the `BTN_*` colour sets bring the weight).
@@ -171,9 +173,13 @@ pub const SKELETON_LINE_WIDE: &str = "inline-block w-48 h-[0.9em] align-middle r
     bg-linear-90 from-panel-2 from-25% via-panel-3 via-50% to-panel-2 to-75% bg-size-[200%_100%] \
     animate-shimmer motion-reduce:animate-none";
 
+/// What every count pill shares. Use [`COUNT`] or [`COUNT_NARROW`].
+const COUNT_BASE: &str = "inline-flex items-center justify-center text-xs font-semibold \
+    tabular-nums leading-[1.4] text-muted bg-panel-3 rounded-full";
 /// A count pill.
-pub const COUNT: &str = "inline-flex items-center justify-center min-w-6 px-2 text-xs \
-    font-semibold tabular-nums leading-[1.4] text-muted bg-panel-3 rounded-full";
+pub const COUNT: &str = concatcp!(COUNT_BASE, " min-w-6 px-2");
+/// A narrower count pill, for a row short of space (the drawer's tabs).
+pub const COUNT_NARROW: &str = concatcp!(COUNT_BASE, " min-w-[1.3rem] px-1.5");
 /// A status dot: unknown, off.
 pub const DOT: &str = "inline-block flex-none size-[0.55rem] rounded-full bg-faint \
     transition-colors duration-(--duration) ease-standard";
