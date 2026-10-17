@@ -2,10 +2,16 @@
 // password, the checks made before contacting the server, a rejected token, and the links to
 // screeps.com's own pages (token page, registration, password recovery).
 //
-// The form of the built-in screeps.com entry needs no server until it is sent, so those tests
-// run on every target. Signing in through it on the disposable server saves that server as a
-// screeps.com-like profile (`kind: 'official'`), which shows the same form; its session tokens
-// serve as API tokens (both go in `X-Token`).
+// The built-in screeps.com entry forces the screeps.com contract. Its form thus shows without a
+// request to the server, and needs the server only when it is sent. Those tests run on every
+// target.
+//
+// Other tests save the disposable server as a screeps.com-like profile (`kind: 'official'`).
+// That profile forces the same contract and shows the same form. Its session tokens serve as
+// API tokens (both go in `X-Token`). Only an OpenScreeps server answers the screeps.com
+// contract, because OpenScreeps adds its own profile to it. The stock community server does not
+// decode as screeps.com (its `GET /api/version` features have no `version`). Thus the
+// `community` run skips those tests.
 
 import type { Page } from '@playwright/test';
 import { expect, test, SERVER_NAME, type Server } from './fixtures';
@@ -108,53 +114,59 @@ test.describe('screeps.com sign-in', () => {
     });
   });
 
-  test('signs in with an API token', { tag: '@openscreeps' }, async ({ page, server, account }) => {
-    const { token } = await sessionOf(server, account);
-    const form = await openLocalScreepsSignIn(page, server);
-    await form.getByLabel('API token').fill(token);
-    await form.getByRole('button', { name: 'Sign in', exact: true }).click();
-    const accountButton = page.getByRole('button', { name: `Account: ${account.username}` });
-    await expect(accountButton).toBeVisible();
-    await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
-    await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/`));
-    // Kept: a reload resumes it.
-    await page.reload();
-    await expect(accountButton).toBeVisible();
-    await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
-  });
-
-  test('rejects a token the server does not know', { tag: '@openscreeps' }, async ({
-    page,
-    server,
-  }) => {
-    const form = await openLocalScreepsSignIn(page, server);
-    await form.getByLabel('API token').fill('0123456789abcdef0123456789abcdef');
-    await form.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await expect(alerts(form)).toHaveText('The token was rejected.');
-    await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
-  });
-
-  test('signs in with an e-mail and password, and fills the e-mail next time', {
-    tag: '@openscreeps',
-  }, async ({ page, server, account }) => {
-    const form = await openLocalScreepsSignIn(page, server);
-    await form.getByRole('button', { name: 'E-mail and password' }).click();
-    await form.getByLabel('E-mail').fill(account.email);
-    await form.getByLabel('Password', { exact: true }).fill(`${account.password}-wrong`);
-    await form.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await expect(alerts(form)).toHaveText('Wrong name or password.');
-
-    await form.getByLabel('Password', { exact: true }).fill(account.password);
-    await form.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await expect(page.getByRole('button', { name: `Account: ${account.username}` })).toBeVisible();
-    await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
-
-    await accountMenu(page, account.username, 'Sign out');
-    await expect(form.getByRole('button', { name: 'API token', exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true',
+  test.describe('on the disposable server as screeps.com', { tag: '@openscreeps' }, () => {
+    test.skip(
+      ({ target }) => target === 'community',
+      "the stock community server does not answer screeps.com's contract",
     );
-    await form.getByRole('button', { name: 'E-mail and password' }).click();
-    await expect(form.getByLabel('E-mail')).toHaveValue(account.email);
+
+    test('signs in with an API token', async ({ page, server, account }) => {
+      const { token } = await sessionOf(server, account);
+      const form = await openLocalScreepsSignIn(page, server);
+      await form.getByLabel('API token').fill(token);
+      await form.getByRole('button', { name: 'Sign in', exact: true }).click();
+      const accountButton = page.getByRole('button', { name: `Account: ${account.username}` });
+      await expect(accountButton).toBeVisible();
+      await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
+      await expect(page).toHaveURL(new RegExp(`#/${server.slug}/-/`));
+      // Kept: a reload resumes it.
+      await page.reload();
+      await expect(accountButton).toBeVisible();
+      await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
+    });
+
+    test('rejects a token the server does not know', async ({ page, server }) => {
+      const form = await openLocalScreepsSignIn(page, server);
+      await form.getByLabel('API token').fill('0123456789abcdef0123456789abcdef');
+      await form.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(alerts(form)).toHaveText('The token was rejected.');
+      await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
+    });
+
+    test('signs in with an e-mail and password, and fills the e-mail next time', async ({
+      page,
+      server,
+      account,
+    }) => {
+      const form = await openLocalScreepsSignIn(page, server);
+      await form.getByRole('button', { name: 'E-mail and password' }).click();
+      await form.getByLabel('E-mail').fill(account.email);
+      await form.getByLabel('Password', { exact: true }).fill(`${account.password}-wrong`);
+      await form.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(alerts(form)).toHaveText('Wrong name or password.');
+
+      await form.getByLabel('Password', { exact: true }).fill(account.password);
+      await form.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(page.getByRole('button', { name: `Account: ${account.username}` })).toBeVisible();
+      await expect(page.getByRole('contentinfo', { name: 'Status' })).toContainText('Connected');
+
+      await accountMenu(page, account.username, 'Sign out');
+      await expect(form.getByRole('button', { name: 'API token', exact: true })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      await form.getByRole('button', { name: 'E-mail and password' }).click();
+      await expect(form.getByLabel('E-mail')).toHaveValue(account.email);
+    });
   });
 });

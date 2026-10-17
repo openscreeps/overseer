@@ -52,6 +52,8 @@ test.describe('sign-in', { tag: '@openscreeps' }, () => {
 
   test('asks for the name and password before contacting the server', async ({ page, server }) => {
     const form = await openSignIn(page, server);
+    // The form shows once the server is discovered: nothing goes out after that.
+    await expect(form.getByLabel('Username or e-mail')).toBeVisible();
     const requests: string[] = [];
     page.on('request', (request) => requests.push(new URL(request.url()).pathname));
     await form.getByRole('button', { name: 'Sign in', exact: true }).last().click();
@@ -84,24 +86,28 @@ test.describe('server password', { tag: '@openscreeps' }, () => {
   }) => {
     const sent = await protectWithServerPassword(page, 'open-sesame');
     const form = await openSignIn(page, server);
+    // Asked before the form: the server cannot be discovered without it.
     const serverPassword = form.getByLabel('Server password', { exact: true });
-    await expect(serverPassword).toHaveCount(0);
-    await form.getByLabel('Username or e-mail').fill(account.username);
-    await form.getByLabel('Password', { exact: true }).fill(account.password);
-    const signInButton = form.getByRole('button', { name: 'Sign in', exact: true }).last();
-    await signInButton.click();
-    await expect(alerts(form)).toHaveText('incorrect server password');
     await expect(serverPassword).toHaveAccessibleDescription(
       "This server is password-protected; ask its operator for the password.",
     );
+    await expect(form.getByLabel('Username or e-mail')).toHaveCount(0);
+    const continueButton = form.getByRole('button', { name: 'Continue', exact: true });
+    await continueButton.click();
+    await expect(alerts(form)).toHaveText('Enter the server password');
 
     await serverPassword.fill('wrong');
-    await signInButton.click();
+    await continueButton.click();
     await expect.poll(() => sent.includes('wrong')).toBe(true);
     await expect(alerts(form)).toHaveText('incorrect server password');
+    await expect(form.getByLabel('Username or e-mail')).toHaveCount(0);
 
     await serverPassword.fill('open-sesame');
-    await signInButton.click();
+    await continueButton.click();
+    await form.getByLabel('Username or e-mail').fill(account.username);
+    await expect(serverPassword).toHaveCount(0);
+    await form.getByLabel('Password', { exact: true }).fill(account.password);
+    await form.getByRole('button', { name: 'Sign in', exact: true }).last().click();
     await expectSignedIn(page, server, account);
 
     // Stored: resuming after a reload sends it again.
@@ -151,6 +157,8 @@ test.describe('server password', { tag: '@openscreeps' }, () => {
     await expect(alerts(form)).toHaveText(
       'This server needs its server password.',
     );
+    await expect(form.getByLabel('Server password', { exact: true })).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Continue', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
   });
 });

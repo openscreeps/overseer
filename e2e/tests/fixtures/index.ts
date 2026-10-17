@@ -210,7 +210,9 @@ async function seed(
         user: {
           id: user.id,
           username: user.username,
-          ...(server.kind === 'official' ? { api_token: true } : {}),
+          // The official target signs in with an API token, the disposable worlds with a
+          // password (the app records `api_token: false` for a password sign-in).
+          api_token: server.kind === 'official',
         },
       },
     ],

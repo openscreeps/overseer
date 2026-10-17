@@ -107,7 +107,7 @@ test.describe('rate limits', { tag: '@openscreeps' }, () => {
       /Owners [01] \/ [\d\u202f]+ · Portals [\d\u202f]+ \/ [\d\u202f]+ · waiting for the rate limit, resumes in (30|31) min$/,
       { timeout: 30_000 },
     );
-    // Private servers have no reset page.
+    // A password session has no reset, because only API tokens have lifts.
     await expect(status.getByRole('button', { name: 'Reset limit' })).toHaveCount(0);
 
     // The panel lists the limit the refusal reported.

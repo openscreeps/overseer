@@ -17,9 +17,44 @@ async function openRegister(page: Page, server: Server): Promise<Locator> {
   return page.getByRole('region', { name: `Register on ${SERVER_NAME}` });
 }
 
+/**
+ * `GET /api/version` of an `OpenScreeps` server (its `openscreeps` feature), whose subsystems
+ * include password sign-in and registration.
+ */
+const OPENSCREEPS_VERSION = {
+  ok: 1,
+  protocol: 14,
+  useNativeAuth: false,
+  users: 1,
+  packageVersion: '0.0.0',
+  serverData: {
+    customObjectTypes: {},
+    historyChunkSize: 20,
+    socketUpdateThrottle: 200,
+    renderer: { resources: {}, metadata: {} },
+    features: [
+      { name: 'auth', version: 1 },
+      { name: 'openscreeps', version: 1 },
+    ],
+  },
+};
+
 test.describe('registration tabs', () => {
   test('switches between signing in and registering', async ({ page }) => {
-    // Saved only: the forms need no server until something is typed or sent.
+    // A server that only answers its discovery (`GET /api/version`): the forms need nothing more
+    // until something is typed or sent.
+    await page.route('http://127.0.0.1:9/api/version', (route) =>
+      route.request().method() === 'OPTIONS'
+        ? route.fulfill({
+            status: 204,
+            headers: {
+              ...corsHeaders(route.request()),
+              'access-control-allow-headers': '*',
+              'access-control-allow-methods': 'GET',
+            },
+          })
+        : fulfillJson(route, OPENSCREEPS_VERSION),
+    );
     await page.goto('/#/');
     await page
       .getByRole('region', { name: 'Servers' })
@@ -98,7 +133,10 @@ test.describe('registration', { tag: '@openscreeps' }, () => {
 
   test("shows the server's error as it is", async ({ page, server, account, target }) => {
     const form = await openRegister(page, server);
-    await form.getByLabel('Username', { exact: true }).fill(account.username);
+    const username = form.getByLabel('Username', { exact: true });
+    await username.fill(account.username);
+    // Checked with the server: it is connected, so the form can be sent.
+    await expect(username).toHaveAccessibleDescription(/Already taken/);
     await form.getByLabel('E-mail', { exact: true }).fill(`${unique('new')}@e2e.invalid`);
     await form.getByLabel('Password', { exact: true }).fill('long-enough-1');
     await form.getByLabel('Repeat the password', { exact: true }).fill('long-enough-1');
@@ -114,7 +152,10 @@ test.describe('registration', { tag: '@openscreeps' }, () => {
   test('registers and signs in automatically', async ({ page, server }) => {
     const form = await openRegister(page, server);
     const username = unique('reg');
-    await form.getByLabel('Username', { exact: true }).fill(username);
+    const field = form.getByLabel('Username', { exact: true });
+    await field.fill(username);
+    // Checked with the server: it is connected, so the form can be sent.
+    await expect(field).toHaveAccessibleDescription(/Available/);
     await form.getByLabel('E-mail', { exact: true }).fill(`${username}@e2e.invalid`);
     await form.getByLabel('Password', { exact: true }).fill('long-enough-1');
     await form.getByLabel('Repeat the password', { exact: true }).fill('long-enough-1');

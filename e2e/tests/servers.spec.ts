@@ -10,7 +10,7 @@ import type { Page } from '@playwright/test';
 import { addServer, expect, SERVER_NAME, signIn, test } from './fixtures';
 import { storedToken } from './support/accounts';
 
-/** A private server address the app never has to reach in these tests. */
+/** A private server address that nobody answers on. */
 const OFFLINE = 'http://127.0.0.1:9/';
 
 /** Adds a private server called `name` at `address` through the "Add server" dialog. */
@@ -165,14 +165,23 @@ test.describe('servers', () => {
     );
   });
 
-  test('opens the sign-in form of a saved server', async ({ page }) => {
+  test('opens the sign-in screen of a saved server, which says when it cannot reach it', async ({
+    page,
+  }) => {
     await page.goto('/#/');
     await add(page, 'Fictional', OFFLINE);
     await page.getByRole('button', { name: 'Sign in Fictional' }).click();
     await expect(page).toHaveURL(/#\/127\.0\.0\.1-9\/$/);
     const form = page.getByRole('region', { name: 'Sign in to Fictional' });
     await expect(form).toContainText(OFFLINE);
-    await expect(form.getByLabel('Username or e-mail')).toBeVisible();
+    // The screen asks the server what it offers. Nobody answers, so it shows the error and no form.
+    const again = form.getByRole('button', { name: 'Try again' });
+    await expect(again).toBeVisible();
+    await expect(form.getByRole('alert').filter({ hasText: /\S/ })).toHaveCount(1);
+    await expect(form.getByLabel('Username or e-mail')).toHaveCount(0);
+    await again.click();
+    await expect(again).toBeVisible();
+    await expect(form.getByLabel('Username or e-mail')).toHaveCount(0);
     await form.getByRole('button', { name: 'Choose another server' }).click();
     await expect(page).toHaveURL(/#\/$/);
     await expect(page.getByRole('region', { name: 'Servers' })).toBeVisible();

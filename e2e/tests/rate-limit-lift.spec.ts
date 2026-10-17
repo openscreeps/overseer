@@ -2,7 +2,7 @@
 // status bar and the Rate limits panel say until when, ten minutes before the end a toast
 // offers to lift them again, and once they are not lifted an endpoint running low brings a
 // prompt to lift them (screeps.com's reset page) or to leave it (`Not now`). Password sessions
-// and private servers never see any of it.
+// and servers that do not lift rate limits never see any of it.
 //
 // The local server is no screeps.com: the session is seeded as a screeps.com-like profile
 // (`kind: 'official'`, signed in with an API token) and the test rewrites what screeps.com
@@ -10,6 +10,13 @@
 // characters) with `noRatelimitUntil`, map-stats responses carry low `X-RateLimit-*` headers or
 // a refusal (HTTP 429), and screeps.com's reset page is a stand-in that posts its success
 // message to the app, as the real one does once its captcha is solved.
+//
+// The `official` kind forces the screeps.com contract. Only an OpenScreeps server can stand in
+// for screeps.com, because OpenScreeps adds its own profile to that contract. As a `private`
+// server, the app discovers OpenScreeps, which does not lift rate limits. The stock community
+// server does not decode as screeps.com (its `GET /api/version` features have no `version`).
+// Also, screepsmod-auth lifts rate limits with a request. Thus the `community` run skips these
+// tests.
 //
 // The user may also lift the limits on the website itself, with no message to the app: the
 // tests that cover it switch the token list to lifted behind the app's back and move the
@@ -35,8 +42,9 @@ function limitHeaders(remaining: number, reset: number): Record<string, string> 
 }
 
 /**
- * Seeds `server` as a screeps.com-like server (`kind`) with `account` signed in, through an API
- * token (`apiToken`) or a password, and opens its world (like the fixtures' `signIn`).
+ * Seeds `server` with `account` signed in, and opens its world (like the fixtures' `signIn`).
+ * The profile is screeps.com-like (`kind: 'official'`) or private. The account signs in with an
+ * API token (`apiToken`) or a password.
  */
 async function signInAs(
   page: Page,
@@ -173,6 +181,10 @@ async function resetPage(page: Page, open: () => Promise<void>): Promise<void> {
 }
 
 test.describe('lifted rate limits', { tag: '@openscreeps' }, () => {
+  test.skip(
+    ({ target }) => target === 'community',
+    "the stock community server lacks screeps.com's contract and lifts rate limits itself",
+  );
   // These tests count and refuse the overview loads: the world starts uncached.
   test.use({ cache: 'cold' });
   // A rewritten response still fetching from the server when the test ends must not fail
@@ -405,7 +417,8 @@ test.describe('lifted rate limits', { tag: '@openscreeps' }, () => {
 
   for (const [kind, apiToken, what] of [
     ['official', false, 'a password session'],
-    ['private', true, 'a private server'],
+    // Discovered as OpenScreeps, which does not lift rate limits.
+    ['private', true, 'a server that does not lift rate limits'],
   ] as const) {
     test(`${what} never checks or prompts`, async ({ page, server, account }) => {
       const reset = Math.floor(Date.now() / 1000) + 30 * 60;

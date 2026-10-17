@@ -54,7 +54,7 @@ description = "Opt-in: the read-only live and UI tests against screeps.com with 
 run = "cargo xtask e2e --target official"
 
 [tasks.e2e-community]
-description = "Live feature tests and Playwright UI tests against a disposable community private server world in Docker (screeps-launcher with screepsmod-auth and screepsmod-admin-utils, image built from e2e/community/, cached); only the tests of a wrong current password are left out (it crashes the server's backend)"
+description = "Live feature tests and Playwright UI tests against a disposable community private server world in Docker (screeps-launcher with screepsmod-auth and screepsmod-admin-utils, image built from e2e/community/, cached)"
 run = "cargo xtask e2e --target community"
 
 [tasks.e2e-desktop]
