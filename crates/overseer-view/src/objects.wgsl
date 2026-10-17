@@ -386,22 +386,29 @@ fn store_ring(acc: vec4<f32>, p: vec2<f32>, heading: f32, fill: vec4<f32>, carry
 }
 
 // The owner's badge (`TokenOut::badge`: its atlas cell plus one) on the disc of `radius`
-// round the token's centre, premultiplied. `dx` and `dy` are the screen derivatives of `p`
-// (sampled with explicit gradients: emblems run in non-uniform control flow).
-fn badge_disc(badge: u32, p: vec2<f32>, radius: f32, dx: vec2<f32>, dy: vec2<f32>, px: f32) -> vec4<f32> {
+// round the token's centre, premultiplied, its top turned to `heading` (a turn fraction
+// clockwise from north). `dx` and `dy` are the screen derivatives of `p` (sampled with
+// explicit gradients: emblems run in non-uniform control flow).
+fn badge_disc(badge: u32, p: vec2<f32>, heading: f32, radius: f32, dx: vec2<f32>, dy: vec2<f32>, px: f32) -> vec4<f32> {
     let cell = badge - 1u;
     let block = cell % BADGE_CELLS_PER_LAYER;
     let corner = vec2<f32>(f32(block % BADGE_COLUMNS), f32(block / BADGE_COLUMNS));
     let scale = vec2<f32>(1.0 / f32(BADGE_COLUMNS), 1.0 / f32(BADGE_ROWS));
-    let unit = clamp(p / (2.0 * radius) + vec2<f32>(0.5), vec2<f32>(0.02), vec2<f32>(0.98));
+    // From the tile (y south) into the badge: turned back by the heading.
+    let angle = heading * TAU;
+    let c = cos(angle);
+    let s = sin(angle);
+    let back = mat2x2<f32>(vec2<f32>(c, -s), vec2<f32>(s, c));
+    let q = back * p;
+    let unit = clamp(q / (2.0 * radius) + vec2<f32>(0.5), vec2<f32>(0.02), vec2<f32>(0.98));
     let k = scale / (2.0 * radius);
     let color = textureSampleGrad(
         badge_atlas,
         badge_sampler,
         (corner + unit) * scale,
         i32(cell / BADGE_CELLS_PER_LAYER),
-        dx * k,
-        dy * k,
+        (back * dx) * k,
+        (back * dy) * k,
     );
     return color * cover(length(p) - radius, px);
 }
@@ -453,7 +460,8 @@ fn emblem(in: TokenOut, p: vec2<f32>, px: f32, dx: vec2<f32>, dy: vec2<f32>) -> 
             acc = parts_ring(acc, p, in.parts_a, in.parts_b, heading, r * 0.64, r * 0.86, px);
             if in.badge > 0u {
                 acc = store_ring(acc, p, heading, in.fill, in.parts_a.z, r * 0.5, r * 0.59, px);
-                acc = over_premultiplied(acc, badge_disc(in.badge, p, r * 0.46, dx, dy, px));
+                // The badge's top faces the front, as the creep turns.
+                acc = over_premultiplied(acc, badge_disc(in.badge, p, heading, r * 0.46, dx, dy, px));
             } else {
                 acc = over(acc, mix(rgb8(30.0, 33.0, 39.0), rim, 0.15), cover(d - r * 0.6, px));
                 acc = core(acc, p, r * 0.48, in.fill, px);
@@ -465,7 +473,8 @@ fn emblem(in: TokenOut, p: vec2<f32>, px: f32, dx: vec2<f32>, dy: vec2<f32>) -> 
             let ring = sd_ngon(p, 5.0, PI, r * 0.6, 0.03);
             acc = over(acc, rgb8(255.0, 61.0, 110.0), band(ring, -0.03, 0.0, px));
             if in.badge > 0u {
-                acc = over_premultiplied(acc, badge_disc(in.badge, p, r * 0.44, dx, dy, px));
+                // Upright: the pentagon does not turn.
+                acc = over_premultiplied(acc, badge_disc(in.badge, p, 0.0, r * 0.44, dx, dy, px));
             } else {
                 acc = core(acc, p, r * 0.36, in.fill, px);
             }

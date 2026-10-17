@@ -92,17 +92,17 @@
 //!   pentagon, rings and joined blocks) and emblem. Owned objects carry their owner's colour
 //!   as a rim (own green, other players red, Invaders orange, Source Keepers purple; a
 //!   reserved controller its reserver's); structures are slate.
-//! - **Creeps** carry their owner's badge ([`Viewer::set_badge`]) in the middle, inside a
-//!   ring of body parts (one segment per part, a colour per type). The parts are mirrored
-//!   about the creep's heading, front to back: attack, ranged attack, heal, claim, work,
-//!   tough, carry, move. A thin ring between the badge and the parts shows the carried
-//!   resource, filling from the back towards the front (dim while empty, for creeps with
-//!   carry parts). Until the owner's badge is there (and for the NPCs, which have none), a
-//!   dark core shows the carried resource as a glow instead. Power creeps carry the badge in
-//!   a crimson ring. A creep heads where it last moved, else at the target of its action
-//!   (attack, heal, harvest, build, repair, upgrade, reserve); a tower's barrel points at
-//!   the target of its last attack, heal or repair. Both turn the short way round over
-//!   200 ms; objects seen first face south.
+//! - **Creeps** carry their owner's badge ([`Viewer::set_badge`]) in the middle, its top
+//!   facing the creep's front, inside a ring of body parts (one segment per part, a colour
+//!   per type). The parts are mirrored about the creep's heading, front to back: attack,
+//!   ranged attack, heal, claim, work, tough, carry, move. A thin ring between the badge and
+//!   the parts shows the carried resource, filling from the back towards the front (dim
+//!   while empty, for creeps with carry parts). Until the owner's badge is there (and for
+//!   the NPCs, which have none), a dark core shows the carried resource as a glow instead.
+//!   Power creeps carry the badge upright in a crimson ring. A creep heads where it last
+//!   moved, else at the target of its action (attack, heal, harvest, build, repair,
+//!   upgrade, reserve); a tower's barrel points at the target of its last attack, heal or
+//!   repair. Both turn the short way round over 200 ms; objects seen first face south.
 //! - **Structures**: stores (spawns, extensions, towers, links, labs, nukers, power spawns)
 //!   show as a glowing core of radius ∝ √fill in the main resource's colour, tanks (storage,
 //!   terminal, container, factory) as a level; damaged objects get a hits bar (not walls
