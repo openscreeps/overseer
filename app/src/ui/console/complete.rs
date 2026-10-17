@@ -2,8 +2,9 @@
 //! and the ranked names that complete it.
 //!
 //! The names come from the API [`catalog`], from the signed-in user's game ([`Names`]: own
-//! creeps, spawns and rooms, the keys of `Memory`), and from earlier commands (whole commands
-//! that start with the input). A dot after a known object narrows the names to its members.
+//! creeps, spawns and rooms; and the keys of `Memory`), and from earlier commands (whole
+//! commands that start with the input). A dot after a known object narrows the names to its
+//! members.
 //! Matches that start with the typed text (same case) come first, then those that start with
 //! it in any case, then those that contain it.
 //!
@@ -14,7 +15,6 @@ mod catalog;
 mod tests;
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -27,8 +27,8 @@ const HISTORY_LIMIT: usize = 3;
 /// Most segments of a chain (`a.b.c` has 2 before the word).
 const MAX_SEGMENTS: usize = 16;
 
-/// The names of the signed-in user's game (on one shard) that the catalog cannot know.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// The names of the signed-in user's own objects (on one shard) that the catalog cannot know.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Names {
     /// The keys of `Game.creeps`.
     pub creeps: Vec<String>,
@@ -36,8 +36,6 @@ pub struct Names {
     pub spawns: Vec<String>,
     /// The keys of `Game.rooms`.
     pub rooms: Vec<String>,
-    /// `Memory`, once loaded.
-    pub memory: Option<Arc<Value>>,
 }
 
 /// One suggestion: replace `start..end` (UTF-16 offsets) of the input with `insert`.
@@ -86,9 +84,16 @@ pub struct Completion {
     pub needs: Needs,
 }
 
-/// The suggestions for `text` with the caret at `caret` (UTF-16 offset), from `names` and
-/// `history` (earlier commands, oldest first).
-pub fn complete(text: &str, caret: usize, names: &Names, history: &[String]) -> Completion {
+/// The suggestions for `text` with the caret at `caret` (UTF-16 offset), from `names`,
+/// `memory` (all of `Memory`; `None` before it was read) and `history` (earlier commands,
+/// oldest first).
+pub fn complete(
+    text: &str,
+    caret: usize,
+    names: &Names,
+    memory: Option<&Value>,
+    history: &[String],
+) -> Completion {
     let at = byte_offset(text, caret);
     let mut completion = Completion::default();
     // Earlier commands complete the whole input, with the caret at its end.
@@ -110,7 +115,7 @@ pub fn complete(text: &str, caret: usize, names: &Names, history: &[String]) -> 
         Vec::new()
     };
     if let Some(chain) = chain(text, at) {
-        let candidates = candidates(&chain, names, &mut completion.needs);
+        let candidates = candidates(&chain, names, memory, &mut completion.needs);
         let room = LIMIT - commands.len();
         completion.suggestions = rank(chain.word, candidates, room)
             .into_iter()
@@ -323,8 +328,8 @@ enum Target<'a> {
     Unknown,
 }
 
-/// The value that `segments` reach.
-fn resolve<'a>(segments: &[&str], names: &'a Names, needs: &mut Needs) -> Target<'a> {
+/// The value that `segments` reach, with `memory` as `Memory`.
+fn resolve<'a>(segments: &[&str], memory: Option<&'a Value>, needs: &mut Needs) -> Target<'a> {
     let mut target = Target::Global;
     for segment in segments {
         target = match target {
@@ -332,7 +337,7 @@ fn resolve<'a>(segments: &[&str], names: &'a Names, needs: &mut Needs) -> Target
                 .iter()
                 .find(|member| member.name == *segment)
                 .map_or(Target::Unknown, |member| match member.of {
-                    Type::Memory => Target::Memory(names.memory.as_deref()),
+                    Type::Memory => Target::Memory(memory),
                     of => Target::Typed(of),
                 }),
             Target::Typed(of) => catalog::element(of)
@@ -386,8 +391,13 @@ struct Candidate<'a> {
 }
 
 /// Every name the chain's object has (before ranking).
-fn candidates<'a>(chain: &Chain<'_>, names: &'a Names, needs: &mut Needs) -> Vec<Candidate<'a>> {
-    match resolve(&chain.segments, names, needs) {
+fn candidates<'a>(
+    chain: &Chain<'_>,
+    names: &'a Names,
+    memory: Option<&'a Value>,
+    needs: &mut Needs,
+) -> Vec<Candidate<'a>> {
+    match resolve(&chain.segments, memory, needs) {
         // A list after every space would be noise: the global scope needs a word.
         Target::Global if chain.word.is_empty() => Vec::new(),
         Target::Global => catalog::GLOBALS

@@ -290,6 +290,26 @@ pub fn patch(value: &mut Value, keys: &[String], new: Option<Value>) -> bool {
     }
 }
 
+/// Puts the applied write of `new` at `keys` into `loaded`, the value read from a path, or
+/// deletes the value there for `None`: all of `loaded` for no keys ([`patch`] otherwise).
+pub fn apply_write(loaded: &mut MemoryValue, keys: &[String], new: Option<Value>) {
+    if keys.is_empty() {
+        *loaded = new.map_or(MemoryValue::Undefined, MemoryValue::Json);
+    } else if let MemoryValue::Json(value) = loaded {
+        patch(value, keys, new);
+    }
+}
+
+/// The keys from all of `Memory` down to the value at `path` (a path of [`parse_path`] or
+/// [`path_of`]); none for all of `Memory`.
+pub fn keys_of(path: &str) -> Keys {
+    if path.is_empty() {
+        Vec::new()
+    } else {
+        path.split('.').map(str::to_owned).collect()
+    }
+}
+
 /// Whether `a` and `b` are the same JSON value. Numbers compare as JavaScript numbers do
 /// (`1` and `1.0` are the same), because the player's code stores every number as a double.
 fn same(a: &Value, b: &Value) -> bool {
@@ -340,8 +360,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        PAGE, Row, RowId, RowKind, new_key_error, parse_path, parse_segment, patch, path_of,
-        preview, rows, same, segment_length, shows_write, value_at,
+        PAGE, Row, RowId, RowKind, apply_write, keys_of, new_key_error, parse_path, parse_segment,
+        patch, path_of, preview, rows, same, segment_length, shows_write, value_at,
     };
 
     fn keys(keys: &[&str]) -> Vec<String> {
@@ -519,6 +539,31 @@ mod tests {
             value,
             json!({"a": {"c": {"x": true}}, "list": [9, null, 3]})
         );
+    }
+
+    #[test]
+    fn applies_a_write_to_a_read_value() {
+        let mut loaded = MemoryValue::Json(json!({"a": 1}));
+        apply_write(&mut loaded, &keys(&["b"]), Some(json!(2)));
+        assert_eq!(loaded, MemoryValue::Json(json!({"a": 1, "b": 2})));
+        apply_write(&mut loaded, &keys(&["a"]), None);
+        assert_eq!(loaded, MemoryValue::Json(json!({"b": 2})));
+        // No keys: the write replaces the value, or deletes it.
+        apply_write(&mut loaded, &[], Some(json!(3)));
+        assert_eq!(loaded, MemoryValue::Json(json!(3)));
+        apply_write(&mut loaded, &[], None);
+        assert_eq!(loaded, MemoryValue::Undefined);
+        // Nothing was read: a key has no parent.
+        apply_write(&mut loaded, &keys(&["a"]), Some(json!(1)));
+        assert_eq!(loaded, MemoryValue::Undefined);
+    }
+
+    #[test]
+    fn splits_a_path_into_keys() {
+        assert_eq!(keys_of(""), keys(&[]));
+        assert_eq!(keys_of("creeps"), keys(&["creeps"]));
+        let path = path_of("creeps.c1", &keys(&["memory", "role"])).unwrap();
+        assert_eq!(keys_of(&path), keys(&["creeps", "c1", "memory", "role"]));
     }
 
     #[test]

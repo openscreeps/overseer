@@ -1,15 +1,18 @@
-use std::sync::Arc;
-
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{Completion, Names, Needs, Suggestion, byte_offset, complete, utf16_len};
 
 /// No labels.
 const NONE: [&str; 0] = [];
 
-/// The suggestions for `text` with the caret at its end.
+/// The suggestions for `text` with the caret at its end, without `Memory`.
 fn at_end(text: &str, names: &Names) -> Completion {
-    complete(text, utf16_len(text), names, &[])
+    complete(text, utf16_len(text), names, None, &[])
+}
+
+/// The suggestions for `text` with the caret at its end, with `memory` as `Memory`.
+fn at_end_in(text: &str, memory: &Value) -> Completion {
+    complete(text, utf16_len(text), &Names::default(), Some(memory), &[])
 }
 
 /// The labels of `completion`.
@@ -30,17 +33,21 @@ fn find<'a>(completion: &'a Completion, label: &str) -> &'a Suggestion {
         .unwrap_or_else(|| panic!("no suggestion {label} in {:?}", labels(completion)))
 }
 
-/// Names with creeps, a spawn, rooms and a `Memory`.
+/// Names with creeps, a spawn and rooms.
 fn names() -> Names {
     Names {
         creeps: vec!["c100".to_owned(), "c101".to_owned(), "my creep".to_owned()],
         spawns: vec!["Spawn1".to_owned()],
         rooms: vec!["W1N1".to_owned()],
-        memory: Some(Arc::new(json!({
-            "creeps": { "c100": { "role": "harvester" } },
-            "ticks": 12,
-        }))),
     }
+}
+
+/// A `Memory` with keys at two depths.
+fn memory() -> Value {
+    json!({
+        "creeps": { "c100": { "role": "harvester" } },
+        "ticks": 12,
+    })
 }
 
 #[test]
@@ -126,15 +133,18 @@ fn completes_own_names_and_asks_for_them() {
 
 #[test]
 fn completes_memory_keys_at_any_depth() {
-    let names = names();
-    let root = at_end("Memory.", &names);
+    let memory = memory();
+    let root = at_end_in("Memory.", &memory);
     assert_eq!(labels(&root), ["creeps", "ticks"]);
     assert_eq!(find(&root, "ticks").detail, "number");
     assert!(root.needs.memory);
-    assert_eq!(labels(&at_end("Memory.creeps.c", &names)), ["c100"]);
-    assert_eq!(labels(&at_end("Memory.creeps.c100.r", &names)), ["role"]);
+    assert_eq!(labels(&at_end_in("Memory.creeps.c", &memory)), ["c100"]);
+    assert_eq!(
+        labels(&at_end_in("Memory.creeps.c100.r", &memory)),
+        ["role"]
+    );
     // A number has no keys.
-    assert_eq!(labels(&at_end("Memory.ticks.", &names)), NONE);
+    assert_eq!(labels(&at_end_in("Memory.ticks.", &memory)), NONE);
     let unloaded = at_end("Memory.", &Names::default());
     assert_eq!(labels(&unloaded), NONE);
     assert!(unloaded.needs.memory);
@@ -142,19 +152,16 @@ fn completes_memory_keys_at_any_depth() {
 
 #[test]
 fn ranks_same_case_prefix_then_any_case_prefix_then_substring() {
-    let names = Names {
-        memory: Some(Arc::new(json!({
-            "xalpha": 1, "Alpha": 1, "beta": 1, "alpha2": 1, "al": 1,
-        }))),
-        ..Names::default()
-    };
+    let memory = json!({
+        "xalpha": 1, "Alpha": 1, "beta": 1, "alpha2": 1, "al": 1,
+    });
     // The exact name is no suggestion.
     assert_eq!(
-        labels(&at_end("Memory.al", &names)),
+        labels(&at_end_in("Memory.al", &memory)),
         ["alpha2", "Alpha", "xalpha"]
     );
     // One character matches prefixes only.
-    let completion = at_end("Memory.a", &names);
+    let completion = at_end_in("Memory.a", &memory);
     let one = labels(&completion);
     assert_eq!(one.len(), 3, "{one:?}");
     assert_eq!(one[2], "Alpha");
@@ -165,13 +172,13 @@ fn finds_the_chain_at_the_caret() {
     let names = Names::default();
     // In the middle of a line, before other code.
     let text = "x(Game.cr, 1)";
-    let completion = complete(text, 9, &names, &[]);
+    let completion = complete(text, 9, &names, None, &[]);
     let creeps = find(&completion, "creeps");
     assert_eq!((creeps.start, creeps.end), (7, 9));
     assert_eq!(creeps.apply(text), ("x(Game.creeps, 1)".to_owned(), 13));
     // On a line of a multi-line input.
     let text = "let a = 1;\nGame.cr\nfoo();";
-    let completion = complete(text, 18, &names, &[]);
+    let completion = complete(text, 18, &names, None, &[]);
     assert_eq!(
         find(&completion, "creeps").apply(text),
         ("let a = 1;\nGame.creeps\nfoo();".to_owned(), 22)
@@ -185,7 +192,7 @@ fn counts_offsets_in_utf16_units() {
     let text = "'🎉é'; Game.cr";
     let caret = utf16_len(text);
     assert_eq!(caret, 14);
-    let completion = complete(text, caret, &names, &[]);
+    let completion = complete(text, caret, &names, None, &[]);
     let creeps = find(&completion, "creeps");
     assert_eq!((creeps.start, creeps.end), (12, 14));
     assert_eq!(creeps.apply(text), ("'🎉é'; Game.creeps".to_owned(), 18));
@@ -242,21 +249,21 @@ fn suggests_earlier_commands_that_start_with_the_input() {
         "Game.time + 1".to_owned(),
     ];
     let text = "Game.t";
-    let completion = complete(text, utf16_len(text), &names, &history);
+    let completion = complete(text, utf16_len(text), &names, None, &history);
     assert_eq!(labels(&completion), ["time", "Game.time + 1", "Game.time"]);
     let command = find(&completion, "Game.time + 1");
     assert_eq!(command.detail, "history");
     assert_eq!(command.apply(text), ("Game.time + 1".to_owned(), 13));
     // Only with the caret at the end, and never the input itself.
     assert!(
-        complete(text, 5, &names, &history)
+        complete(text, 5, &names, None, &history)
             .suggestions
             .iter()
             .all(|suggestion| suggestion.detail != "history")
     );
     let text = "Game.time";
     assert_eq!(
-        labels(&complete(text, utf16_len(text), &names, &history)),
+        labels(&complete(text, utf16_len(text), &names, None, &history)),
         ["Game.time + 1"]
     );
 }

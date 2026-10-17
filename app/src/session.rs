@@ -1,10 +1,10 @@
-//! Connecting to a server and reading its failures.
+//! Connecting to a server, reading its failures, and waiting for the session's request budget.
 
 use std::fmt;
 
 use overseer::core::api::ApiError;
 use overseer::model::platform::ServerKind;
-use overseer::net::{Api, Client};
+use overseer::net::{Api, Client, Priority, rt};
 use overseer::{Auth, Overseer, ServerProfile};
 
 use crate::platform::Platform;
@@ -189,6 +189,15 @@ async fn stored_server_password(platform: &Platform, server: &str) -> Option<Str
         .ok()
         .flatten()
         .filter(|password| !password.is_empty())
+}
+
+/// Waits until the request budget of `overseer`'s session lets `pending + 1` more requests of
+/// `priority` go (`Client::budget_ready_at`). A server without rate limits has no budget: this
+/// returns at once.
+pub async fn wait_for_budget(overseer: &Overseer, priority: Priority, pending: usize) {
+    while let Some(at) = overseer.client().budget_ready_at(priority, pending) {
+        rt::sleep_until(at).await;
+    }
 }
 
 #[cfg(test)]

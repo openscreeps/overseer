@@ -179,7 +179,6 @@ mod loader {
     use overseer::Overseer;
     use overseer::map::RoomCoord;
     use overseer::net::Priority;
-    use overseer::net::rt;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
@@ -188,6 +187,7 @@ mod loader {
     };
 
     use super::{BADGE_BYTES, BADGE_SIZE, Want, merge, premultiply};
+    use crate::session::wait_for_budget;
     use crate::terrain_cache::BadgeStore;
 
     /// Delivers a badge's pixels to a viewer.
@@ -368,9 +368,7 @@ mod loader {
                     self.deliver(&want.user, &pixels);
                     continue;
                 }
-                while let Some(at) = self.overseer.client().budget_ready_at(Priority::Visible, 0) {
-                    rt::sleep_until(at).await;
-                }
+                wait_for_budget(&self.overseer, Priority::Visible, 0).await;
                 // A badge that cannot be fetched or drawn is not tried again on this screen.
                 let Ok(svg) = self.overseer.map().badge_svg(&want.username, false).await else {
                     continue;

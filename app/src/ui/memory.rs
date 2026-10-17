@@ -3,6 +3,7 @@
 //! - Tree ([`tree`]): all of `Memory` (`Memory::get` with an empty path), or the value at the
 //!   path in the path field. Objects and arrays expand from the loaded value, [`model::PAGE`]
 //!   children at a time ("Show more" shows more). The status line tells when the tree loaded.
+//!   All of `Memory` is the [`Account`]'s: the console completes its keys.
 //! - Editor ([`editor`]): the selected value as JSON. Save, Delete and "Add key" queue a write
 //!   that the player's code applies on its next tick: the tab reads the path again (at most
 //!   three times) and puts the new value into the tree, or reports the write as late. A key with
@@ -11,7 +12,9 @@
 //! - Segments ([`segments`]): load a segment by number, edit its raw text, save it (at once).
 //!
 //! The drawer makes one [`MemoryState`] and keeps it: the tab keeps its tree, its selection and
-//! its drafts while another tab shows. On a sharded server a shard selector chooses the shard.
+//! its drafts while another tab shows. On a sharded server a shard selector chooses the shard:
+//! the [`Account`]'s, which the console uses too. When the shard changes, the tab forgets what
+//! it showed of the old shard; the tree loads the new one when it shows.
 
 mod editor;
 mod model;
@@ -19,10 +22,10 @@ mod segments;
 mod tree;
 
 use leptos::prelude::*;
-use overseer::{Memory, Overseer};
 
 use self::segments::{SegmentState, SegmentsView};
 use self::tree::{TreeState, TreeView};
+use crate::ui::account::{Account, ShardSelect};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
 
@@ -34,7 +37,9 @@ const VIEW_BUTTON: &str = concatcp!(
     style::BTN,
     " ",
     style::BTN_DEFAULT,
-    " min-h-control-sm px-3 text-sm ",
+    " ",
+    style::BTN_SM,
+    " ",
     style::SEGMENT_SHAPE
 );
 /// A quiet small icon button of the bar, its tooltip below at its right edge.
@@ -42,27 +47,6 @@ const BAR_BUTTON: &str = concatcp!(
     style::ICON_BUTTON_GHOST_SM,
     " relative ml-auto ",
     style::TIP_END
-);
-/// A small button in the tree and the editor.
-const SMALL_BUTTON: &str = concatcp!(
-    style::BTN,
-    " ",
-    style::BTN_DEFAULT,
-    " min-h-control-sm px-3 text-sm"
-);
-/// A small main action.
-const SMALL_PRIMARY: &str = concatcp!(
-    style::BTN,
-    " ",
-    style::BTN_PRIMARY,
-    " min-h-control-sm px-3 text-sm"
-);
-/// A small destructive action.
-const SMALL_DANGER: &str = concatcp!(
-    style::BTN,
-    " ",
-    style::BTN_DANGER,
-    " min-h-control-sm px-3 text-sm"
 );
 /// A text area for JSON or raw text: as wide as its panel, monospaced.
 const TEXT_AREA: &str = "w-full min-w-0 px-2 py-1.5 font-mono text-sm leading-normal text-fg \
@@ -83,10 +67,8 @@ enum View {
 /// handle stays small.
 #[derive(Clone, Copy)]
 pub struct MemoryState {
-    /// The server's shards (empty on single-world servers).
-    shards: StoredValue<Vec<String>>,
-    /// The shard to read and write.
-    shard: RwSignal<Option<String>>,
+    /// The session and the shard to read and write.
+    account: Account,
     /// What the tab shows.
     view: RwSignal<View>,
     /// The tree and the editor.
@@ -96,25 +78,25 @@ pub struct MemoryState {
 }
 
 impl MemoryState {
-    /// The Memory of `overseer`'s user on `shard` (`None`: the default shard). Loads nothing
-    /// until the tab shows.
-    pub fn new(overseer: &Overseer, shard: Option<String>) -> Self {
-        let memory: StoredValue<Memory, LocalStorage> = StoredValue::new_local(overseer.memory());
-        let shard = RwSignal::new(shard);
+    /// The Memory of `account`'s user on its shard. Loads nothing until the tab shows.
+    pub fn new(account: Account) -> Self {
+        let tree = TreeState::new(account);
+        let segments = SegmentState::new(account);
+        // Another shard: what the tab showed belongs to the old one.
+        Effect::new(move |previous: Option<Option<String>>| {
+            let shard = account.shard.get();
+            if previous.is_some_and(|previous| previous != shard) {
+                tree.forget_shard();
+                segments.forget_shard();
+            }
+            shard
+        });
         Self {
-            shards: StoredValue::new(overseer.world().shards().to_vec()),
-            shard,
+            account,
             view: RwSignal::new(View::Tree),
-            tree: StoredValue::new(TreeState::new(memory, shard)),
-            segments: StoredValue::new(SegmentState::new(memory, shard)),
+            tree: StoredValue::new(tree),
+            segments: StoredValue::new(segments),
         }
-    }
-
-    /// Reads and writes `shard` from now on: loads the tree again there.
-    fn set_shard(self, shard: String) {
-        self.shard.set(Some(shard));
-        self.tree.get_value().change_shard();
-        self.segments.get_value().change_shard();
     }
 }
 
@@ -139,32 +121,6 @@ pub fn MemoryPanel(
             }
         })
         .collect_view();
-    let shards = move || {
-        let shards = state.shards.get_value();
-        (!shards.is_empty()).then(|| {
-            let options = shards
-                .into_iter()
-                .map(|shard| {
-                    let selected = state
-                        .shard
-                        .with_untracked(|current| current.as_deref() == Some(shard.as_str()));
-                    view! { <option value=shard.clone() selected=selected>{shard.clone()}</option> }
-                })
-                .collect_view();
-            view! {
-                <select
-                    class="min-h-control-sm min-w-0 max-w-32 px-3 text-sm text-fg bg-sunken \
-                        border border-edge rounded-md transition-[border-color] \
-                        duration-(--duration-fast) ease-standard hover:border-edge-strong \
-                        focus-visible:outline-offset-0 focus-visible:border-focus"
-                    aria-label="Shard"
-                    on:change=move |event| state.set_shard(event_target_value(&event))
-                >
-                    {options}
-                </select>
-            }
-        })
-    };
     let tree = state.tree.get_value();
     let segments = state.segments.get_value();
     let reload = move |_| match state.view.get_untracked() {
@@ -181,7 +137,7 @@ pub fn MemoryPanel(
                 <div class=style::SEGMENTED role="group" aria-label="Show">
                     {views}
                 </div>
-                {shards}
+                <ShardSelect account=state.account />
                 <button
                     type="button"
                     class=BAR_BUTTON
@@ -195,15 +151,4 @@ pub fn MemoryPanel(
             {body}
         </section>
     }
-}
-
-/// `HH:MM:SS` of the local time now.
-fn clock() -> String {
-    let date = js_sys::Date::new_0();
-    format!(
-        "{:02}:{:02}:{:02}",
-        date.get_hours(),
-        date.get_minutes(),
-        date.get_seconds()
-    )
 }

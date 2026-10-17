@@ -5,20 +5,20 @@
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::Memory;
+use overseer::net::rt::SystemTime;
 
+use super::TEXT_AREA;
 use super::model::{self, SEGMENT_LIMIT};
-use super::{SMALL_BUTTON, SMALL_PRIMARY, TEXT_AREA, clock};
 use crate::session;
+use crate::ui::account::Account;
+use crate::ui::clock;
 use crate::ui::style::{self, concatcp};
 
 /// The segments; `Copy`.
 #[derive(Clone, Copy)]
 pub struct SegmentState {
-    /// The library's Memory.
-    memory: StoredValue<Memory, LocalStorage>,
-    /// The shard to read and write.
-    shard: RwSignal<Option<String>>,
+    /// The session and the shard to read and write.
+    account: Account,
     /// The text of the number field.
     number: RwSignal<String>,
     /// The segment in the editor.
@@ -36,11 +36,10 @@ pub struct SegmentState {
 }
 
 impl SegmentState {
-    /// The segments of `memory` on `shard`; none loaded.
-    pub fn new(memory: StoredValue<Memory, LocalStorage>, shard: RwSignal<Option<String>>) -> Self {
+    /// The segments of `account` on its shard; none loaded.
+    pub fn new(account: Account) -> Self {
         Self {
-            memory,
-            shard,
+            account,
             number: RwSignal::new("0".to_owned()),
             loaded: RwSignal::new(None),
             text: RwSignal::new(String::new()),
@@ -78,8 +77,8 @@ impl SegmentState {
             return;
         };
         let request = self.start();
-        let memory = self.memory.get_value();
-        let shard = self.shard.get_untracked();
+        let memory = self.account.memory();
+        let shard = self.account.shard.get_untracked();
         spawn_local(async move {
             let result = memory.segment(id, shard.as_deref()).await;
             if !self.end(request) {
@@ -90,7 +89,7 @@ impl SegmentState {
                     let status = if data.is_none() {
                         format!("Segment {id} is empty: nothing was written to it yet.")
                     } else {
-                        format!("Loaded segment {id} at {}.", clock())
+                        format!("Loaded segment {id} at {}.", clock(SystemTime::now()))
                     };
                     self.text.try_set(data.unwrap_or_default());
                     self.loaded.try_set(Some(id));
@@ -99,7 +98,7 @@ impl SegmentState {
                 Err(error) => {
                     self.error.try_set(Some(format!(
                         "Could not load segment {id}: {}",
-                        session::describe(&error)
+                        session::error_message(&error)
                     )));
                 }
             }
@@ -115,7 +114,7 @@ impl SegmentState {
     }
 
     /// Forgets the segment of the previous shard.
-    pub fn change_shard(self) {
+    pub fn forget_shard(self) {
         self.requests.update_value(|requests| *requests += 1);
         self.busy.set(false);
         self.loaded.set(None);
@@ -137,8 +136,8 @@ impl SegmentState {
             return;
         }
         let request = self.start();
-        let memory = self.memory.get_value();
-        let shard = self.shard.get_untracked();
+        let memory = self.account.memory();
+        let shard = self.account.shard.get_untracked();
         spawn_local(async move {
             let result = memory.set_segment(id, &data, shard.as_deref()).await;
             if !self.end(request) {
@@ -146,13 +145,15 @@ impl SegmentState {
             }
             match result {
                 Ok(()) => {
-                    self.status
-                        .try_set(Some(format!("Saved segment {id} at {}.", clock())));
+                    self.status.try_set(Some(format!(
+                        "Saved segment {id} at {}.",
+                        clock(SystemTime::now())
+                    )));
                 }
                 Err(error) => {
                     self.error.try_set(Some(format!(
                         "Could not save segment {id}: {}",
-                        session::describe(&error)
+                        session::error_message(&error)
                     )));
                 }
             }
@@ -187,15 +188,12 @@ pub fn SegmentsView(
                         inputmode="numeric"
                         min="0"
                         max="99"
-                        class="w-24 min-h-control-sm px-3 text-sm text-fg bg-sunken border \
-                            border-edge rounded-md transition-[border-color] \
-                            duration-(--duration-fast) ease-standard hover:border-edge-strong \
-                            focus-visible:outline-offset-0 focus-visible:border-focus"
+                        class=concatcp!(style::INPUT_SM, " w-24")
                         prop:value=move || state.number.get()
                         on:input=move |event| state.number.set(event_target_value(&event))
                     />
                 </label>
-                <button type="submit" class=SMALL_BUTTON disabled=move || state.busy.get()>
+                <button type="submit" class=style::BUTTON_SM disabled=move || state.busy.get()>
                     "Load"
                 </button>
             </form>
@@ -232,7 +230,7 @@ pub fn SegmentsView(
                 <div class="flex flex-wrap items-center gap-2">
                     <button
                         type="submit"
-                        class=SMALL_PRIMARY
+                        class=style::BUTTON_PRIMARY_SM
                         disabled=move || state.busy.get() || state.loaded.with(Option::is_none)
                     >
                         {save_label}

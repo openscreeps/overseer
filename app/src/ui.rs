@@ -9,6 +9,7 @@
 //! the pointer (a finger gets larger controls), mostly in CSS; [`media`] gives the layout as
 //! a signal where it changes what is built.
 
+mod account;
 mod console;
 mod drawer;
 mod form;
@@ -503,6 +504,22 @@ pub fn next_id() -> u64 {
         next.set(id + 1);
         id
     })
+}
+
+/// `HH:MM:SS` of `time` in the local time zone.
+#[expect(clippy::cast_precision_loss, reason = "times are far below 2^53 ms")]
+pub fn clock(time: overseer::net::rt::SystemTime) -> String {
+    let millis = time
+        .duration_since(overseer::net::rt::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(millis as f64));
+    format!(
+        "{:02}:{:02}:{:02}",
+        date.get_hours(),
+        date.get_minutes(),
+        date.get_seconds()
+    )
 }
 
 /// Opens `url` outside the app; failures go to the banner.

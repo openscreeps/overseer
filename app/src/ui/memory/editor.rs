@@ -4,7 +4,8 @@
 //! The server queues a write: the player's code applies it on its next tick. After the server
 //! takes the write, the editor reads the path again at most three times ([`POLLS`]), because
 //! screeps.com limits the reads of Memory per day. When the new value (or its absence) shows,
-//! the editor puts it into the loaded tree; else it reports the write as late (Reload shows it).
+//! the editor puts it into the loaded tree and into all of `Memory` of the account (the
+//! console completes the new key); else it reports the write as late (Reload shows it).
 //! Reload shows the rest of `Memory` again.
 
 use std::time::Duration;
@@ -12,13 +13,12 @@ use std::time::Duration;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::memory::MemoryValue;
 use overseer::net::rt;
 use serde_json::Value;
 
+use super::TEXT_AREA;
 use super::model::{self, Keys};
-use super::tree::{Loaded, TreeState};
-use super::{SMALL_BUTTON, SMALL_DANGER, SMALL_PRIMARY, TEXT_AREA};
+use super::tree::TreeState;
 use crate::session;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
@@ -69,8 +69,8 @@ impl TreeState {
     fn write(self, keys: Keys, path: String, value: Option<Value>) {
         let write = self.writes.get_value() + 1;
         self.writes.set_value(write);
-        let memory = self.memory.get_value();
-        let shard = self.shard.get_untracked();
+        let memory = self.account.memory();
+        let shard = self.account.shard.get_untracked();
         let base = self.base();
         self.write.set(Write::Sending(path.clone()));
         spawn_local(async move {
@@ -86,7 +86,7 @@ impl TreeState {
                 let verb = if value.is_some() { "save" } else { "delete" };
                 self.write.try_set(Write::Failed(format!(
                     "Could not {verb} {path}: {}",
-                    session::describe(&error)
+                    session::error_message(&error)
                 )));
                 return;
             }
@@ -117,25 +117,17 @@ impl TreeState {
         });
     }
 
-    /// Puts the applied write of `value` at `keys` into the tree, when the tree still shows
-    /// path `base` on `shard`; selects a new key, closes the editor of a deleted value.
+    /// Puts the applied write of `value` at `keys` into `Memory` ([`TreeState::apply_write`]),
+    /// when the write was under path `base` on `shard`; when the tree still shows that value,
+    /// selects a new key, and closes the editor of a deleted value.
     fn show_write(self, base: &str, shard: Option<&str>, keys: Keys, value: Option<Value>) {
         let deleted = value.is_none();
-        let same_tree =
-            self.shard.try_get_untracked().flatten().as_deref() == shard && self.base() == base;
+        self.apply_write(base, shard, &keys, value);
+        let same_tree = self.account.shard.try_get_untracked().flatten().as_deref() == shard
+            && self.base() == base;
         if !same_tree {
             return;
         }
-        self.loaded.try_update(|loaded| {
-            let Some(Loaded { value: loaded, .. }) = loaded else {
-                return;
-            };
-            if keys.is_empty() {
-                *loaded = value.map_or(MemoryValue::Undefined, MemoryValue::Json);
-            } else if let MemoryValue::Json(root) = loaded {
-                model::patch(root, &keys, value);
-            }
-        });
         let draft = self.draft.try_get_untracked().flatten();
         if deleted {
             if draft == Some(Draft::Edit(keys)) {
@@ -360,18 +352,18 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
                     fallback=move || {
                         view! {
                             <div class="flex flex-wrap gap-2 mt-3">
-                                <button type="submit" class=SMALL_PRIMARY disabled=!writable>"Save"</button>
+                                <button type="submit" class=style::BUTTON_PRIMARY_SM disabled=!writable>"Save"</button>
                                 {can_add.then(|| {
                                     let keys = add_keys.clone();
                                     view! {
-                                        <button type="button" class=SMALL_BUTTON on:click=move |_| state.add(keys.clone())>
+                                        <button type="button" class=style::BUTTON_SM on:click=move |_| state.add(keys.clone())>
                                             <Icon kind=IconKind::Plus />
                                             "Add key"
                                         </button>
                                     }
                                 })}
                                 {can_delete.then(|| view! {
-                                    <button type="button" class=SMALL_DANGER on:click=move |_| confirming.set(true)>
+                                    <button type="button" class=style::BUTTON_DANGER_SM on:click=move |_| confirming.set(true)>
                                         <Icon kind=IconKind::Trash />
                                         "Delete"
                                     </button>
@@ -384,8 +376,8 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
                         <p class="basis-full text-sm">
                             "Delete " <code class="font-mono break-all">{path.clone()}</code> " from Memory?"
                         </p>
-                        <button type="button" class=SMALL_DANGER on:click=delete.clone()>"Delete for good"</button>
-                        <button type="button" class=SMALL_BUTTON on:click=move |_| confirming.set(false)>"Cancel"</button>
+                        <button type="button" class=style::BUTTON_DANGER_SM on:click=delete.clone()>"Delete for good"</button>
+                        <button type="button" class=style::BUTTON_SM on:click=move |_| confirming.set(false)>"Cancel"</button>
                     </div>
                 </Show>
             </form>

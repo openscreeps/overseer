@@ -4,7 +4,7 @@
 //! and an input for expressions with a command history (↑/↓, and buttons for a finger;
 //! remembered per server across restarts, [`history`]), suggestions for names as the user types
 //! ([`complete`], [`suggest`]; Tab accepts), multi-line with Shift+Enter, and a shard selector
-//! on sharded servers.
+//! on sharded servers (the [`Account`]'s shard: the drawer's Memory tab follows it).
 //!
 //! Console output is HTML; only a safe subset is rendered ([`markup`]), always as text nodes.
 //! The drawer's Console tab and the console window (`#/<server>/<shard>/console/window`)
@@ -17,21 +17,21 @@ mod names;
 mod suggest;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use leptos::html::{Div, Textarea};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::console::HISTORY_CAPACITY;
-use overseer::net::rt::UNIX_EPOCH;
-use overseer::{Console, ConsoleEntry, ConsoleKind, Overseer};
+use overseer::{Console, ConsoleEntry, ConsoleKind};
 use web_sys::KeyboardEvent;
 
 use self::history::{CommandHistory, SavedCommands};
 use self::markup::Piece;
 use self::names::GameNames;
-use self::suggest::{Completer, SuggestionList};
+use self::suggest::{Completer, SuggestionList, place_caret};
 use crate::platform;
+use crate::ui::account::{Account, ShardSelect};
+use crate::ui::clock;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::media::{COARSE_POINTER, media_query};
 use crate::ui::objects::{FILTER_ICON, FILTER_INPUT};
@@ -122,25 +122,22 @@ pub struct ConsoleState {
     server: StoredValue<String>,
     /// The input's history.
     history: StoredValue<CommandHistory>,
-    /// The server's shards (empty on single-world servers).
-    pub shards: RwSignal<Vec<String>>,
-    /// The shard commands run on.
-    pub shard: RwSignal<Option<String>>,
     /// Why the console is not available.
     pub error: RwSignal<Option<String>>,
     /// The console is on screen (the drawer's tab is selected).
     pub shown: RwSignal<bool>,
     /// Lines that arrived while it was not on screen.
     pub unread: RwSignal<usize>,
-    /// The names of the user's game that the input completes.
+    /// The names of the user's game that the input completes, and their account: the session
+    /// and the shard that commands run on.
     names: GameNames,
 }
 
 impl ConsoleState {
-    /// Follows the console of `overseer` (on server `server`, commands to `shard` by default)
-    /// for as long as the calling component lives.
-    pub fn start(overseer: &Overseer, server: &str, shard: Option<String>) -> Self {
-        let console = overseer.console();
+    /// Follows the console of `account` (on server `server`) for as long as the calling
+    /// component lives.
+    pub fn start(server: &str, account: Account) -> Self {
+        let console = account.overseer().console();
         let saved = SavedCommands::parse(platform::load_item(history::STORAGE_KEY).as_deref());
         let mut commands = saved.commands(server).to_vec();
         commands.extend(console.recent_commands());
@@ -150,12 +147,10 @@ impl ConsoleState {
             console: StoredValue::new_local(Some(console.clone())),
             server: StoredValue::new(server.to_owned()),
             history: StoredValue::new(CommandHistory::new(commands)),
-            shards: RwSignal::new(overseer.world().shards().to_vec()),
-            shard: RwSignal::new(shard),
             error: RwSignal::new(None),
             shown: RwSignal::new(true),
             unread: RwSignal::new(0),
-            names: GameNames::new(overseer),
+            names: GameNames::new(account),
         };
         match console.feed() {
             Ok(mut feed) => {
@@ -194,18 +189,13 @@ impl ConsoleState {
                 } else {
                     markup::parse(&entry.text)
                 };
-                let millis = entry
-                    .received
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
                 Arc::new(Line {
                     id,
                     kind: entry.kind,
                     shard: entry.shard.clone(),
                     pieces,
                     search: entry.plain_text().to_lowercase(),
-                    time: clock(millis),
+                    time: clock(entry.received),
                 })
             })
             .collect();
@@ -252,7 +242,7 @@ impl ConsoleState {
         let Some(console) = self.console.get_value() else {
             return;
         };
-        let shard = self.shard.get_untracked();
+        let shard = self.names.account().shard.get_untracked();
         spawn_local(async move {
             if let Err(error) = console.execute(&expression, shard.as_deref()).await {
                 self.note(
@@ -272,18 +262,6 @@ fn markup_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-/// `HH:MM:SS` of the local time `millis` milliseconds after the Unix epoch.
-#[expect(clippy::cast_precision_loss, reason = "times are far below 2^53 ms")]
-fn clock(millis: u128) -> String {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(millis as f64));
-    format!(
-        "{:02}:{:02}:{:02}",
-        date.get_hours(),
-        date.get_minutes(),
-        date.get_seconds()
-    )
 }
 
 /// A kind filter of the console bar: a small segment.
@@ -584,7 +562,7 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
     // A finger has buttons for the history, and a phone has little room for the hint.
     let coarse = media_query(COARSE_POINTER);
     let input = NodeRef::<Textarea>::new();
-    let completer = Completer::new(text, input, state.history, state.names, state.shard);
+    let completer = Completer::new(text, input, state.history, state.names);
     let rows = move || text.with(|text| text.lines().count().clamp(1, INPUT_ROWS));
     let send = move || {
         let expression = text.get_untracked();
@@ -597,16 +575,8 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
     let set = move |value: String| {
         completer.close();
         text.set(value);
-        // The caret goes to the end once the value is in.
-        set_timeout(
-            move || {
-                if let Some(input) = input.get_untracked() {
-                    let end = u32::try_from(input.value().len()).unwrap_or(u32::MAX);
-                    let _ = input.set_selection_range(end, end);
-                }
-            },
-            Duration::ZERO,
-        );
+        // The caret goes to the end.
+        place_caret(input, u32::MAX);
     };
     // The previous or next command of the history into the input; whether there was one.
     let previous = move || {
@@ -665,32 +635,6 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
             _ => {}
         }
     };
-    let shards = move || {
-        let shards = state.shards.get();
-        (!shards.is_empty()).then(|| {
-            let options = shards
-                .into_iter()
-                .map(|shard| {
-                    let selected = state
-                        .shard
-                        .with_untracked(|current| current.as_deref() == Some(shard.as_str()));
-                    view! { <option value=shard.clone() selected=selected>{shard.clone()}</option> }
-                })
-                .collect_view();
-            view! {
-                <select
-                    class="min-h-control-sm min-w-0 max-w-32 px-3 text-sm text-fg bg-sunken \
-                        border border-edge rounded-md transition-[border-color] \
-                        duration-(--duration-fast) ease-standard hover:border-edge-strong \
-                        focus-visible:outline-offset-0 focus-visible:border-focus"
-                    aria-label="Shard"
-                    on:change=move |event| state.shard.set(Some(event_target_value(&event)))
-                >
-                    {options}
-                </select>
-            }
-        })
-    };
     view! {
         <form
             class="relative flex flex-row items-end gap-2 flex-none px-3 py-2 bg-panel border-t \
@@ -701,7 +645,7 @@ fn ConsoleInput(state: ConsoleState) -> impl IntoView {
             }
         >
             <SuggestionList completer />
-            {shards}
+            <ShardSelect account=state.names.account() />
             <span class="self-center font-mono text-accent" aria-hidden="true">"›"</span>
             <textarea
                 class="flex-1 min-w-0 min-h-control-sm max-h-40 px-2 py-1 font-mono text-sm \

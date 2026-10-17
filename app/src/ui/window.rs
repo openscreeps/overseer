@@ -9,6 +9,7 @@ use overseer::map::RoomCoord;
 use crate::profiles::Server;
 use crate::route::{Shard, WindowView};
 use crate::state::AppState;
+use crate::ui::account::Account;
 use crate::ui::console::{ConsolePanel, ConsoleState};
 use crate::ui::objects::Selection;
 use crate::ui::room_panel::{RoomData, RoomPanel};
@@ -147,7 +148,8 @@ fn ConsoleWindow(
     overseer: Overseer,
     heading: String,
 ) -> impl IntoView {
-    let console = ConsoleState::start(&overseer, &server.url, shard.name().map(str::to_owned));
+    let account = Account::new(&overseer, shard.name().map(str::to_owned));
+    let console = ConsoleState::start(&server.url, account);
     view! {
         <div class=SCREEN>
             <header class=HEAD>

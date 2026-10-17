@@ -55,14 +55,13 @@ pub struct Completer {
 }
 
 impl Completer {
-    /// The completion of the input `input` holding `text`, with the names of `names` on
-    /// `shard` and the commands of `history`.
+    /// The completion of the input `input` holding `text`, with the names of `names` and the
+    /// commands of `history`.
     pub fn new(
         text: RwSignal<String>,
         input: NodeRef<Textarea>,
         history: StoredValue<CommandHistory>,
         names: GameNames,
-        shard: RwSignal<Option<String>>,
     ) -> Self {
         let open = RwSignal::new(false);
         let caret = RwSignal::new(0);
@@ -72,17 +71,16 @@ impl Completer {
             }
             let caret = caret.get();
             text.with(|text| {
-                names.names.with(|names| {
+                names.with(|names, memory| {
                     history.with_value(|history| {
-                        complete::complete(text, caret, names, history.entries())
+                        complete::complete(text, caret, names, memory, history.entries())
                     })
                 })
             })
         });
         // The names a completion asks for load in the background; the list follows.
         Effect::new(move |_| {
-            let needs = completion.with(|completion| completion.needs);
-            shard.with_untracked(|shard| names.ensure(needs, shard.as_deref()));
+            names.ensure(completion.with(|completion| completion.needs));
         });
         Self {
             text,
@@ -186,15 +184,7 @@ impl Completer {
             input.set_value(&value);
         }
         self.text.set(value);
-        let caret = u32::try_from(caret).unwrap_or(u32::MAX);
-        let place = move || {
-            if let Some(input) = self.input.get_untracked() {
-                let _ = input.set_selection_range(caret, caret);
-            }
-        };
-        place();
-        // Again once the value is rendered, in case rendering moved the caret.
-        set_timeout(place, Duration::ZERO);
+        place_caret(self.input, u32::try_from(caret).unwrap_or(u32::MAX));
     }
 
     /// Handles the list's keys; `true` when the key was the list's (the caller does nothing
@@ -263,6 +253,18 @@ impl Completer {
             option.scroll_into_view_with_bool(false);
         }
     }
+}
+
+/// Puts the caret of `input` at UTF-16 offset `caret` (past the end: at the end), now and again
+/// once a new value is rendered, in case rendering moved the caret.
+pub fn place_caret(input: NodeRef<Textarea>, caret: u32) {
+    let place = move || {
+        if let Some(input) = input.get_untracked() {
+            let _ = input.set_selection_range(caret, caret);
+        }
+    };
+    place();
+    set_timeout(place, Duration::ZERO);
 }
 
 /// The suggestion list of `completer`; nothing while it has no suggestions.

@@ -1,7 +1,8 @@
 // The drawer's Memory tab: the player's Memory as a tree (the bot counts ticks in
 // `Memory.ticks`), Reload, the path field, a new key saved from the editor (the player's code
 // applies the write on its next tick: the tab waits for it), and its deletion after a
-// confirmation. Each result shows again after a page reload, from the server.
+// confirmation. Each result shows again after a page reload, from the server. The console
+// completes the keys of the same Memory: a new key shows there without a second read.
 //
 // The tests need the player's bot and write Memory, so they are `@openscreeps`.
 
@@ -98,6 +99,30 @@ test.describe('memory', { tag: '@openscreeps' }, () => {
     // The new key is selected: the editor shows its value.
     await expect(added).toHaveAttribute('aria-current', 'true');
     await expect(editor.getByRole('heading', { name: 'e2e' })).toBeVisible();
+
+    // The console completes the new key from the Memory the tab holds: it reads no Memory.
+    const rootReads: string[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (
+        request.method() === 'GET' &&
+        url.pathname.endsWith('/api/user/memory') &&
+        !url.searchParams.get('path')
+      ) {
+        rootReads.push(request.url());
+      }
+    });
+    await selectTab(page, 'Console');
+    const input = page.getByRole('textbox', { name: 'Console expression' });
+    await input.pressSequentially('Memory.e2');
+    await expect(
+      page
+        .getByRole('listbox', { name: 'Suggestions' })
+        .getByRole('option', { name: 'e2e, object', exact: true }),
+    ).toBeVisible();
+    expect(rootReads).toEqual([]);
+    await input.fill('');
+    await selectTab(page, 'Memory');
 
     // The server has it: it shows after a page reload too, with its child.
     await page.reload();

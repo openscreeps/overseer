@@ -29,6 +29,7 @@ use crate::profiles::Server;
 use crate::route::{Route, Shard, WindowView};
 use crate::saved::DrawerTab;
 use crate::state::AppState;
+use crate::ui::account::Account;
 use crate::ui::console::{ConsolePanel, ConsoleState};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::media::{media_query, sheet_layout};
@@ -332,8 +333,8 @@ fn TabList(
         .collect_view()
 }
 
-/// The console and the Memory tab of the session on `server`, on the shard shown; `None` while
-/// signed out.
+/// The console and the Memory tab of the session on `server`, on one [`Account`]: the shard
+/// shown first, and one `Memory` for both; `None` while signed out.
 fn account_tools(
     state: AppState,
     map: MapState,
@@ -349,9 +350,10 @@ fn account_tools(
         .shard
         .get_untracked()
         .and_then(|shard| shard.name().map(str::to_owned));
+    let account = Account::new(&overseer, shard);
     Some((
-        ConsoleState::start(&overseer, &server.url, shard.clone()),
-        MemoryState::new(&overseer, shard),
+        ConsoleState::start(&server.url, account),
+        MemoryState::new(account),
     ))
 }
 

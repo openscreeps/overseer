@@ -1,21 +1,24 @@
 //! The tree of the Memory tab: the path field, the status line, the loaded value and its rows,
 //! and the editor of the selected value under them. The phone's bottom sheet is short: there
 //! the editor takes the place of the path field and the tree while it is open.
+//!
+//! All of `Memory` is the [`Account`]'s (the console completes its keys): the tree shows it from
+//! there, and a read or a write of either shows in both. The value at another path is the
+//! tree's own.
 
 use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::Memory;
 use overseer::memory::MemoryValue;
 use serde_json::Value;
 
 use super::editor::{Draft, Editor, Write, WriteNotice};
 use super::model::{self, Keys, PAGE, Row, RowId, RowKind};
-use super::{SMALL_BUTTON, clock};
 use crate::session;
+use crate::ui::account::{Account, Read};
 use crate::ui::icon::{Icon, IconKind};
-use crate::ui::media::{SHEET_LAYOUT, media_query};
+use crate::ui::media::{media_query, sheet_layout};
 use crate::ui::objects::{FILTER_ICON, FILTER_INPUT};
 use crate::ui::style::{self, concatcp};
 
@@ -36,34 +39,30 @@ const EXPAND_SPACE: &str = "flex-none size-control-sm";
 /// A "Show more" button.
 const MORE_BUTTON: &str = concatcp!(style::LINK_BUTTON, " min-h-row text-sm");
 
-/// The value loaded into the tree.
+/// Where the value of the tree comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Loaded {
-    /// Its path (empty for all of `Memory`).
-    pub base: String,
-    /// The value.
-    pub value: MemoryValue,
+enum Source {
+    /// All of `Memory`: the account's.
+    Root,
+    /// The value read at this path (not empty).
+    Path(String, Read),
 }
 
 /// The tree and the editor; `Copy`.
 #[derive(Clone, Copy)]
 pub struct TreeState {
-    /// The library's Memory.
-    pub memory: StoredValue<Memory, LocalStorage>,
-    /// The shard to read and write.
-    pub shard: RwSignal<Option<String>>,
+    /// The session, the shard to read and write, and all of `Memory`.
+    pub account: Account,
     /// The text of the path field.
     path: RwSignal<String>,
     /// Why the path in the field is not correct.
     path_error: RwSignal<Option<&'static str>>,
-    /// The loaded value.
-    pub loaded: RwSignal<Option<Loaded>>,
+    /// What the tree shows; `None` before the first load.
+    source: RwSignal<Option<Source>>,
     /// A load runs.
     loading: RwSignal<bool>,
     /// Why the last load failed.
     error: RwSignal<Option<String>>,
-    /// When the value loaded (`HH:MM:SS`).
-    at: RwSignal<Option<String>>,
     /// The number of the latest load: the result of an older one is dropped.
     loads: StoredValue<u64>,
     /// The objects and arrays expanded, by keys.
@@ -83,17 +82,15 @@ pub struct TreeState {
 }
 
 impl TreeState {
-    /// The tree of `memory` on `shard`, empty.
-    pub fn new(memory: StoredValue<Memory, LocalStorage>, shard: RwSignal<Option<String>>) -> Self {
+    /// The tree of `account`'s `Memory`, empty.
+    pub fn new(account: Account) -> Self {
         Self {
-            memory,
-            shard,
+            account,
             path: RwSignal::new(String::new()),
             path_error: RwSignal::new(None),
-            loaded: RwSignal::new(None),
+            source: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
-            at: RwSignal::new(None),
             loads: StoredValue::new(0),
             expanded: RwSignal::new(HashSet::new()),
             shown: RwSignal::new(HashMap::new()),
@@ -105,11 +102,28 @@ impl TreeState {
         }
     }
 
-    /// The path of the loaded value (empty for all of `Memory`, and before the first load).
+    /// Calls `f` with the path (empty for all of `Memory`) and the value that the tree shows;
+    /// `None` before the first load, and while the value is of another shard. Tracks them.
+    fn with_loaded<T>(self, f: impl FnOnce(Option<(&str, &Read)>) -> T) -> T {
+        self.source.with(|source| match source {
+            Some(Source::Root) => self
+                .account
+                .with_root(|root| f(root.map(|root| ("", root)))),
+            Some(Source::Path(base, read)) => {
+                let current = self.account.shard.with(|shard| *shard == read.shard);
+                f(current.then_some((base.as_str(), read)))
+            }
+            None => f(None),
+        })
+    }
+
+    /// The path of the value that the tree shows (empty for all of `Memory`, and before the
+    /// first load).
     pub fn base(self) -> String {
-        self.loaded
-            .with_untracked(|loaded| loaded.as_ref().map(|loaded| loaded.base.clone()))
-            .unwrap_or_default()
+        self.source.with_untracked(|source| match source {
+            Some(Source::Path(base, _)) => base.clone(),
+            Some(Source::Root) | None => String::new(),
+        })
     }
 
     /// The path of the value at `keys` under the loaded value; `None` when a key cannot be a part
@@ -120,12 +134,17 @@ impl TreeState {
 
     /// Calls `f` with the value at `keys` under the loaded value.
     pub fn with_value<T>(self, keys: &[String], f: impl FnOnce(Option<&Value>) -> T) -> T {
-        self.loaded.with_untracked(|loaded| match loaded {
-            Some(Loaded {
-                value: MemoryValue::Json(value),
-                ..
-            }) => f(model::value_at(value, keys)),
-            _ => f(None),
+        untrack(|| {
+            self.with_loaded(|loaded| match loaded {
+                Some((
+                    _,
+                    Read {
+                        value: MemoryValue::Json(value),
+                        ..
+                    },
+                )) => f(model::value_at(value, keys)),
+                _ => f(None),
+            })
         })
     }
 
@@ -135,26 +154,32 @@ impl TreeState {
         self.loads.set_value(load);
         self.loading.set(true);
         self.error.set(None);
-        let memory = self.memory.get_value();
-        let shard = self.shard.get_untracked();
+        let shard = self.account.shard.get_untracked();
+        let root = base.is_empty().then(|| self.account.read_root(false));
+        let memory = self.account.memory();
         spawn_local(async move {
-            let result = memory.get(&base, shard.as_deref()).await;
+            let result = match root {
+                Some(read) => read.await.map(|()| Source::Root),
+                None => memory
+                    .get(&base, shard.as_deref())
+                    .await
+                    .map(|value| Source::Path(base.clone(), Read::now(shard, value))),
+            };
             if self.loads.try_get_value() != Some(load) {
                 return;
             }
             self.loading.try_set(false);
             match result {
-                Ok(value) => {
+                Ok(source) => {
                     if self.base() != base {
                         self.collapse();
                     }
-                    self.loaded.try_set(Some(Loaded { base, value }));
-                    self.at.try_set(Some(clock()));
+                    self.source.try_set(Some(source));
                 }
                 Err(error) => {
                     self.error.try_set(Some(format!(
                         "Could not load Memory: {}",
-                        session::describe(&error)
+                        session::error_message(&error)
                     )));
                 }
             }
@@ -166,14 +191,26 @@ impl TreeState {
         self.load(self.base());
     }
 
-    /// Forgets the tree of the previous shard and loads the same path on the new one.
-    pub fn change_shard(self) {
+    /// Forgets the tree of the previous shard: collapses it, closes the editor, and stops
+    /// waiting for the latest write. The tree loads the same path on the new shard when it
+    /// shows ([`Self::show_shard`]).
+    pub fn forget_shard(self) {
         self.collapse();
         self.writes.update_value(|writes| *writes += 1);
         self.write.set(Write::Idle);
-        let base = self.base();
-        self.loaded.set(None);
-        self.load(base);
+    }
+
+    /// Loads the value to show on the current shard unless the tree shows it: the path in the
+    /// path field the first time, else the same path again.
+    fn show_shard(self) {
+        if untrack(|| self.with_loaded(|loaded| loaded.is_some())) {
+            return;
+        }
+        if self.source.with_untracked(Option::is_none) {
+            self.go();
+        } else {
+            self.reload();
+        }
     }
 
     /// Collapses everything and closes the editor.
@@ -181,6 +218,33 @@ impl TreeState {
         self.expanded.try_update(HashSet::clear);
         self.shown.try_update(HashMap::clear);
         self.draft.try_set(None);
+    }
+
+    /// Puts the applied write of `value` at `keys` under the value at path `base` on `shard`
+    /// into all of `Memory`, and into the value of another path when the tree still shows it.
+    pub fn apply_write(
+        self,
+        base: &str,
+        shard: Option<&str>,
+        keys: &[String],
+        value: Option<Value>,
+    ) {
+        let mut root_keys = model::keys_of(base);
+        root_keys.extend_from_slice(keys);
+        self.account.update_root(shard, |root| {
+            model::apply_write(root, &root_keys, value.clone());
+        });
+        if base.is_empty() {
+            return;
+        }
+        self.source.try_update(|source| {
+            if let Some(Source::Path(shown, read)) = source
+                && shown == base
+                && read.shard.as_deref() == shard
+            {
+                model::apply_write(&mut read.value, keys, value);
+            }
+        });
     }
 
     /// Loads the path in the path field (all of `Memory` when it is empty).
@@ -248,18 +312,25 @@ pub fn TreeView(
     /// The tree.
     state: TreeState,
 ) -> impl IntoView {
-    // The first time the tab shows, load all of Memory.
-    if state.loaded.with_untracked(Option::is_none) && !state.loading.get_untracked() {
-        state.go();
-    }
-    let sheet = media_query(SHEET_LAYOUT);
+    // The first time the tab shows, load all of Memory; after a change of shard, the same path
+    // there. A load that still runs from an earlier showing is not started twice.
+    Effect::new(move |shown: Option<()>| {
+        state.account.shard.track();
+        if shown.is_some() || !state.loading.get_untracked() {
+            state.show_shard();
+        }
+    });
+    let sheet = media_query(&sheet_layout());
     let covered = move || sheet.get() && state.draft.with(Option::is_some);
     let rows = Memo::new(move |_| {
-        state.loaded.with(|loaded| match loaded {
-            Some(Loaded {
-                value: MemoryValue::Json(value),
-                ..
-            }) => state.expanded.with(|expanded| {
+        state.with_loaded(|loaded| match loaded {
+            Some((
+                _,
+                Read {
+                    value: MemoryValue::Json(value),
+                    ..
+                },
+            )) => state.expanded.with(|expanded| {
                 state
                     .shown
                     .with(|shown| model::rows(value, expanded, shown))
@@ -284,9 +355,7 @@ pub fn TreeView(
             .into_any()
         } else {
             let text = state
-                .at
-                .get()
-                .map(|at| format!("Loaded at {at}"))
+                .with_loaded(|loaded| loaded.map(|(_, read)| format!("Loaded at {}", read.time)))
                 .unwrap_or_default();
             view! { <span>{text}</span> }.into_any()
         }
@@ -316,7 +385,7 @@ pub fn TreeView(
                         on:input=move |event| state.path.set(event_target_value(&event))
                     />
                 </label>
-                <button type="submit" class=SMALL_BUTTON>"Show"</button>
+                <button type="submit" class=style::BUTTON_SM>"Show"</button>
             </form>
             <p class="px-3 pt-1 text-sm text-error empty:hidden" role="alert">
                 {move || state.path_error.get()}
@@ -353,15 +422,15 @@ pub fn TreeView(
 #[component]
 fn TreeHead(state: TreeState) -> impl IntoView {
     let head = Memo::new(move |_| {
-        state.loaded.with(|loaded| {
-            loaded.as_ref().map(|loaded| Head {
-                base: loaded.base.clone(),
-                preview: match &loaded.value {
+        state.with_loaded(|loaded| {
+            loaded.map(|(base, read)| Head {
+                base: base.to_owned(),
+                preview: match &read.value {
                     MemoryValue::Json(value) => Some(model::preview(value)),
                     MemoryValue::Undefined | MemoryValue::IncorrectPath => None,
                 },
-                incorrect: loaded.value == MemoryValue::IncorrectPath,
-                object: matches!(loaded.value, MemoryValue::Json(Value::Object(_))),
+                incorrect: read.value == MemoryValue::IncorrectPath,
+                object: matches!(read.value, MemoryValue::Json(Value::Object(_))),
             })
         })
     });
@@ -382,14 +451,14 @@ fn TreeHead(state: TreeState) -> impl IntoView {
             // All of Memory is not edited at once: one key at a time.
             let edit = (!head.base.is_empty() && !head.incorrect).then(|| {
                 view! {
-                    <button type="button" class=SMALL_BUTTON on:click=move |_| state.select(Vec::new())>
+                    <button type="button" class=style::BUTTON_SM on:click=move |_| state.select(Vec::new())>
                         "Edit"
                     </button>
                 }
             });
             let add = head.object.then(|| {
                 view! {
-                    <button type="button" class=SMALL_BUTTON on:click=move |_| state.add(Vec::new())>
+                    <button type="button" class=style::BUTTON_SM on:click=move |_| state.add(Vec::new())>
                         <Icon kind=IconKind::Plus />
                         "Add key"
                     </button>

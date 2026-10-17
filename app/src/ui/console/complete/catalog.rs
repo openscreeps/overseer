@@ -2,10 +2,10 @@
 //! the members of the game objects, and the common constants.
 //!
 //! The values of the resource, structure and body part constants come from the generated
-//! enums of `overseer-core`.
+//! enums of `overseer-core`, the flag colours from its `FlagColor`.
 
 use overseer::core::api::official::types::{GameIntentCreateCreepBodyItem as Part, ResourceType};
-use overseer::model::world::GameBuildableStructureType as Structure;
+use overseer::model::world::{FlagColor, GameBuildableStructureType as Structure};
 
 /// What a member is, shown after its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +170,11 @@ const fn text(name: &'static str, value: &'static str) -> Constant {
         name,
         value: Value::Text(value),
     }
+}
+
+/// A flag colour constant.
+const fn color(name: &'static str, color: FlagColor) -> Constant {
+    number(name, color.code() as i32)
 }
 
 /// The global names, the most used first.
@@ -673,16 +678,16 @@ pub const CONSTANTS: &[Constant] = &[
     number("BOTTOM_LEFT", 6),
     number("LEFT", 7),
     number("TOP_LEFT", 8),
-    number("COLOR_RED", 1),
-    number("COLOR_PURPLE", 2),
-    number("COLOR_BLUE", 3),
-    number("COLOR_CYAN", 4),
-    number("COLOR_GREEN", 5),
-    number("COLOR_YELLOW", 6),
-    number("COLOR_ORANGE", 7),
-    number("COLOR_BROWN", 8),
-    number("COLOR_GREY", 9),
-    number("COLOR_WHITE", 10),
+    color("COLOR_RED", FlagColor::Red),
+    color("COLOR_PURPLE", FlagColor::Purple),
+    color("COLOR_BLUE", FlagColor::Blue),
+    color("COLOR_CYAN", FlagColor::Cyan),
+    color("COLOR_GREEN", FlagColor::Green),
+    color("COLOR_YELLOW", FlagColor::Yellow),
+    color("COLOR_ORANGE", FlagColor::Orange),
+    color("COLOR_BROWN", FlagColor::Brown),
+    color("COLOR_GREY", FlagColor::Grey),
+    color("COLOR_WHITE", FlagColor::White),
     text("RESOURCE_ENERGY", ResourceType::Energy.as_str()),
     text("RESOURCE_POWER", ResourceType::Power.as_str()),
     text("RESOURCE_OPS", ResourceType::Ops.as_str()),

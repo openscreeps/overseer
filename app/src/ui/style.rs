@@ -34,6 +34,8 @@ pub const BTN_GHOST: &str =
     "font-medium text-fg bg-transparent border-transparent enabled:hover:bg-hover";
 /// A text button's size: control height, horizontal padding.
 pub const BTN_MD: &str = "min-h-control px-3";
+/// A small text button's size: small control height, horizontal padding, small text.
+pub const BTN_SM: &str = "min-h-control-sm px-3 text-sm";
 /// A square icon button's size.
 pub const BTN_ICON: &str = "flex-none size-control min-h-control p-0";
 /// A small square icon button's size.
@@ -48,6 +50,12 @@ pub const BUTTON: &str = concatcp!(BTN, " ", BTN_DEFAULT, " ", BTN_MD);
 pub const BUTTON_PRIMARY: &str = concatcp!(BTN, " ", BTN_PRIMARY, " ", BTN_MD);
 /// A destructive action.
 pub const BUTTON_DANGER: &str = concatcp!(BTN, " ", BTN_DANGER, " ", BTN_MD);
+/// A small button (in a bar or a panel of small controls).
+pub const BUTTON_SM: &str = concatcp!(BTN, " ", BTN_DEFAULT, " ", BTN_SM);
+/// A small main action.
+pub const BUTTON_PRIMARY_SM: &str = concatcp!(BTN, " ", BTN_PRIMARY, " ", BTN_SM);
+/// A small destructive action.
+pub const BUTTON_DANGER_SM: &str = concatcp!(BTN, " ", BTN_DANGER, " ", BTN_SM);
 /// A square icon button (the accessible name in `aria-label`, a tooltip in `data-tip`).
 pub const ICON_BUTTON: &str = concatcp!(BTN, " ", BTN_DEFAULT, " ", BTN_ICON, " ", BTN_EXPANDED);
 /// A small square icon button.
@@ -82,11 +90,15 @@ pub const SEGMENT_SHAPE: &str = "not-first:rounded-l-none not-last:rounded-r-non
     aria-pressed:border-accent aria-pressed:enabled:hover:bg-accent \
     aria-pressed:enabled:hover:border-accent";
 
-/// A text input or `<select>`.
-pub const INPUT: &str = "min-h-control px-3 text-fg bg-sunken border border-edge rounded-md \
+/// What every text input and `<select>` shares, without its size.
+const INPUT_FIELD: &str = "px-3 text-fg bg-sunken border border-edge rounded-md \
     transition-[border-color] duration-(--duration-fast) ease-standard hover:border-edge-strong \
     focus-visible:outline-offset-0 focus-visible:border-focus placeholder:text-faint \
     aria-invalid:border-error";
+/// A text input or `<select>`.
+pub const INPUT: &str = concatcp!("min-h-control ", INPUT_FIELD);
+/// A small text input or `<select>` (in a bar of small controls).
+pub const INPUT_SM: &str = concatcp!("min-h-control-sm text-sm ", INPUT_FIELD);
 /// A checkbox.
 pub const CHECKBOX: &str = "size-[1.1rem] m-0 accent-accent";
 
