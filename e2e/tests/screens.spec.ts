@@ -6,7 +6,7 @@
 
 import { resolve } from 'node:path';
 import type { Locator, Page } from '@playwright/test';
-import { addServer, expect, SERVER_NAME, test } from './fixtures';
+import { addServer, expect, SERVER_NAME, Session, test } from './fixtures';
 
 /** The set the images belong to (`OVERSEER_E2E_SCREENS`); unset skips the spec. */
 const SET = process.env.OVERSEER_E2E_SCREENS;
@@ -245,6 +245,39 @@ for (const [viewport, size] of Object.entries(VIEWPORTS)) {
       await drawn(popup.getByTestId('room-control'));
       await shoot(popup, viewport, '15-room-window');
       await popup.close();
+    });
+
+    test('room close up: creeps with their badges, structures', async ({
+      signedInPage: page,
+      server,
+      player,
+    }) => {
+      // Fresh accounts have no badge: give the player one, so their creeps carry it.
+      const session = await Session.signIn(server.url, player.username, player.password);
+      await session.call('api/user/badge', {
+        badge: { type: 7, color1: '#2b6cb0', color2: '#f6ad55', color3: '#f7fafc', param: 0, flip: false },
+      });
+      await openRoom(page, server.slug, player.room);
+      const map = page.getByTestId('world-map');
+      const box = await map.boundingBox();
+      if (!box) throw new Error('the map has no box');
+      // The closest zoom over the spawn, where the creeps are born.
+      for (let i = 0; i < 30; i++) {
+        const at = await map.evaluate(
+          (element, [room, x, y]) => (element as TilePointCanvas).overseerTilePoint(room, x, y),
+          [player.room, player.spawn.x, player.spawn.y] as const,
+        );
+        if (!at) break;
+        await page.mouse.move(box.x + at[0], box.y + at[1]);
+        await page.mouse.wheel(0, -200);
+        await nextFrames(page);
+      }
+      // Let the badges load and the zoom settle.
+      await page.waitForTimeout(2_000);
+      await shoot(page, viewport, '16-room-close');
+      await page.getByRole('button', { name: 'Perspective view' }).click();
+      await page.waitForTimeout(1_500);
+      await shoot(page, viewport, '17-room-close-3d');
     });
   });
 }

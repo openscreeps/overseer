@@ -1,7 +1,8 @@
-//! Player badges on the world map: which players' badges the map needs ([`wanted`]: owners and
-//! reservers of the rooms in view, nearest the centre first), and in browsers the loader
-//! (`Badges`, browser builds only) that gets each badge's pixels to the viewer
-//! (`Viewer::set_badge`).
+//! Player badges on the world map and on creeps: which players' badges the viewers need
+//! ([`wanted`]: owners and reservers of the rooms in view, nearest the centre first;
+//! [`room_wants`]: the players of a live room, whose creeps carry their badge; [`merge`]:
+//! both, live rooms first), and in browsers the loader (`Badges`, browser builds only) that
+//! gets each badge's pixels to every viewer of the screen (`Viewer::set_badge`).
 //!
 //! A badge comes from the cache when it holds the player's badge with the same parameters
 //! ([`badge_hash`], `terrain_cache::BadgeStore` in browser builds); otherwise it is fetched as SVG
@@ -19,11 +20,12 @@
 //! other at once. Each player's badge is fetched at most once per world screen, failures
 //! included.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use overseer::map::{RoomCoord, RoomRect, RoomStat};
 use overseer::model::account::UserBadge;
+use overseer::model::world::RoomUser;
 
 /// Side of a rasterized badge, in pixels: the viewer's badge size (no resampling there).
 pub const BADGE_SIZE: u32 = overseer_view::BADGE_SIZE;
@@ -122,6 +124,35 @@ pub fn wanted<'a>(
         .collect()
 }
 
+/// The badges of the players of a live room (`RoomSnapshot::users`: owners of its objects,
+/// its reserver and signer), each player once. Players without a badge (the Invader and
+/// Source Keeper NPCs) are skipped.
+pub fn room_wants(users: &BTreeMap<String, RoomUser>) -> Vec<Want> {
+    users
+        .values()
+        .filter_map(|user| {
+            Some(Want {
+                user: user.id.clone(),
+                username: user.username.clone(),
+                hash: badge_hash(user.badge.as_ref()?),
+            })
+        })
+        .collect()
+}
+
+/// What to load, in order: the players of the live rooms (`rooms`, close up on screen),
+/// then those the map wants (`map`, [`wanted`]); each player once.
+pub fn merge<'a>(rooms: impl IntoIterator<Item = &'a [Want]>, map: &'a [Want]) -> Vec<Want> {
+    let mut seen = HashSet::new();
+    rooms
+        .into_iter()
+        .flatten()
+        .chain(map)
+        .filter(|want| seen.insert(want.user.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Premultiplies straight-alpha RGBA `pixels` (as a canvas reads them) in place.
 pub fn premultiply(pixels: &mut [u8]) {
     for [red, green, blue, alpha] in pixels.as_chunks_mut::<4>().0 {
@@ -145,6 +176,7 @@ mod loader {
     use std::rc::Rc;
 
     use overseer::Overseer;
+    use overseer::map::RoomCoord;
     use overseer::net::Priority;
     use overseer::net::rt;
     use wasm_bindgen::{JsCast, JsValue};
@@ -154,17 +186,27 @@ mod loader {
         OffscreenCanvasRenderingContext2d, Url,
     };
 
-    use super::{BADGE_BYTES, BADGE_SIZE, Want, premultiply};
+    use super::{BADGE_BYTES, BADGE_SIZE, Want, merge, premultiply};
     use crate::terrain_cache::BadgeStore;
 
-    /// Delivers a badge's pixels to the viewer.
+    /// Delivers a badge's pixels to a viewer.
     type Deliver = Rc<dyn Fn(&str, &[u8])>;
 
     /// What the loader knows.
     struct State {
         /// Players whose badge (with that hash) was delivered or tried.
         done: HashMap<String, u64>,
-        /// Badges to get, nearest first.
+        /// The pixels of every badge delivered, for viewers that attach later.
+        known: HashMap<String, Rc<[u8]>>,
+        /// The viewers that get every badge, by attachment id.
+        targets: Vec<(u64, Deliver)>,
+        /// The id of the next attachment.
+        next_target: u64,
+        /// What the map's view wants ([`Badges::want`]).
+        map: Vec<Want>,
+        /// What each live room wants ([`Badges::want_room`]).
+        rooms: Vec<(RoomCoord, Vec<Want>)>,
+        /// Badges to get, first first.
         queue: VecDeque<Want>,
         /// The worker runs.
         running: bool,
@@ -172,29 +214,28 @@ mod loader {
         stopped: bool,
     }
 
-    /// The badge loader of one world screen; cheap to clone.
+    /// The badge loader of one world screen or room window; cheap to clone.
     #[derive(Clone)]
     pub struct Badges {
         overseer: Overseer,
         server: Rc<str>,
-        deliver: Deliver,
         state: Rc<RefCell<State>>,
     }
 
     impl Badges {
         /// A loader for the server with base URL `server` (`overseer` connected to it),
-        /// within the session's request budget, handing pixels to `deliver`.
-        pub fn new(
-            overseer: Overseer,
-            server: &str,
-            deliver: impl Fn(&str, &[u8]) + 'static,
-        ) -> Self {
+        /// within the session's request budget.
+        pub fn new(overseer: Overseer, server: &str) -> Self {
             Self {
                 overseer,
                 server: server.into(),
-                deliver: Rc::new(deliver),
                 state: Rc::new(RefCell::new(State {
                     done: HashMap::new(),
+                    known: HashMap::new(),
+                    targets: Vec::new(),
+                    next_target: 0,
+                    map: Vec::new(),
+                    rooms: Vec::new(),
                     queue: VecDeque::new(),
                     running: false,
                     stopped: false,
@@ -202,14 +243,85 @@ mod loader {
             }
         }
 
-        /// The badges the map needs now, nearest first: replaces what was still queued.
+        /// Whether `other` is this loader (a clone of it).
+        pub fn is(&self, other: &Self) -> bool {
+            Rc::ptr_eq(&self.state, &other.state)
+        }
+
+        /// Hands every badge to `deliver`: those delivered so far at once, then each new one.
+        /// Returns the id that [`Self::detach`] takes.
+        pub fn attach(&self, deliver: impl Fn(&str, &[u8]) + 'static) -> u64 {
+            let deliver: Deliver = Rc::new(deliver);
+            let (id, known) = {
+                let mut state = self.state.borrow_mut();
+                let id = state.next_target;
+                state.next_target += 1;
+                state.targets.push((id, Rc::clone(&deliver)));
+                let known: Vec<(String, Rc<[u8]>)> = state
+                    .known
+                    .iter()
+                    .map(|(user, pixels)| (user.clone(), Rc::clone(pixels)))
+                    .collect();
+                (id, known)
+            };
+            for (user, pixels) in known {
+                deliver(&user, &pixels);
+            }
+            id
+        }
+
+        /// Stops handing badges to the viewer attached as `id`.
+        pub fn detach(&self, id: u64) {
+            self.state
+                .borrow_mut()
+                .targets
+                .retain(|(target, _)| *target != id);
+        }
+
+        /// The badges the map needs now, nearest first (after those of the live rooms).
         pub fn want(&self, wants: Vec<Want>) {
+            self.state.borrow_mut().map = wants;
+            self.requeue();
+        }
+
+        /// The badges the players of the live room `room` need ([`super::room_wants`]).
+        pub fn want_room(&self, room: RoomCoord, wants: Vec<Want>) {
+            {
+                let mut state = self.state.borrow_mut();
+                match state.rooms.iter_mut().find(|(at, _)| *at == room) {
+                    Some((_, held)) if *held == wants => return,
+                    Some((_, held)) => *held = wants,
+                    None => state.rooms.push((room, wants)),
+                }
+            }
+            self.requeue();
+        }
+
+        /// The room `room` is no longer live: its players' badges are no longer needed.
+        pub fn forget_room(&self, room: RoomCoord) {
+            let removed = {
+                let mut state = self.state.borrow_mut();
+                let before = state.rooms.len();
+                state.rooms.retain(|(at, _)| *at != room);
+                state.rooms.len() != before
+            };
+            if removed {
+                self.requeue();
+            }
+        }
+
+        /// Replaces what was still queued by what the live rooms and the map need now.
+        fn requeue(&self) {
             let start = {
                 let mut state = self.state.borrow_mut();
                 if state.stopped {
                     return;
                 }
-                let fresh: VecDeque<Want> = wants
+                let wanted = merge(
+                    state.rooms.iter().map(|(_, wants)| wants.as_slice()),
+                    &state.map,
+                );
+                let fresh: VecDeque<Want> = wanted
                     .into_iter()
                     .filter(|want| state.done.get(&want.user) != Some(&want.hash))
                     .collect();
@@ -228,6 +340,7 @@ mod loader {
             let mut state = self.state.borrow_mut();
             state.stopped = true;
             state.queue.clear();
+            state.targets.clear();
         }
 
         /// Gets queued badges one by one until none is left.
@@ -272,10 +385,23 @@ mod loader {
             }
         }
 
-        /// Hands `pixels` to the viewer unless the loader was stopped.
+        /// Keeps `pixels` and hands them to every attached viewer, unless the loader was
+        /// stopped.
         fn deliver(&self, user: &str, pixels: &[u8]) {
-            if !self.state.borrow().stopped {
-                (self.deliver)(user, pixels);
+            let targets: Vec<Deliver> = {
+                let mut state = self.state.borrow_mut();
+                if state.stopped {
+                    return;
+                }
+                state.known.insert(user.to_owned(), Rc::from(pixels));
+                state
+                    .targets
+                    .iter()
+                    .map(|(_, deliver)| Rc::clone(deliver))
+                    .collect()
+            };
+            for deliver in targets {
+                deliver(user, pixels);
             }
         }
     }
@@ -325,9 +451,12 @@ pub fn test_badge(shape: i64) -> UserBadge {
 
 #[cfg(test)]
 mod tests {
-    use overseer::map::{RoomCoord, RoomOwner, RoomRect, RoomReservation, RoomStat, RoomStatus};
+    use std::collections::BTreeMap;
 
-    use super::{Want, badge_hash, premultiply, test_badge, wanted};
+    use overseer::map::{RoomCoord, RoomOwner, RoomRect, RoomReservation, RoomStat, RoomStatus};
+    use overseer::model::world::RoomUser;
+
+    use super::{Want, badge_hash, merge, premultiply, room_wants, test_badge, wanted};
 
     #[test]
     fn badge_hashes_follow_the_parameters_and_stay_stable() {
@@ -393,6 +522,46 @@ mod tests {
             hash: badge_hash(&test_badge(shape)),
         };
         assert_eq!(wants, [want("near", 2), want("mid", 3), want("far", 1)]);
+    }
+
+    #[test]
+    fn live_room_players_come_first_each_once() {
+        let user = |id: &str, shape: Option<i64>| {
+            (
+                id.to_owned(),
+                RoomUser {
+                    id: id.to_owned(),
+                    username: format!("name-{id}"),
+                    badge: shape.map(test_badge),
+                },
+            )
+        };
+        // The NPCs have no badge: nothing to load for their creeps.
+        let users = BTreeMap::from([
+            user("2", None),
+            user("3", None),
+            user("me", Some(1)),
+            user("foe", Some(2)),
+        ]);
+        let want = |id: &str, shape| Want {
+            user: id.to_owned(),
+            username: format!("name-{id}"),
+            hash: badge_hash(&test_badge(shape)),
+        };
+        let room = room_wants(&users);
+        assert_eq!(room, [want("foe", 2), want("me", 1)]);
+        // The map's owners follow the live rooms' players; a player in both comes once, first.
+        let map = [want("far", 3), want("me", 1)];
+        let other = [want("me", 1), want("near", 4)];
+        assert_eq!(
+            merge([room.as_slice(), other.as_slice()], &map),
+            [
+                want("foe", 2),
+                want("me", 1),
+                want("near", 4),
+                want("far", 3)
+            ]
+        );
     }
 
     #[test]

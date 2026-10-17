@@ -33,3 +33,5 @@ console, windows match within a pixel or two).
 | `13-rate-limits` | The Rate limits panel (no limit reported yet on a private server). |
 | `14-profile` | The profile page of the player. |
 | `15-room-window` | A room popped out into its own window. |
+| `16-room-close` | The player's room at the closest zoom over the spawn: the creeps carry the player's badge (set by the test) inside their ring of body parts. |
+| `17-room-close-3d` | The same in the perspective view. |

@@ -70,6 +70,9 @@ fn RoomWindow(
     map.mode.set(mode);
     map.shard.set(Some(shard.clone()));
     map.room.set(Some(room));
+    // The creeps of the room carry their owners' badges.
+    #[cfg(target_arch = "wasm32")]
+    crate::ui::world::badges::open(map, &overseer, &server);
     let attempt = RwSignal::new(0_u32);
     let url = server.url.clone();
     Effect::new(move |_| {

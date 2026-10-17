@@ -193,6 +193,9 @@ pub fn RoomPreview(
         hover: None,
         interest: None,
     });
+    // The creeps carry their owners' badges.
+    #[cfg(target_arch = "wasm32")]
+    crate::ui::world::badges::show_on(map, surface);
     Effect::new(move |_| {
         let room = room.get();
         if !surface.ready.get() {
@@ -218,6 +221,8 @@ pub fn RoomPreview(
                 if *at == room =>
             {
                 surface.apply(event);
+                #[cfg(target_arch = "wasm32")]
+                crate::ui::world::badges::follow(map, event);
             }
             _ => {}
         });

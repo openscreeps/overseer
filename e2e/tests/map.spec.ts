@@ -279,10 +279,12 @@ test.describe('map', () => {
     badged(
       "fetches the owners' badges of the rooms in view, then takes them from the cache @openscreeps",
       async ({ signedInPage: page, home, user }) => {
-        await openRoom(page, home.path);
+        // The live room asks for its players' badges at once (their creeps carry them), so
+        // record from the start.
         const requests = badgeRequests(page);
-        // Badges show from rooms of ten pixels until the live room's scene covers them: one
-        // Escape zooms out to the rooms level. The home room's owner is the user.
+        await openRoom(page, home.path);
+        // Badges show on rooms from rooms of ten pixels until the live room's scene covers
+        // them: one Escape zooms out to the rooms level. The home room's owner is the user.
         await worldMap(page).focus();
         await page.keyboard.press('Escape');
         await expect(level(page)).toHaveText('Rooms');
