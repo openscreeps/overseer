@@ -220,7 +220,9 @@
 //!    [`Viewer::resize`] with the canvas' CSS size (`clientWidth`, `clientHeight`) and
 //!    `devicePixelRatio`, again whenever either changes (a `ResizeObserver`). `resize` sets
 //!    the canvas' backing size itself; the app only styles its CSS size.
-//! 2. Forward `pointerdown` / `pointermove` / `pointerup` with `pointerId`, `offsetX`/`offsetY`,
+//! 2. Forward `pointerdown` / `pointermove` / `pointerup` with `pointerId`, `offsetX`/`offsetY`
+//!    and, on move and up, `timeStamp`. A released drag glides at the speed that the time
+//!    stamps give, also when a busy page handles the events late. Forward
 //!    the button (`0` → [`PointerButton::Primary`], `1` → [`PointerButton::Middle`], `2` →
 //!    [`PointerButton::Secondary`]) and, on down, `isPrimary`; forward `pointercancel` and
 //!    `lostpointercapture` to [`Viewer::pointer_cancel`]. Capture the pointer on down so that
@@ -250,7 +252,7 @@
 //! viewer.borrow_mut().set_scope(Scope::World(world.bounds()));
 //! viewer.borrow_mut().resize(width, height, device_pixel_ratio);
 //! // pointerup:
-//! if let Some(pick) = viewer.borrow_mut().pointer_up(event.pointer_id(), x, y) {
+//! if let Some(pick) = viewer.borrow_mut().pointer_up(event.pointer_id(), x, y, event.time_stamp()) {
 //!     viewer.borrow_mut().select(Some((pick.room, pick.x, pick.y)));
 //! }
 //! // requestAnimationFrame callback:
@@ -719,15 +721,21 @@ impl Viewer {
         self.view.pointer_down(id, Vec2::new(x, y), button, primary);
     }
 
-    /// A pointer moved to CSS pixel `(x, y)`; pans, orbits or pinches while pressed.
-    pub fn pointer_move(&mut self, id: i32, x: f32, y: f32) {
-        self.view.pointer_move(id, Vec2::new(x, y), clock::now());
+    /// A pointer moved to CSS pixel `(x, y)`. A pressed pointer pans, orbits or pinches.
+    /// `time` is the `timeStamp` of the event (milliseconds, the clock of
+    /// `performance.now()`). The glide after a drag uses the times of its moves, not the
+    /// times a busy page handled them.
+    pub fn pointer_move(&mut self, id: i32, x: f32, y: f32, time: f64) {
+        self.view.pointer_move(id, Vec2::new(x, y), time);
     }
 
     /// A press released without dragging is a click: returns what is under it (`None`
-    /// outside the scope). A pan released while moving glides on (see [`ViewOptions`]).
-    pub fn pointer_up(&mut self, id: i32, x: f32, y: f32) -> Option<Pick> {
-        self.view.pointer_up(id, Vec2::new(x, y), clock::now())
+    /// outside the scope). A pan released while moving glides on (see [`ViewOptions`]) at
+    /// the speed of its last moves. `time` is the `timeStamp` of the event (see
+    /// [`Self::pointer_move`]).
+    pub fn pointer_up(&mut self, id: i32, x: f32, y: f32, time: f64) -> Option<Pick> {
+        self.view
+            .pointer_up(id, Vec2::new(x, y), time, clock::now())
     }
 
     /// A pointer's gesture ended without a release (`pointercancel`, `lostpointercapture`):

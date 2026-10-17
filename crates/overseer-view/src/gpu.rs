@@ -1,11 +1,11 @@
 //! The wgpu side: buffers and textures mirroring the [`World`], and the render pass of a
 //! frame. Layers are drawn in order: the rooms (terrain from the overview texture and the
-//! packed terrain texture, status and owner, borders; one instanced draw) and minimap points
-//! (faded out under their room's detail scene) flat on the ground without depth; then each
-//! detail scene: raised walls and object prisms (perspective only) with depth, shadows and
-//! object tokens (blended, far to near), action effects (added), bot visuals (polygon fills,
-//! shapes, text); the overlay (portal arcs and marks, badges, the hover outline, labels:
-//! see `gpu/overlay.rs`); the selection frame over everything.
+//! packed terrain texture, status and owner, borders; instanced draws of the rooms in view)
+//! and minimap points (faded out under their room's detail scene) flat on the ground
+//! without depth; then each detail scene: raised walls and object prisms (perspective only)
+//! with depth, shadows and object tokens (blended, far to near), action effects (added), bot
+//! visuals (polygon fills, shapes, text); the overlay (portal arcs and marks, badges, the
+//! hover outline, labels: see `gpu/overlay.rs`); the selection frame over everything.
 
 mod overlay;
 mod pipelines;
@@ -14,6 +14,7 @@ use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
+use overseer::map::{RoomCoord, RoomRect};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use crate::MINIMAP_ROOMS;
@@ -77,6 +78,10 @@ pub struct Draw {
     pub selection: Option<Instance>,
     /// The overlay's camera, fades and hover outline.
     pub overlay: OverlayDraw,
+    /// The rooms to draw: the rooms in view and one more room around them, within the world.
+    /// A shard has tens of thousands of rooms. A software rasterizer (`SwiftShader`) spends
+    /// time on each instance that it draws, also outside the view.
+    pub rooms: RoomRect,
     /// Frame time (ms), for fades and animations.
     pub now: f64,
 }
@@ -102,6 +107,20 @@ impl Draw {
                     (view.camera.view_projection() * glam::Vec4::new(target.x, 0.0, target.y, 1.0))
                         .w
                 },
+            },
+            rooms: {
+                let visible = view.visible_rooms();
+                let around = RoomRect::new(
+                    RoomCoord {
+                        x: visible.min.x - 1,
+                        y: visible.min.y - 1,
+                    },
+                    RoomCoord {
+                        x: visible.max.x + 1,
+                        y: visible.max.y + 1,
+                    },
+                );
+                around.intersection(&view.world.bounds()).unwrap_or(visible)
             },
             now,
         }
@@ -720,8 +739,20 @@ impl Gpu {
         {
             pass.set_pipeline(&self.pipelines.rooms);
             pass.set_bind_group(1, group, &[]);
-            pass.set_vertex_buffer(0, self.rooms.slice(..));
-            pass.draw(0..6, 0..self.room_count);
+            let stride = size_of::<RoomInstance>() as u64;
+            let uploaded = self.room_count as usize;
+            for range in world.cells.ranges(draw.rooms) {
+                if range.end > uploaded {
+                    break;
+                }
+                // WebGL2 has no first-instance offset: bind at the first instance.
+                pass.set_vertex_buffer(
+                    0,
+                    self.rooms
+                        .slice(range.start as u64 * stride..range.end as u64 * stride),
+                );
+                pass.draw(0..6, 0..u32::try_from(range.len()).unwrap_or(0));
+            }
         }
         if draw.fades.minimap > 0.0 {
             pass.set_pipeline(&self.pipelines.points);

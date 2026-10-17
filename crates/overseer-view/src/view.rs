@@ -149,7 +149,8 @@ pub struct View {
     interest_revision: u64,
     /// Pan inertia and eased wheel zoom are on.
     smooth: bool,
-    /// The latest positions of a panning pointer (time, CSS point), newest last.
+    /// The latest positions of a panning pointer, newest last: the time stamp of the event
+    /// and the CSS point.
     trail: [(f64, Vec2); TRAIL],
     /// Pan inertia after a released drag.
     glide: Option<Glide>,
@@ -159,8 +160,12 @@ pub struct View {
 
 /// Positions kept to measure a drag's release velocity.
 const TRAIL: usize = 6;
-/// A drag's velocity is measured over its last this many milliseconds.
-const TRAIL_MS: f64 = 90.0;
+/// The release velocity uses the positions of the last this many milliseconds of a drag.
+/// The time stamps of the events give the times.
+const TRAIL_MS: f64 = 150.0;
+/// If a release comes this many milliseconds after the last move of a drag, the pointer
+/// stopped first. Then the view does not glide.
+const RELEASE_STALE_MS: f64 = 50.0;
 /// Time constant of the inertia's decay (ms).
 const GLIDE_DECAY_MS: f32 = 325.0;
 /// Inertia stops below this speed (CSS pixels per millisecond).
@@ -198,11 +203,15 @@ fn elapsed(now: f64, last: f64) -> f32 {
     (now - last).max(0.0) as f32
 }
 
-/// The velocity (CSS pixels per millisecond) of a drag released at `now`, from its trail
-/// (newest last); `None` when it was slow or had stopped before the release.
-fn release_velocity(trail: &[(f64, Vec2); TRAIL], now: f64) -> Option<Vec2> {
+/// The velocity (CSS pixels per millisecond) of a drag released at `released`, from its
+/// trail (newest last). `released` is the time stamp of the release event. Returns `None`
+/// if the drag was slow or stopped before the release.
+///
+/// The times are the time stamps of the events, not the times the page handled them. A busy
+/// main thread handles moves late and in bunches. Then a steady drag would look like a fling.
+fn release_velocity(trail: &[(f64, Vec2); TRAIL], released: f64) -> Option<Vec2> {
     let (newest_time, newest) = trail[TRAIL - 1];
-    if now - newest_time > 50.0 {
+    if released - newest_time > RELEASE_STALE_MS {
         return None;
     }
     let (oldest_time, oldest) = trail
@@ -449,8 +458,9 @@ impl View {
         self.pointers.retain(|pointer| pointer.id != id);
     }
 
-    /// A pointer moved at `now` (ms); pans, orbits or pinches when pressed.
-    pub fn pointer_move(&mut self, id: i32, point: Vec2, now: f64) {
+    /// A pointer moved. `time` is the time stamp of the event (ms, the clock of
+    /// [`Self::advance`]). A pressed pointer pans, orbits or pinches.
+    pub fn pointer_move(&mut self, id: i32, point: Vec2, time: f64) {
         let Some(index) = self.pointers.iter().position(|pointer| pointer.id == id) else {
             return;
         };
@@ -469,7 +479,7 @@ impl View {
             if self.pans(pointer.button) {
                 self.camera.pan(pointer.last, point);
                 self.trail.rotate_left(1);
-                self.trail[TRAIL - 1] = (now, point);
+                self.trail[TRAIL - 1] = (time, point);
             } else {
                 self.camera.orbit(point - pointer.last);
             }
@@ -500,15 +510,16 @@ impl View {
         self.changed();
     }
 
-    /// A pointer was released at `now` (ms); a press released without dragging is a click
-    /// and returns what is under it (`None` outside the scope). A pan released while
-    /// moving keeps gliding.
-    pub fn pointer_up(&mut self, id: i32, point: Vec2, now: f64) -> Option<Pick> {
+    /// A pointer was released. `time` is the time stamp of the event, and `now` is the time
+    /// the page handles it (ms). A press released without a drag is a click: it returns what
+    /// is under it (`None` outside the scope). A pan released while it moves glides on from
+    /// `now`.
+    pub fn pointer_up(&mut self, id: i32, point: Vec2, time: f64, now: f64) -> Option<Pick> {
         let index = self.pointers.iter().position(|pointer| pointer.id == id)?;
         let pointer = self.pointers.remove(index);
         let click = self.pointers.is_empty() && !self.dragged;
         if self.smooth && self.pointers.is_empty() && self.dragged && self.pans(pointer.button) {
-            self.glide = release_velocity(&self.trail, now).map(|velocity| Glide {
+            self.glide = release_velocity(&self.trail, time).map(|velocity| Glide {
                 velocity,
                 last: now,
             });

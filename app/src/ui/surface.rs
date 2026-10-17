@@ -474,7 +474,9 @@ pub fn SurfaceCanvas(
             return;
         }
         surface.set_pointer(None);
-        surface.with_viewer(|viewer| viewer.pointer_move(event.pointer_id(), x, y));
+        surface.with_viewer(|viewer| {
+            viewer.pointer_move(event.pointer_id(), x, y, event.time_stamp());
+        });
     };
     // Every release and cancel reaches the viewer, whatever the hooks: a pointer it still
     // thought pressed would turn the next press into a pinch.
@@ -482,7 +484,7 @@ pub fn SurfaceCanvas(
         let (x, y) = position(&event);
         let hooks = surface.hooks.try_get_value().flatten();
         surface.with_viewer(|viewer| {
-            if let Some(pick) = viewer.pointer_up(event.pointer_id(), x, y)
+            if let Some(pick) = viewer.pointer_up(event.pointer_id(), x, y, event.time_stamp())
                 && let Some(hooks) = &hooks
             {
                 (hooks.pick)(viewer, pick);

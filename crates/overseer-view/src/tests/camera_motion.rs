@@ -1,8 +1,11 @@
-//! Camera smoothing: pan inertia after a released drag and the eased wheel zoom.
+//! Camera smoothing: pan inertia after a released drag and the eased wheel zoom. Also the
+//! rooms that a frame draws around the camera's view.
 
 use glam::Vec2;
+use overseer::map::RoomRect;
 
-use super::{place, view, world_view};
+use super::{place, room, shard, view, world_view};
+use crate::gpu::Draw;
 use crate::view::View;
 use crate::{MAX_PX_PER_TILE, PointerButton, ViewMode};
 
@@ -14,8 +17,9 @@ fn smooth_view() -> View {
     view
 }
 
-/// A drag of `distance` CSS pixels to the east over `ms` milliseconds, released at
-/// `release`.
+/// A drag of `distance` CSS pixels to the east in six moves over `ms` milliseconds,
+/// released at `release`. The times are the time stamps of the events, and the page
+/// handles each event at once.
 fn fling(view: &mut View, distance: f32, ms: f64, release: f64) {
     let from = Vec2::new(300.0, 300.0);
     view.pointer_down(1, from, PointerButton::Primary, true);
@@ -28,7 +32,7 @@ fn fling(view: &mut View, distance: f32, ms: f64, release: f64) {
         );
     }
     assert_eq!(
-        view.pointer_up(1, from + Vec2::new(distance, 0.0), release),
+        view.pointer_up(1, from + Vec2::new(distance, 0.0), release, release),
         None
     );
 }
@@ -88,6 +92,33 @@ fn slow_or_stopped_drags_and_new_presses_do_not_glide() {
     place(&mut view, Vec2::ZERO, 300.0);
     fling(&mut view, 120.0, 60.0, 64.0);
     assert!(!view.advance(80.0), "without smoothing");
+}
+
+#[test]
+fn a_release_glides_at_the_speed_of_its_moves_time_stamps() {
+    // A steady drag of 200 pixels: ten moves 100 ms apart (0.2 px/ms) by their time stamps,
+    // the release handled 300 ms late, as a busy page would.
+    let mut view = smooth_view();
+    let start = view.camera.target();
+    let from = Vec2::new(300.0, 300.0);
+    view.pointer_down(1, from, PointerButton::Primary, true);
+    for step in 1..=10_u8 {
+        let point = from + Vec2::new(20.0 * f32::from(step), 0.0);
+        view.pointer_move(1, point, 100.0 * f64::from(step));
+    }
+    let to = from + Vec2::new(200.0, 0.0);
+    assert_eq!(view.pointer_up(1, to, 1005.0, 1300.0), None);
+    let moved = |view: &View| (start.x - view.camera.target().x) / view.camera.tiles_per_px();
+    assert!((moved(&view) - 200.0).abs() < 0.5, "{} px", moved(&view));
+    assert!(
+        view.advance(1300.0),
+        "glides from when the release is handled"
+    );
+    assert!((moved(&view) - 200.0).abs() < 0.5, "{} px", moved(&view));
+    assert!(settle(&mut view, 1300.0) > 0);
+    // About 0.2 px/ms × 325 ms, less the tail below the stopping speed.
+    let glided = moved(&view) - 200.0;
+    assert!((50.0..70.0).contains(&glided), "{glided} px");
 }
 
 #[test]
@@ -178,4 +209,41 @@ fn zoom_stops_at_readable_tiles_and_eases_into_the_limit() {
         }
         assert!((last - MAX_PX_PER_TILE).abs() < 1e-2, "{mode:?}: {last}");
     }
+}
+
+#[test]
+fn frames_draw_the_rooms_in_view_and_one_around_them() {
+    let mut view = world_view();
+    place(&mut view, Vec2::ZERO, 300.0);
+    let draw = Draw::of(&view, 0.0);
+    let visible = view.visible_rooms();
+    assert_eq!(draw.rooms.min.x, visible.min.x - 1);
+    assert_eq!(draw.rooms.max.y, visible.max.y + 1);
+    let cells = &view.world.cells;
+    let ranges: Vec<_> = cells.ranges(draw.rooms).collect();
+    assert_eq!(
+        ranges.len(),
+        usize::try_from(draw.rooms.height()).unwrap(),
+        "a range per row"
+    );
+    let drawn: Vec<_> = ranges.iter().flat_map(Clone::clone).collect();
+    let expected: Vec<_> = draw
+        .rooms
+        .iter()
+        .map(|room| cells.index(room).unwrap())
+        .collect();
+    assert_eq!(drawn, expected);
+    // Zoomed out over the whole shard: one range of every room.
+    view.fit(false, 0.0);
+    let draw = Draw::of(&view, 0.0);
+    assert_eq!(draw.rooms, shard());
+    let cells = &view.world.cells;
+    assert_eq!(
+        cells.ranges(draw.rooms).collect::<Vec<_>>(),
+        vec![0..shard().len()],
+        "the whole width at once"
+    );
+    // Nothing outside the world.
+    let outside = RoomRect::new(room("E70S70"), room("E80S80"));
+    assert_eq!(cells.ranges(outside).count(), 0);
 }

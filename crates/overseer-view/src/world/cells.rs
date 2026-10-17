@@ -2,6 +2,7 @@
 //! terrain state and the status and owner overlays of every room seen.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use overseer::map::{RoomCoord, RoomRect, RoomStat, RoomStatus};
 
@@ -231,6 +232,26 @@ impl Cells {
     /// The room instances, row-major over the bounds.
     pub fn instances(&self) -> &[RoomInstance] {
         &self.instances
+    }
+
+    /// The index ranges of the instances of `rect`'s rooms within the bounds: one per row,
+    /// or a single one when `rect` spans the bounds' width.
+    pub fn ranges(&self, rect: RoomRect) -> impl Iterator<Item = Range<usize>> + use<> {
+        let width = usize::try_from(self.bounds.width()).unwrap_or(usize::MAX);
+        let span = rect.intersection(&self.bounds).and_then(|rect| {
+            let start = self.index(rect.min)?;
+            let end = self.index(rect.max)? + 1;
+            Some((start, end, usize::try_from(rect.width()).ok()?))
+        });
+        // (first instance, past the last, instances per range, distance between ranges)
+        let (start, end, run, step) = match span {
+            Some((start, end, run)) if run < width => (start, end, run, width),
+            Some((start, end, _)) => (start, end, end - start, end - start),
+            None => (0, 0, 0, 1),
+        };
+        (start..end)
+            .step_by(step)
+            .map(move |first| first..first + run)
     }
 }
 
