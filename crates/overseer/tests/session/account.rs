@@ -153,7 +153,8 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
     );
     assert_eq!(sent(&server, "/api/auth/me").len(), 2);
 
-    // Each of the account's own changes reads the profile again and publishes it.
+    // Each of the account's own changes reads the profile again in the background and
+    // publishes it.
     let badge = UserBadgeInput {
         color1: "#ff0000".to_owned(),
         color2: "#00ff00".to_owned(),
@@ -163,7 +164,7 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         r#type: UserBadgeInputType::Integer(7),
     };
     account.set_badge(badge).await.unwrap();
-    assert!(published.has_changed().unwrap());
+    published.changed().await.unwrap();
     assert_eq!(
         published.borrow_and_update().as_ref().map(|me| me.money),
         Some(2.0)
@@ -184,6 +185,7 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         })
         .await
         .unwrap();
+    published.changed().await.unwrap();
     account
         .set_notify_prefs(UserNotifyPrefs {
             disabled_on_messages: Some(true),
@@ -192,12 +194,15 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         })
         .await
         .unwrap();
+    published.changed().await.unwrap();
     account.respawn().await.unwrap();
+    published.changed().await.unwrap();
     account
         .power_creeps()
         .start_experimentation()
         .await
         .unwrap();
+    published.changed().await.unwrap();
     assert_eq!(account.me().await.unwrap().money, 6.0);
     assert_eq!(
         published.borrow_and_update().as_ref().map(|me| me.money),
@@ -238,6 +243,41 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
 
     overseer.shutdown().await;
     assert!(matches!(account.me().await, Err(Error::Closed)));
+}
+
+#[tokio::test]
+async fn a_change_does_not_wait_for_the_profile_read() {
+    let mut server = start().await;
+    let (overseer, _websocket) = connect(&mut server).await;
+    let account = overseer.account();
+    let mut published = account.profile_watch();
+    published.borrow_and_update();
+
+    // The profile read after the change is held: the change returns all the same.
+    server.hold(Some("/api/auth/me"));
+    soon(account.set_notify_prefs(UserNotifyPrefs::default()))
+        .await
+        .unwrap();
+    soon(async {
+        while sent(&server, "/api/auth/me").len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(!published.has_changed().unwrap());
+    // A read meanwhile does not take the profile from before the change (money 0): it
+    // waits for the held read and shares it.
+    let me = tokio::spawn({
+        let account = account.clone();
+        async move { account.me().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!me.is_finished());
+    server.hold(None);
+    assert_eq!(soon(me).await.unwrap().unwrap().money, 1.0);
+    assert!(published.has_changed().unwrap());
+    assert_eq!(sent(&server, "/api/auth/me").len(), 2);
+    overseer.shutdown().await;
 }
 
 #[tokio::test]

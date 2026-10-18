@@ -5,6 +5,7 @@ pub mod usage;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use overseer_net::api::{
     AccountApi as _, ApiTokens as _, ApiTokensApi, PasswordAccount as _, RateLimitLift,
@@ -18,7 +19,7 @@ use overseer_net::model::account::{
 };
 use overseer_net::model::platform::Subsystem;
 use overseer_net::model::socket::{UserCpu, UserResources};
-use overseer_net::rt::{SystemTime, UNIX_EPOCH};
+use overseer_net::rt::{self, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 use crate::rooms::StatInterval;
@@ -31,9 +32,11 @@ pub use usage::Usage;
 pub(crate) struct Shared {
     /// The latest profile ([`Account::profile_watch`]).
     me: watch::Sender<Option<Arc<Profile>>>,
-    /// Whether the latest profile is out of date (after a change that was not read back);
-    /// the async lock makes concurrent reads share one request.
-    stale: tokio::sync::Mutex<bool>,
+    /// How many changes of the account the session made ([`changed`], [`outdated`]).
+    changes: AtomicU64,
+    /// The value of `changes` that the latest profile includes: the profile is out of date
+    /// while it is lower. The async lock makes concurrent reads share one request.
+    read: tokio::sync::Mutex<u64>,
     /// The usage while a task keeps it ([`Account::usage`]).
     usage: usage::Slot,
 }
@@ -43,7 +46,8 @@ impl Shared {
     pub(crate) fn new(me: Option<Profile>) -> Self {
         Self {
             me: watch::Sender::new(me.map(Arc::new)),
-            stale: tokio::sync::Mutex::new(false),
+            changes: AtomicU64::new(0),
+            read: tokio::sync::Mutex::new(0),
             usage: usage::Slot::default(),
         }
     }
@@ -70,27 +74,19 @@ impl Account {
     ///
     /// Read once per session (by [`Overseer::connect`] while discovering the server, so the
     /// first call makes no request) and then served from a cache shared by every handle;
-    /// [`Self::refresh`] fetches it again. After each of the account's own changes made
-    /// through this crate ([`Self::set_badge`], [`Self::set_email`], [`Self::set_username`],
+    /// [`Self::refresh`] fetches it again. Each of the account's own changes made through
+    /// this crate ([`Self::set_badge`], [`Self::set_email`], [`Self::set_username`],
     /// [`Self::set_notify_prefs`], [`Self::set_cpu_shards`], [`Self::respawn`],
-    /// [`PowerCreeps::start_experimentation`]) the session fetches it again at once. Every
-    /// profile that the session reads is published on [`Self::profile_watch`].
+    /// [`PowerCreeps::start_experimentation`]) marks it out of date, and the session reads it
+    /// again in the background. Until that read ends, `me` reads it itself. Every profile
+    /// that the session reads is published on [`Self::profile_watch`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails.
     pub async fn me(&self) -> Result<Arc<Profile>, Error> {
-        let api = self.overseer.user_api()?;
-        let shared = self.overseer.account_state();
-        let mut stale = shared.stale.lock().await;
-        if !*stale && let Some(me) = shared.me.borrow().clone() {
-            return Ok(me);
-        }
-        let me = Arc::new(api.me().await?);
-        shared.me.send_replace(Some(Arc::clone(&me)));
-        *stale = false;
-        Ok(me)
+        self.read(true).await
     }
 
     /// Fetches the signed-in user's profile again, replaces the cached one ([`Self::me`]),
@@ -101,12 +97,26 @@ impl Account {
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails; the cache is kept then.
     pub async fn refresh(&self) -> Result<Arc<Profile>, Error> {
+        self.read(false).await
+    }
+
+    /// Reads the profile and publishes it. With `reuse`, returns the latest profile instead
+    /// when no change of the account came after it.
+    async fn read(&self, reuse: bool) -> Result<Arc<Profile>, Error> {
         let api = self.overseer.user_api()?;
         let shared = self.overseer.account_state();
-        let mut stale = shared.stale.lock().await;
+        let mut read = shared.read.lock().await;
+        // Read under the lock: a change after this point makes the new profile out of date.
+        let changes = shared.changes.load(Ordering::Acquire);
+        if reuse
+            && *read == changes
+            && let Some(me) = shared.me.borrow().clone()
+        {
+            return Ok(me);
+        }
         let me = Arc::new(api.me().await?);
         shared.me.send_replace(Some(Arc::clone(&me)));
-        *stale = false;
+        *read = changes;
         Ok(me)
     }
 
@@ -188,7 +198,7 @@ impl Account {
     /// fails or the server refuses (for example right after a previous respawn).
     pub async fn respawn(&self) -> Result<(), Error> {
         self.overseer.user_api()?.respawn().await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 
@@ -265,7 +275,7 @@ impl Account {
     /// fails or the server rejects the badge (`invalid params`).
     pub async fn set_badge(&self, badge: UserBadgeInput) -> Result<(), Error> {
         self.overseer.user_api()?.set_badge(badge).await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 
@@ -275,9 +285,9 @@ impl Account {
     /// CPU ([`Profile::cpu`]), and the server refuses a change within 12 hours after the
     /// previous one ([`Profile::cpu_shards_updated`]): the session checks both against the
     /// [profile](Self::me) first ([`CpuAllocation::validate`]) and sends nothing when they
-    /// fail. A limit above a shard's cap is valid. After success the session fetches the
-    /// profile again and publishes it ([`Self::profile_watch`]), with the new allocation
-    /// ([`Profile::cpu_shards`]).
+    /// fail. A limit above a shard's cap is valid. After success the session reads the
+    /// profile again in the background and publishes it ([`Self::profile_watch`]), with the
+    /// new allocation ([`Profile::cpu_shards`]).
     ///
     /// # Errors
     ///
@@ -298,7 +308,7 @@ impl Account {
             .validate(&cpu, now)
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
         self.overseer.user_api()?.set_cpu_shards(cpu).await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 
@@ -311,7 +321,7 @@ impl Account {
     /// fails or the server refuses the address (`invalid email`, `email already exists`).
     pub async fn set_email(&self, email: &str) -> Result<(), Error> {
         self.overseer.user_api()?.set_email(email).await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 
@@ -329,7 +339,7 @@ impl Account {
             .user_api()?
             .set_username(username, email)
             .await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 
@@ -361,7 +371,7 @@ impl Account {
             ))?
             .set_password(old_password, password)
             .await?;
-        *self.overseer.account_state().stale.lock().await = true;
+        outdated(&self.overseer);
         Ok(())
     }
 
@@ -384,7 +394,7 @@ impl Account {
     /// fails.
     pub async fn set_notify_prefs(&self, prefs: UserNotifyPrefs) -> Result<(), Error> {
         self.overseer.user_api()?.set_notify_prefs(prefs).await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 
@@ -503,23 +513,25 @@ impl Account {
     }
 }
 
-/// Reads the profile again after a change of the account and publishes it
-/// ([`Account::profile_watch`]). The change succeeded, so a failed read is no error: the
-/// profile is marked out of date, and the next [`Account::me`] fetches it.
-pub(super) async fn changed(overseer: &Overseer) {
-    let shared = overseer.account_state();
-    let mut stale = shared.stale.lock().await;
-    let me = match overseer.user_api() {
-        Ok(api) => api.me().await.ok(),
-        Err(_) => None,
-    };
-    match me {
-        Some(me) => {
-            shared.me.send_replace(Some(Arc::new(me)));
-            *stale = false;
-        }
-        None => *stale = true,
-    }
+/// Marks the profile out of date after a change of the account, and reads it again in the
+/// background, which publishes it ([`Account::profile_watch`]). The change returns at once,
+/// so a slow read does not hold it. A failed read leaves the profile out of date, and the
+/// next [`Account::me`] reads it.
+pub(super) fn changed(overseer: &Overseer) {
+    outdated(overseer);
+    let account = Account::new(overseer.clone());
+    rt::spawn(async move {
+        // An error leaves the profile out of date: nothing else to do.
+        let _ = account.me().await;
+    });
+}
+
+/// Marks the profile out of date: the next [`Account::me`] reads it.
+fn outdated(overseer: &Overseer) {
+    overseer
+        .account_state()
+        .changes
+        .fetch_add(1, Ordering::AcqRel);
 }
 
 /// How many leading characters of a token the API token list ([`Account::auth_tokens`])

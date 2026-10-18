@@ -178,11 +178,11 @@ async fn an_allocation_is_checked_before_it_is_sent_and_a_cap_does_not_block_it(
     assert_eq!(sent(&server, "/api/user/cpu-shards"), 0);
 
     // More than shard3's cap of 20 is valid: the server accepts it. The session reads the
-    // profile again and publishes the new allocation.
+    // profile again in the background and publishes the new allocation.
     let capped = [("shard3".to_owned(), 100)].into_iter().collect();
     account.set_cpu_shards(capped).await.unwrap();
     assert_eq!(sent(&server, "/api/user/cpu-shards"), 1);
-    assert!(profile.has_changed().unwrap());
+    profile.changed().await.unwrap();
     let published = profile.borrow_and_update().clone().unwrap();
     assert_eq!(published.cpu_shards.get("shard3"), Some(&100.0));
 }

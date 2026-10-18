@@ -115,7 +115,7 @@ impl PowerCreeps {
             .user_api()?
             .start_power_experimentation()
             .await?;
-        changed(&self.overseer).await;
+        changed(&self.overseer);
         Ok(())
     }
 }
