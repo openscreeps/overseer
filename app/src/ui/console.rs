@@ -27,7 +27,7 @@ use web_sys::KeyboardEvent;
 
 use self::history::{CommandHistory, SavedCommands};
 use self::markup::Piece;
-use self::names::GameNames;
+use self::names::CompletionNames;
 use self::suggest::{Completer, SuggestionList, place_caret};
 use crate::platform;
 use crate::ui::account::{Account, ShardSelect};
@@ -130,7 +130,7 @@ pub struct ConsoleState {
     pub unread: RwSignal<usize>,
     /// The names of the user's game that the input completes, and their account: the session
     /// and the shard that commands run on.
-    names: GameNames,
+    names: CompletionNames,
 }
 
 impl ConsoleState {
@@ -150,7 +150,7 @@ impl ConsoleState {
             error: RwSignal::new(None),
             shown: RwSignal::new(true),
             unread: RwSignal::new(0),
-            names: GameNames::new(account),
+            names: CompletionNames::new(account),
         };
         match console.feed() {
             Ok(mut feed) => {

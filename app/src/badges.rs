@@ -4,28 +4,25 @@
 //! both, live rooms first), and in browsers the loader (`Badges`, browser builds only) that
 //! gets each badge's pixels to every viewer of the screen (`Viewer::set_badge`).
 //!
-//! A badge comes from the cache when it holds the player's badge with the same parameters
-//! ([`badge_hash`], `terrain_cache::BadgeStore` in browser builds); otherwise it is fetched as SVG
-//! (`Map::badge_svg`, `GET /api/user/badge-svg`), rasterized by the browser (SVG → image →
-//! `OffscreenCanvas` of [`BADGE_SIZE`]² → premultiplied RGBA) and cached. A player whose badge
-//! changes has another hash, so the new badge is fetched.
+//! A badge comes from the pixel cache when it holds the player's badge with the same
+//! parameters ([`BadgeKey`], `terrain_cache::BadgeStore` in browser builds); otherwise its SVG
+//! comes from the session's badge service (`Users::badges`), is rasterized by the browser
+//! (SVG → image → `OffscreenCanvas` of [`BADGE_SIZE`]² → premultiplied RGBA) and cached. A
+//! player whose badge changes has another key, so the new badge is fetched.
 //!
 //! # Pace
 //!
-//! One badge at a time, never blocking the map. Each request first asks the session's request
-//! budget (`Client::budget_ready_at`, priority visible), shared with the world map: on
-//! screeps.com (and its season) every request of the token counts against its limit of 120
-//! per minute, and background loading together stays within 105 for visible work; private
-//! servers, and a token whose rate limits are lifted, have no budget: requests follow each
-//! other at once. Each player's badge is fetched at most once per world screen, failures
-//! included.
+//! One badge at a time, never blocking the map. The badge service owns the pace (the
+//! session's request budget, shared with the world map), shares one fetch of each badge
+//! between all viewers of the session and remembers failures. Each player's badge is
+//! delivered or tried at most once per world screen.
 
 use std::collections::{BTreeMap, HashSet};
-use std::hash::{Hash, Hasher};
 
 use overseer::map::{RoomCoord, RoomRect, RoomStat};
 use overseer::model::account::UserBadge;
 use overseer::model::world::RoomUser;
+use overseer::users::BadgeKey;
 
 /// Side of a rasterized badge, in pixels: the viewer's badge size (no resampling there).
 pub const BADGE_SIZE: u32 = overseer_view::BADGE_SIZE;
@@ -34,67 +31,13 @@ pub const BADGE_BYTES: usize = (BADGE_SIZE * BADGE_SIZE * 4) as usize;
 /// Most badges asked for at once (the nearest ones; the rest follow as the view moves).
 const MAX_WANTED: usize = 256;
 
-/// A stable 64-bit hash of a badge's parameters (FNV-1a of their JSON): the same badge hashes
-/// the same in every session and build, a changed one differently.
-pub fn badge_hash(badge: &UserBadge) -> u64 {
-    let mut hasher = Fnv1a::default();
-    serde_json::to_string(badge)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    hasher.finish()
-}
-
-/// FNV-1a, 64 bits.
-struct Fnv1a(u64);
-
-impl Default for Fnv1a {
-    fn default() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-}
-
-impl Hasher for Fnv1a {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-}
-
-/// A badge the viewers need.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Want {
-    /// The player's id (the viewer's badge key).
-    pub user: String,
-    /// The player's name (the badge request's).
-    pub username: String,
-    /// The badge's parameters hash ([`badge_hash`]).
-    pub hash: u64,
-}
-
-impl Want {
-    /// The badge `badge` of the player `user` named `username`.
-    fn of(user: &str, username: &str, badge: &UserBadge) -> Self {
-        Self {
-            user: user.to_owned(),
-            username: username.to_owned(),
-            hash: badge_hash(badge),
-        }
-    }
-}
-
 /// The badges of the owners and reservers of `rooms` (with their overviews) in `view`,
 /// nearest its centre first, each player once, at most [`MAX_WANTED`]. Players without a name
 /// or badge are skipped.
 pub fn wanted<'a>(
     rooms: impl IntoIterator<Item = (RoomCoord, &'a RoomStat)>,
     view: RoomRect,
-) -> Vec<Want> {
+) -> Vec<BadgeKey> {
     #[expect(clippy::cast_precision_loss, reason = "room coordinates are small")]
     let centre = (
         (view.min.x + view.max.x) as f32 / 2.0,
@@ -127,23 +70,32 @@ pub fn wanted<'a>(
         .into_iter()
         .filter(|(_, id, _, _)| seen.insert(*id))
         .take(MAX_WANTED)
-        .map(|(_, id, username, badge)| Want::of(id, username, badge))
+        .map(|(_, id, username, badge)| BadgeKey::new(id, username, badge))
         .collect()
 }
 
 /// The badges of the players of a live room (`RoomSnapshot::users`: owners of its objects,
 /// its reserver and signer), each player once. Players without a badge (the Invader and
 /// Source Keeper NPCs) are skipped.
-pub fn room_wants(users: &BTreeMap<String, RoomUser>) -> Vec<Want> {
+pub fn room_wants(users: &BTreeMap<String, RoomUser>) -> Vec<BadgeKey> {
     users
         .values()
-        .filter_map(|user| Some(Want::of(&user.id, &user.username, user.badge.as_ref()?)))
+        .filter_map(|user| {
+            Some(BadgeKey::new(
+                &user.id,
+                &user.username,
+                user.badge.as_ref()?,
+            ))
+        })
         .collect()
 }
 
 /// What to load, in order: the players of the live rooms (`rooms`, close up on screen),
 /// then those the map wants (`map`, [`wanted`]); each player once.
-pub fn merge<'a>(rooms: impl IntoIterator<Item = &'a [Want]>, map: &'a [Want]) -> Vec<Want> {
+pub fn merge<'a>(
+    rooms: impl IntoIterator<Item = &'a [BadgeKey]>,
+    map: &'a [BadgeKey],
+) -> Vec<BadgeKey> {
     let mut seen = HashSet::new();
     rooms
         .into_iter()
@@ -178,7 +130,7 @@ mod loader {
 
     use overseer::Overseer;
     use overseer::map::RoomCoord;
-    use overseer::net::Priority;
+    use overseer::users::BadgeKey;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
@@ -186,8 +138,7 @@ mod loader {
         OffscreenCanvasRenderingContext2d, Url,
     };
 
-    use super::{BADGE_BYTES, BADGE_SIZE, Want, merge, premultiply};
-    use crate::session::wait_for_budget;
+    use super::{BADGE_BYTES, BADGE_SIZE, merge, premultiply};
     use crate::terrain_cache::BadgeStore;
 
     /// Delivers a badge's pixels to a viewer.
@@ -204,11 +155,11 @@ mod loader {
         /// The id of the next attachment.
         next_target: u64,
         /// What the map's view wants ([`Badges::want`]).
-        map: Vec<Want>,
+        map: Vec<BadgeKey>,
         /// What each live room wants ([`Badges::want_room`]).
-        rooms: Vec<(RoomCoord, Vec<Want>)>,
+        rooms: Vec<(RoomCoord, Vec<BadgeKey>)>,
         /// Badges to get, first first.
-        queue: VecDeque<Want>,
+        queue: VecDeque<BadgeKey>,
         /// The worker runs.
         running: bool,
         /// The loader was stopped (its screen left).
@@ -218,17 +169,18 @@ mod loader {
     /// The badge loader of one world screen or room window; cheap to clone.
     #[derive(Clone)]
     pub struct Badges {
-        overseer: Overseer,
+        /// The session's badge service: SVG documents, shared fetches, the pace.
+        service: overseer::users::Badges,
         server: Rc<str>,
         state: Rc<RefCell<State>>,
     }
 
     impl Badges {
         /// A loader for the server with base URL `server` (`overseer` connected to it),
-        /// within the session's request budget.
-        pub fn new(overseer: Overseer, server: &str) -> Self {
+        /// through the session's badge service.
+        pub fn new(overseer: &Overseer, server: &str) -> Self {
             Self {
-                overseer,
+                service: overseer.users().badges(),
                 server: server.into(),
                 state: Rc::new(RefCell::new(State {
                     done: HashMap::new(),
@@ -280,13 +232,13 @@ mod loader {
         }
 
         /// The badges the map needs now, nearest first (after those of the live rooms).
-        pub fn want(&self, wants: Vec<Want>) {
+        pub fn want(&self, wants: Vec<BadgeKey>) {
             self.state.borrow_mut().map = wants;
             self.requeue();
         }
 
         /// The badges the players of the live room `room` need ([`super::room_wants`]).
-        pub fn want_room(&self, room: RoomCoord, wants: Vec<Want>) {
+        pub fn want_room(&self, room: RoomCoord, wants: Vec<BadgeKey>) {
             {
                 let mut state = self.state.borrow_mut();
                 match state.rooms.iter_mut().find(|(at, _)| *at == room) {
@@ -322,7 +274,7 @@ mod loader {
                     state.rooms.iter().map(|(_, wants)| wants.as_slice()),
                     &state.map,
                 );
-                let fresh: VecDeque<Want> = wanted
+                let fresh: VecDeque<BadgeKey> = wanted
                     .into_iter()
                     .filter(|want| state.done.get(&want.user) != Some(&want.hash))
                     .collect();
@@ -368,9 +320,9 @@ mod loader {
                     self.deliver(&want.user, &pixels);
                     continue;
                 }
-                wait_for_budget(&self.overseer, Priority::Visible, 0).await;
-                // A badge that cannot be fetched or drawn is not tried again on this screen.
-                let Ok(svg) = self.overseer.map().badge_svg(&want.username, false).await else {
+                // A badge that cannot be fetched or drawn is not tried again on this screen;
+                // the badge service remembers fetch failures for the whole session.
+                let Some(svg) = self.service.svg(&want).await else {
                     continue;
                 };
                 let Ok(pixels) = rasterize(&svg).await else {
@@ -454,21 +406,9 @@ mod tests {
 
     use overseer::map::{RoomCoord, RoomOwner, RoomRect, RoomReservation, RoomStat, RoomStatus};
     use overseer::model::world::RoomUser;
+    use overseer::users::BadgeKey;
 
-    use super::{Want, badge_hash, merge, premultiply, room_wants, test_badge, wanted};
-
-    #[test]
-    fn badge_hashes_follow_the_parameters_and_stay_stable() {
-        let badge = test_badge(3);
-        assert_eq!(badge_hash(&badge), badge_hash(&test_badge(3)));
-        assert_ne!(badge_hash(&badge), badge_hash(&test_badge(4)));
-        let mut flipped = test_badge(3);
-        flipped.flip = true;
-        assert_ne!(badge_hash(&badge), badge_hash(&flipped));
-        // FNV-1a of the JSON: the same value in every build (keys of the badge cache).
-        assert_eq!(badge_hash(&badge), badge_hash(&badge.clone()));
-        assert_ne!(badge_hash(&badge), 0);
-    }
+    use super::{merge, premultiply, room_wants, test_badge, wanted};
 
     fn stat(owner: Option<(&str, i64)>, reserver: Option<(&str, i64)>) -> RoomStat {
         RoomStat {
@@ -515,11 +455,8 @@ mod tests {
             ],
             RoomRect::new(room(-10, -10), room(10, 10)),
         );
-        let want = |name: &str, shape| Want {
-            user: format!("id-{name}"),
-            username: name.to_owned(),
-            hash: badge_hash(&test_badge(shape)),
-        };
+        let want =
+            |name: &str, shape| BadgeKey::new(&format!("id-{name}"), name, &test_badge(shape));
         assert_eq!(wants, [want("near", 2), want("mid", 3), want("far", 1)]);
     }
 
@@ -542,11 +479,7 @@ mod tests {
             user("me", Some(1)),
             user("foe", Some(2)),
         ]);
-        let want = |id: &str, shape| Want {
-            user: id.to_owned(),
-            username: format!("name-{id}"),
-            hash: badge_hash(&test_badge(shape)),
-        };
+        let want = |id: &str, shape| BadgeKey::new(id, &format!("name-{id}"), &test_badge(shape));
         let room = room_wants(&users);
         assert_eq!(room, [want("foe", 2), want("me", 1)]);
         // The map's owners follow the live rooms' players; a player in both comes once, first.

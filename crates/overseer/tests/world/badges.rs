@@ -1,10 +1,16 @@
 //! Player badges on the world map: the owners' and reservers' badge parameters from map
-//! statistics, and their SVG.
+//! statistics, their SVG, and the session's shared badge service (one fetch per badge
+//! version, failures remembered, within the request budget).
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use futures_util::StreamExt as _;
 use overseer::map::{Interest, RoomCoord, RoomRect, WorldEvent};
 use overseer::model::account::{UserBadgeColor, UserBadgeType};
+use overseer::net::{Priority, REQUEST_WINDOW};
+use overseer::users::{BadgeKey, RETRY_FAILED};
 
-use crate::server::Request;
+use crate::server::{Request, Response, Ws};
 use crate::{connect, query, soon};
 
 fn room(name: &str) -> RoomCoord {
@@ -95,4 +101,105 @@ async fn badges_render_as_svg_by_username() {
         .map(|request| request.query)
         .collect::<Vec<_>>();
     assert_eq!(queries, ["username=Alice&border=1", "username=Nobody"]);
+}
+
+/// The key of `username`'s badge (player `user`) in version `hash`.
+fn key(user: &str, username: &str, hash: u64) -> BadgeKey {
+    BadgeKey {
+        user: user.to_owned(),
+        username: username.to_owned(),
+        hash,
+    }
+}
+
+/// The badge requests the server received, by username.
+fn badge_requests(server: &crate::server::Server) -> Vec<String> {
+    server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/api/user/badge-svg")
+        .filter_map(|request| query(&request, "username").map(str::to_owned))
+        .collect()
+}
+
+/// Reads the client's frames until the socket closes, so that keep-alive pings get answers
+/// while the clock jumps.
+fn drain(mut websocket: Ws) {
+    tokio::spawn(async move { while websocket.next().await.is_some() {} });
+}
+
+#[tokio::test]
+async fn viewers_share_one_fetch_per_badge_version_and_failures_wait() {
+    let (server, overseer, websocket) = connect(routes).await;
+    drain(websocket);
+    let badges = overseer.users().badges();
+    let alice = key("u1", "Alice", 1);
+    assert_eq!(badges.cached(&alice), None);
+    // Two viewers at once (another handle of the same session): one request.
+    let other = overseer.users().badges();
+    let (first, second) = soon(async { tokio::join!(badges.svg(&alice), other.svg(&alice)) }).await;
+    assert_eq!(first.as_deref(), Some("<svg>alice</svg>"));
+    assert_eq!(second, first);
+    assert_eq!(badges.cached(&alice), first);
+    assert_eq!(badges.svg(&alice).await, first);
+    assert_eq!(badge_requests(&server), ["Alice"]);
+
+    // A changed badge is another version: fetched again, the old one is gone.
+    let changed = key("u1", "Alice", 2);
+    assert_eq!(badges.svg(&changed).await, first);
+    assert_eq!(badges.cached(&alice), None);
+    assert_eq!(badge_requests(&server), ["Alice", "Alice"]);
+
+    // A badge that cannot be fetched is not asked again for a while.
+    tokio::time::pause();
+    let nobody = key("u9", "Nobody", 1);
+    assert_eq!(badges.svg(&nobody).await, None);
+    assert_eq!(badges.svg(&nobody).await, None);
+    assert_eq!(badge_requests(&server), ["Alice", "Alice", "Nobody"]);
+    tokio::time::advance(RETRY_FAILED).await;
+    assert_eq!(badges.svg(&nobody).await, None);
+    assert_eq!(
+        badge_requests(&server),
+        ["Alice", "Alice", "Nobody", "Nobody"]
+    );
+}
+
+/// [`routes`] on a server with rate limits (the headers of `GET /api/game/world-size`).
+fn limited(request: &Request) -> Response {
+    if request.path == "/api/game/world-size" {
+        let reset = (SystemTime::now() + Duration::from_mins(1))
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        return Response {
+            status: 200,
+            headers: vec![
+                ("X-RateLimit-Limit", "120".to_owned()),
+                ("X-RateLimit-Remaining", "119".to_owned()),
+                ("X-RateLimit-Reset", reset.to_string()),
+            ],
+            body: br#"{"ok":1,"width":40,"height":40}"#.to_vec(),
+        };
+    }
+    routes(request).into()
+}
+
+#[tokio::test]
+async fn badge_fetches_wait_for_the_shared_request_budget() {
+    let (server, overseer, websocket) = connect(limited).await;
+    drain(websocket);
+    tokio::time::pause();
+    let client = overseer.client().clone();
+    let first = tokio::time::Instant::now();
+    // The user's own requests fill the share of visible work.
+    for _ in 0..Priority::Visible.budget() {
+        overseer.map().world_size(None).await.unwrap();
+    }
+    assert!(client.has_rate_limits());
+    assert!(client.budget_ready_at(Priority::Visible, 0).is_some());
+    let svg = overseer.users().badges().svg(&key("u1", "Alice", 1)).await;
+    assert_eq!(svg.as_deref(), Some("<svg>alice</svg>"));
+    // The fetch went once the first of those requests left the window.
+    assert!(tokio::time::Instant::now() >= first + REQUEST_WINDOW);
+    assert_eq!(badge_requests(&server), ["Alice"]);
 }

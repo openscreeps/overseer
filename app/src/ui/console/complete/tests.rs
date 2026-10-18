@@ -1,18 +1,25 @@
+use overseer::console::GameNames;
 use serde_json::{Value, json};
 
-use super::{Completion, Names, Needs, Suggestion, byte_offset, complete, utf16_len};
+use super::{Completion, Needs, Suggestion, byte_offset, complete, utf16_len};
 
 /// No labels.
 const NONE: [&str; 0] = [];
 
 /// The suggestions for `text` with the caret at its end, without `Memory`.
-fn at_end(text: &str, names: &Names) -> Completion {
+fn at_end(text: &str, names: &GameNames) -> Completion {
     complete(text, utf16_len(text), names, None, &[])
 }
 
 /// The suggestions for `text` with the caret at its end, with `memory` as `Memory`.
 fn at_end_in(text: &str, memory: &Value) -> Completion {
-    complete(text, utf16_len(text), &Names::default(), Some(memory), &[])
+    complete(
+        text,
+        utf16_len(text),
+        &GameNames::default(),
+        Some(memory),
+        &[],
+    )
 }
 
 /// The labels of `completion`.
@@ -34,11 +41,12 @@ fn find<'a>(completion: &'a Completion, label: &str) -> &'a Suggestion {
 }
 
 /// Names with creeps, a spawn and rooms.
-fn names() -> Names {
-    Names {
+fn names() -> GameNames {
+    GameNames {
         creeps: vec!["c100".to_owned(), "c101".to_owned(), "my creep".to_owned()],
         spawns: vec!["Spawn1".to_owned()],
         rooms: vec!["W1N1".to_owned()],
+        rooms_read: 1,
     }
 }
 
@@ -52,7 +60,7 @@ fn memory() -> Value {
 
 #[test]
 fn narrows_to_the_members_of_a_known_object() {
-    let names = Names::default();
+    let names = GameNames::default();
     let completion = at_end("Game.c", &names);
     let some = labels(&completion);
     for member in ["creeps", "cpu", "constructionSites"] {
@@ -83,7 +91,7 @@ fn narrows_to_the_members_of_a_known_object() {
 
 #[test]
 fn completes_constants_and_globals() {
-    let names = Names::default();
+    let names = GameNames::default();
     assert_eq!(
         labels(&at_end("FIND_SO", &names)),
         ["FIND_SOURCES", "FIND_SOURCES_ACTIVE"]
@@ -125,7 +133,7 @@ fn completes_own_names_and_asks_for_them() {
     assert_eq!(labels(&at_end("Game.spawns.S", &names)), ["Spawn1"]);
     assert_eq!(labels(&at_end("Game.rooms.w", &names)), ["W1N1"]);
     // Not loaded yet: nothing, but the names are asked for.
-    let empty = at_end("Game.creeps.", &Names::default());
+    let empty = at_end("Game.creeps.", &GameNames::default());
     assert_eq!(labels(&empty), NONE);
     assert!(empty.needs.objects);
     assert!(!at_end("Game.cpu.", &names).needs.objects);
@@ -145,7 +153,7 @@ fn completes_memory_keys_at_any_depth() {
     );
     // A number has no keys.
     assert_eq!(labels(&at_end_in("Memory.ticks.", &memory)), NONE);
-    let unloaded = at_end("Memory.", &Names::default());
+    let unloaded = at_end("Memory.", &GameNames::default());
     assert_eq!(labels(&unloaded), NONE);
     assert!(unloaded.needs.memory);
 }
@@ -169,7 +177,7 @@ fn ranks_same_case_prefix_then_any_case_prefix_then_substring() {
 
 #[test]
 fn finds_the_chain_at_the_caret() {
-    let names = Names::default();
+    let names = GameNames::default();
     // In the middle of a line, before other code.
     let text = "x(Game.cr, 1)";
     let completion = complete(text, 9, &names, None, &[]);
@@ -187,7 +195,7 @@ fn finds_the_chain_at_the_caret() {
 
 #[test]
 fn counts_offsets_in_utf16_units() {
-    let names = Names::default();
+    let names = GameNames::default();
     // The emoji is 2 UTF-16 units and 4 bytes; `é` is 1 unit and 2 bytes.
     let text = "'🎉é'; Game.cr";
     let caret = utf16_len(text);
@@ -219,7 +227,7 @@ fn quotes_names_that_are_no_identifiers() {
 
 #[test]
 fn offers_nothing_in_strings_comments_and_unknown_objects() {
-    let names = Names::default();
+    let names = GameNames::default();
     for text in [
         "'Game.cr",
         "\"FIND_SO",
@@ -242,7 +250,7 @@ fn offers_nothing_in_strings_comments_and_unknown_objects() {
 
 #[test]
 fn suggests_earlier_commands_that_start_with_the_input() {
-    let names = Names::default();
+    let names = GameNames::default();
     let history = [
         "Game.time".to_owned(),
         "Game.cpu.getUsed()".to_owned(),

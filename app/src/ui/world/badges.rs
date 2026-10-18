@@ -18,7 +18,7 @@ use crate::ui::surface::Surface;
 /// Opens the badge loader of `server` (`overseer` connected to it) into `map.badges` for the
 /// screen being built. The loader stops when the screen goes.
 pub fn open(map: MapState, overseer: &Overseer, server: &Server) {
-    let loader = Badges::new(overseer.clone(), &server.url);
+    let loader = Badges::new(overseer, &server.url);
     map.badges.set_value(Some(loader.clone()));
     let own = StoredValue::new_local(loader);
     on_cleanup(move || {

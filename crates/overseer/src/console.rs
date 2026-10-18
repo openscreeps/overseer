@@ -1,4 +1,10 @@
-//! The live console: output of the signed-in user's runtime and console commands.
+//! The live console: output of the signed-in user's runtime and console commands, and the
+//! names of the user's game for completion ([`Console::names`]).
+
+mod names;
+
+pub(crate) use names::NamesCache;
+pub use names::{COMPLETION_FRESHNESS, GameNames, NAMES_MAX_ROOMS, NAMES_PARALLEL};
 
 use std::collections::VecDeque;
 

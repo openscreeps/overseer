@@ -87,7 +87,7 @@ pub const BADGES: &str = "badges";
 pub const STORES: [&str; 5] = [TERRAIN, STATS, WORLDS, PORTALS, BADGES];
 
 /// The key of the badge of user `user` with parameter hash `hash`
-/// ([`crate::badges::badge_hash`]) on the server with base URL `server`.
+/// ([`overseer::users::badge_hash`]) on the server with base URL `server`.
 pub fn badge_key(server: &str, user: &str, hash: u64) -> String {
     format!("{FORMAT}|{server}|~badge|{user}|{hash:016x}")
 }

@@ -1,7 +1,7 @@
 //! Console autocomplete: the identifier chain before the caret (`Game.creeps.Har`, `FIND_SO`)
 //! and the ranked names that complete it.
 //!
-//! The names come from the API [`catalog`], from the signed-in user's game ([`Names`]: own
+//! The names come from the API [`catalog`], from the signed-in user's game ([`GameNames`]: own
 //! creeps, spawns and rooms; and the keys of `Memory`), and from earlier commands (whole
 //! commands that start with the input). A dot after a known object narrows the names to its
 //! members.
@@ -16,6 +16,7 @@ mod tests;
 
 use std::collections::HashSet;
 
+use overseer::console::GameNames;
 use serde_json::Value;
 
 use self::catalog::{Type, Value as ConstantValue};
@@ -26,17 +27,6 @@ pub const LIMIT: usize = 8;
 const HISTORY_LIMIT: usize = 3;
 /// Most segments of a chain (`a.b.c` has 2 before the word).
 const MAX_SEGMENTS: usize = 16;
-
-/// The names of the signed-in user's own objects (on one shard) that the catalog cannot know.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Names {
-    /// The keys of `Game.creeps`.
-    pub creeps: Vec<String>,
-    /// The keys of `Game.spawns`.
-    pub spawns: Vec<String>,
-    /// The keys of `Game.rooms`.
-    pub rooms: Vec<String>,
-}
 
 /// One suggestion: replace `start..end` (UTF-16 offsets) of the input with `insert`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +80,7 @@ pub struct Completion {
 pub fn complete(
     text: &str,
     caret: usize,
-    names: &Names,
+    names: &GameNames,
     memory: Option<&Value>,
     history: &[String],
 ) -> Completion {
@@ -393,7 +383,7 @@ struct Candidate<'a> {
 /// Every name the chain's object has (before ranking).
 fn candidates<'a>(
     chain: &Chain<'_>,
-    names: &'a Names,
+    names: &'a GameNames,
     memory: Option<&'a Value>,
     needs: &mut Needs,
 ) -> Vec<Candidate<'a>> {

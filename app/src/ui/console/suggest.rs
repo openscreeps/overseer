@@ -14,7 +14,7 @@ use web_sys::KeyboardEvent;
 
 use super::complete::{self, Completion};
 use super::history::CommandHistory;
-use super::names::GameNames;
+use super::names::CompletionNames;
 
 /// The suggestion list: above the input, as wide as the input at most.
 const LIST: &str = "absolute bottom-full left-3 z-30 w-[min(28rem,calc(100%-1.5rem))] \
@@ -61,7 +61,7 @@ impl Completer {
         text: RwSignal<String>,
         input: NodeRef<Textarea>,
         history: StoredValue<CommandHistory>,
-        names: GameNames,
+        names: CompletionNames,
     ) -> Self {
         let open = RwSignal::new(false);
         let caret = RwSignal::new(0);
