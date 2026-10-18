@@ -55,19 +55,30 @@ async function view(page: Page, room: string) {
   });
 }
 
-/** Gives up `player`'s controller (`unclaim`) and waits until the server did. */
+/**
+ * Gives up `player`'s controller (`unclaim`) and waits until the server did.
+ *
+ * The stock community engine can drop a manual intent: its processor reads a room's intents,
+ * processes the room, then deletes every intent of the room. An intent that arrives between
+ * the read and the delete is lost (`@screeps/engine` `processor.js`, `getRoomIntents` …
+ * `clearRoomIntents`). The player's room is processed every tick, so the intent is sent again
+ * while the controller stays claimed. A second `unclaim` of a free controller does nothing.
+ */
 async function unclaim(server: Server, player: Player) {
   const session = await Session.signIn(server.url, player.username, player.password);
   const { _id } = await controller(server, player.room);
-  await session.call('api/game/add-object-intent', {
-    _id,
-    room: player.room,
-    name: 'unclaim',
-    intent: {},
-  });
-  await expect
-    .poll(async () => (await controller(server, player.room)).user ?? null, { timeout: 30_000 })
-    .toBeNull();
+  await expect(async () => {
+    await session.call('api/game/add-object-intent', {
+      _id,
+      room: player.room,
+      name: 'unclaim',
+      intent: {},
+    });
+    // 15 ticks of the harness's worlds (200 ms each).
+    await expect
+      .poll(async () => (await controller(server, player.room)).user ?? null, { timeout: 3_000 })
+      .toBeNull();
+  }).toPass({ timeout: 30_000 });
 }
 
 test.describe('live overview', { tag: ['@openscreeps', '@transport'] }, () => {

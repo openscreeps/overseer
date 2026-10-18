@@ -72,15 +72,17 @@ test.describe('session', { tag: '@transport' }, () => {
   test('keeps the rotated session token', { tag: '@openscreeps' }, async ({
     signedInPage: page,
     player,
+    presence,
     server,
   }) => {
     const key = `overseer.secret.token:${server.url}`;
     await expect(page.getByRole('button', { name: `Account: ${player.username}` })).toBeVisible();
-    const seeded = await page.evaluate((key) => localStorage.getItem(key), key);
-    // The server replaces the token with every authenticated reply; the app stores the latest.
+    // The server sends new tokens in its authenticated replies; the app stores the latest.
+    // Compare with the seeded token: the page can store a rotated token before it shows the
+    // account, and an idle world then sends no more replies.
     await expect
       .poll(() => page.evaluate((key) => localStorage.getItem(key), key))
-      .not.toBe(seeded);
+      .not.toBe(presence.token);
   });
 
   test('signs out', async ({ signedInPage: page, user, server }) => {
