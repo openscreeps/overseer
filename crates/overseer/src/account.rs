@@ -70,7 +70,7 @@ impl Account {
     }
 
     /// The signed-in user's private profile (`GET /api/auth/me`): username, badge, credits,
-    /// CPU, GCL and power, resources, notification preferences, …
+    /// CPU, GCL and power, the time of the last respawn, notification preferences, …
     ///
     /// Read once per session (by [`Overseer::connect`] while discovering the server, so the
     /// first call makes no request) and then served from a cache shared by every handle;
@@ -92,10 +92,14 @@ impl Account {
     /// Fetches the signed-in user's profile again, replaces the cached one ([`Self::me`]),
     /// publishes it ([`Self::profile_watch`]) and returns it.
     ///
+    /// Each call sends a request, and the result is never the cached profile. Use it when a
+    /// decision needs the values that the server has now (for example
+    /// [`Profile::last_respawn`]).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
-    /// fails; the cache is kept then.
+    /// fails. Then the cache does not change, and the error is the only result.
     pub async fn refresh(&self) -> Result<Arc<Profile>, Error> {
         self.read(false).await
     }

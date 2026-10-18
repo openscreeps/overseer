@@ -246,6 +246,32 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
 }
 
 #[tokio::test]
+async fn a_failed_refresh_is_an_error_not_the_cached_profile() {
+    let profiles = Arc::new(AtomicU64::new(0));
+    // The read while connecting succeeds; every later read fails.
+    let mut server = Server::start(
+        move |request: &Request| {
+            if request.path == "/api/auth/me" && profiles.load(Ordering::SeqCst) > 0 {
+                return (200, r#"{"error":"busy"}"#.to_owned());
+            }
+            account_routes(request, &profiles)
+        },
+        |_| true,
+    )
+    .await;
+    let (overseer, _websocket) = connect(&mut server).await;
+    let account = overseer.account();
+    let mut published = account.profile_watch();
+    let cached = published.borrow_and_update().clone().unwrap();
+
+    assert!(matches!(account.refresh().await, Err(Error::Net(_))));
+    // The failure publishes nothing, and `me` keeps the cached profile.
+    assert!(!published.has_changed().unwrap());
+    assert!(Arc::ptr_eq(&cached, &account.me().await.unwrap()));
+    assert_eq!(sent(&server, "/api/auth/me").len(), 2);
+}
+
+#[tokio::test]
 async fn a_change_does_not_wait_for_the_profile_read() {
     let mut server = start().await;
     let (overseer, _websocket) = connect(&mut server).await;

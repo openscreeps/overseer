@@ -41,6 +41,11 @@ pub use crate::api::official::types::UserWorldStatus;
 pub use crate::api::official::types::{UserOverviewPoint, UserRoomStatName, UserRoomStatValues};
 
 /// The signed-in user's private profile (`GET /api/auth/me`).
+///
+/// The server sends only the fields that it stores for the account. When the reply can omit
+/// a field, the field is an `Option`, and `None` means that the reply did not hold it. The
+/// exceptions are [`Self::cpu_shards`] and [`Self::notify_prefs`]: their documentation
+/// tells how they read a missing field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     /// The user's id (`_id`), the key of user channels.
@@ -61,14 +66,27 @@ pub struct Profile {
     /// CPU per tick available to the account, when reported.
     pub cpu: Option<f64>,
     /// The CPU limit of each shard, by shard name (`cpuShard`): screeps.com and its Season
-    /// server. Empty when the server does not report it. Change it with
-    /// `POST /api/user/cpu-shards`
+    /// server. Change it with `POST /api/user/cpu-shards`
     /// ([`Subsystem::CpuShards`](crate::model::platform::Subsystem::CpuShards)).
+    ///
+    /// A shard that the map does not name has no CPU. When the reply holds no map, the map
+    /// is empty: the account has no allocation, so no shard has CPU. A missing map and an
+    /// empty map have the same meaning, thus this field does not keep the difference. Other
+    /// servers do not allocate CPU to each shard and never send the map; to know whether a
+    /// server does, use
+    /// [`Subsystem::CpuShards`](crate::model::platform::Subsystem::CpuShards), not this
+    /// field.
     pub cpu_shards: BTreeMap<String, f64>,
     /// When the CPU limits of the shards changed last, in milliseconds since the Unix epoch
     /// (`cpuShardUpdatedTime`), when reported. The server refuses a new change for 12 hours
     /// after it.
     pub cpu_shards_updated: Option<f64>,
+    /// When the account respawned last, in milliseconds since the Unix epoch
+    /// (`lastRespawnDate`). The official, `OpenScreeps` and community contracts all define
+    /// it. `None` when the reply did not hold it: the server has no record of a respawn of
+    /// the account. Not every server records each respawn (`POST /api/user/respawn`), so
+    /// `None` does not prove that the account never respawned.
+    pub last_respawn: Option<f64>,
     /// Lifetime control points (GCL progress), when reported.
     pub gcl: Option<f64>,
     /// Lifetime power processed (GPL progress), when reported.
@@ -94,6 +112,7 @@ macro_rules! profile_from {
                     cpu: me.cpu,
                     cpu_shards: me.cpu_shard.unwrap_or_default(),
                     cpu_shards_updated: me.cpu_shard_updated_time,
+                    last_respawn: me.last_respawn_date,
                     gcl: me.gcl,
                     power: me.power,
                     notify_prefs: me.notify_prefs.unwrap_or_default(),
@@ -405,7 +424,8 @@ mod tests {
     /// An official profile with a Steam account (`ownership` is a list of app ids there).
     const OFFICIAL: &str = r##"{"ok":1,"_id":"5a1b","username":"Alice","email":"alice@example.com",
         "password":true,"money":1234.5,"cpu":100,"cpuShard":{"shard0":20,"shard3":80},
-        "cpuShardUpdatedTime":1700000000000,"gcl":3000000,"power":5000,
+        "cpuShardUpdatedTime":1700000000000,"lastRespawnDate":1690000000000,"gcl":3000000,
+        "power":5000,
         "powerExperimentations":1,"badge":{"type":12,"color1":"#ff0000","color2":"#00ff00",
             "color3":"#0000ff","param":0,"flip":false},
         "notifyPrefs":{"disabled":false,"interval":60},
@@ -436,6 +456,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 cpu_shards_updated: Some(1_700_000_000_000.0),
+                last_respawn: Some(1_690_000_000_000.0),
                 gcl: Some(3_000_000.0),
                 power: Some(5000.0),
                 notify_prefs: UserNotifyPrefs {
@@ -462,6 +483,8 @@ mod tests {
         // No CPU allocation reads as an empty one.
         assert!(profile.cpu_shards.is_empty());
         assert_eq!(profile.cpu_shards_updated, None);
+        // No respawn record reads as none, not as a time.
+        assert_eq!(profile.last_respawn, None);
         // No saved preferences read as the defaults.
         assert_eq!(profile.notify_prefs, UserNotifyPrefs::default());
     }
