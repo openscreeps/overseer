@@ -214,8 +214,8 @@ impl WorldProgress {
 ///
 /// A server shows rate limits when it is official (screeps.com and its seasonal server, by
 /// address or by a forced official contract: their server-wide limit of 120 requests per
-/// minute per token sends no headers) or once any response carried `X-RateLimit-*` headers
-/// or was refused with HTTP 429
+/// minute per token applies before any reply reports it) or once any response carried
+/// `X-RateLimit-*` headers or was refused with HTTP 429
 /// ([`net::Client::has_rate_limits`](crate::net::Client::has_rate_limits)). There every
 /// request of every kind first asks the session's request budget
 /// ([`net::Client::budget_ready_at`](crate::net::Client::budget_ready_at)), shared with the
@@ -225,14 +225,15 @@ impl WorldProgress {
 /// [`REQUEST_BUDGET`](crate::net::REQUEST_BUDGET) (110) are in it, visible ones 105,
 /// background ones 100, so the user's own requests (which never wait) keep 10 of
 /// screeps.com's 120; a sliding window bounds every fixed minute too. No other gap applies.
-/// After HTTP 429 without the endpoint's limit every background request waits 60 s, and
+/// After HTTP 429 of the server-wide limit every background request waits until it resets
+/// (60 s when the refusal does not report the reset), and
 /// [`net::Client::rate_limited_count`](crate::net::Client::rate_limited_count) changes, which
 /// the app answers by offering to lift the limit. While the token is exempt from rate limits
 /// (screeps.com's `noRatelimitUntil`, as the session knows it:
 /// [`RateLimits::exemption`](crate::RateLimits::exemption)) nothing is paced:
 /// in-flight caps only, as on servers without rate limits. Every kind honours an endpoint's
-/// limit that reports no request left (until its reset) and HTTP 429 (until the endpoint's
-/// reset, 60 s after a server-wide refusal) on every server, exempt or not.
+/// limit that reports no request left (until its reset) and HTTP 429 (until the reported
+/// reset, 60 s after a refusal without `X-RateLimit-*` headers) on every server, exempt or not.
 ///
 /// | Kind | Server with rate limits | Without (private servers), or exempt |
 /// |------|-------------------------|--------------------------------------|

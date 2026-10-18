@@ -230,13 +230,14 @@ impl Session {
 pub struct Reply<T> {
     /// The deserialized body.
     pub body: T,
-    /// The endpoint's rate limit, sent with authenticated replies.
+    /// The rate limit the reply reported (`X-RateLimit-*`): the endpoint's own, or the
+    /// server-wide one for an endpoint without its own. Sent with authenticated replies.
     pub rate_limit: Option<RateLimit>,
     /// The reply carried a new token, now held by the session; persist it if tokens are stored.
     pub token_rotated: bool,
 }
 
-/// The rate limit of one endpoint, from the `X-RateLimit-*` headers.
+/// A rate limit from the `X-RateLimit-*` headers: an endpoint's own or the server-wide one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RateLimit {
     /// Requests allowed in the current window.
@@ -307,8 +308,10 @@ pub enum ApiError {
     /// HTTP 401: the token is missing, invalid or expired.
     #[error("unauthorized")]
     Unauthorized,
-    /// HTTP 429. `Some`: this endpoint's limit, wait until [`RateLimit::reset`]; `None`: the
-    /// server-wide limit, retry after a short delay.
+    /// HTTP 429. `Some`: the limit that refused the request, from the `X-RateLimit-*` headers
+    /// (the endpoint's own, or the server-wide one, which screeps.com reports too); wait until
+    /// [`RateLimit::reset`]. `None`: no headers, which the contract gives for the server-wide
+    /// limit; retry after a short delay.
     #[error("rate limited")]
     RateLimited(Option<RateLimit>),
     /// Another non-2xx status, with the `{error}` message when the body is such JSON (or, for

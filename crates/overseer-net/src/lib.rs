@@ -197,10 +197,11 @@
 //! # Failed operations
 //!
 //! [`Error::outcome`] tells whether a failed operation can have changed state on the server.
-//! [`Outcome::NotApplied`] means that no attempt of the request left the client, sign-ins and
-//! retries included. Every other failure is [`Outcome::Unknown`]: the server can have applied
-//! the operation in full, in part or not at all. The outcome causes no retries: the application
-//! decides whether to read the state, wait or try again.
+//! [`Outcome::NotApplied`] means that no attempt of the request ran, sign-ins and retries
+//! included: none left the client, or the server refused it with HTTP 429. Every other failure
+//! is [`Outcome::Unknown`]: the server can have applied the operation in full, in part or not
+//! at all. The outcome causes no retries: the application decides whether to read the state,
+//! wait or try again.
 //!
 //! # Native and web
 //!
@@ -310,15 +311,12 @@ pub enum Error {
     /// A password change was refused: the current password given is not the account's.
     #[error("the current password is wrong")]
     WrongPassword,
-    /// The server answered the request with HTTP 401 or 429 (`answer`), and the retry then
-    /// failed before it sent anything more (`source`): the sign-in that the retry needs, or the
-    /// retry itself, did not leave the client. [`Client::send`] returns it in place of `source`,
-    /// because the first attempt reached the server.
-    #[error("{answer}; the retry was not sent")]
+    /// The server answered the request with HTTP 401, and the retry then failed before it sent
+    /// anything more (`source`): the sign-in that the retry needs, or the retry itself, did not
+    /// leave the client. [`Client::send`] returns it in place of `source`, because the first
+    /// attempt reached the server.
+    #[error("unauthorized; the retry was not sent")]
     RetryNotSent {
-        /// The answer to the first attempt: [`ApiError::Unauthorized`] or
-        /// [`ApiError::RateLimited`].
-        answer: ApiError,
         /// Why the retry was not sent.
         #[source]
         source: Box<Error>,
@@ -348,18 +346,26 @@ impl Error {
     /// of the operation: the sign-in before the request, the retry after HTTP 401 and the retry
     /// after HTTP 429 ([`Client::send`]).
     ///
-    /// It is [`Outcome::NotApplied`] only when no attempt of the request left the client:
+    /// It is [`Outcome::NotApplied`] only when no attempt of the request can have run:
     ///
     /// - [`Self::Request`], [`Self::Unsupported`] and [`Self::Anonymous`]: the client did not
     ///   build the request, or the server does not offer the operation.
     /// - [`Self::Http`] when `reqwest` could not build the request
     ///   ([`reqwest::Error::is_builder`]) or, natively, could not connect
     ///   (`reqwest::Error::is_connect`): no byte of the request was written.
+    /// - HTTP 429 ([`ApiError::RateLimited`]): every server refuses a request over a rate limit
+    ///   before it runs the request. screeps.com did so in a test of both its server-wide and
+    ///   its endpoint limits. screepsmod-auth checks its limits in a middleware before every
+    ///   route. The stock community server and `OpenScreeps` have no rate limits. An attempt
+    ///   refused this way does not count, so the outcome of a retry after HTTP 429 is the
+    ///   outcome of the retry.
     ///
     /// Every other error is [`Outcome::Unknown`]. This includes:
     ///
-    /// - Every answer of the server. No contract states that the server refuses HTTP 401 or 429
-    ///   before it runs the request. An `{error}` reply is no proof either: community servers
+    /// - HTTP 401. The servers refuse an unknown token before the request runs, but a handler
+    ///   can answer 401 too: screepsmod-auth's `POST /api/user/password` answers 401 for a
+    ///   wrong current password and then still stores a password.
+    /// - Every other answer of the server. An `{error}` reply is no proof: community servers
     ///   also report exceptions that a request handler throws halfway this way.
     /// - A timeout, a connection lost after the request was written, and a reply that does not
     ///   decode.
@@ -378,7 +384,10 @@ impl Error {
     #[must_use]
     pub fn outcome(&self) -> Outcome {
         match self {
-            Self::Request(_) | Self::Unsupported(_) | Self::Anonymous => Outcome::NotApplied,
+            Self::Request(_)
+            | Self::Unsupported(_)
+            | Self::Anonymous
+            | Self::Api(ApiError::RateLimited(_)) => Outcome::NotApplied,
             Self::Http(error) if unsent(error) => Outcome::NotApplied,
             Self::Http(_)
             | Self::Api(_)
@@ -392,12 +401,11 @@ impl Error {
         }
     }
 
-    /// `self` as the failure of a retry after the server answered `answer`: wrapped in
-    /// [`Self::RetryNotSent`] when `self` alone reports [`Outcome::NotApplied`].
-    pub(crate) fn after_answer(self, answer: ApiError) -> Self {
+    /// `self` as the failure of a retry after HTTP 401: wrapped in [`Self::RetryNotSent`] when
+    /// `self` alone reports [`Outcome::NotApplied`].
+    pub(crate) fn after_unauthorized(self) -> Self {
         match self.outcome() {
             Outcome::NotApplied => Self::RetryNotSent {
-                answer,
                 source: Box::new(self),
             },
             Outcome::Unknown => self,
@@ -414,7 +422,8 @@ impl From<reqwest_websocket::Error> for Error {
 /// What a failed operation can have done on the server ([`Error::outcome`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Outcome {
-    /// The server did not apply the operation: no attempt of its request left the client.
+    /// The server did not apply the operation: no attempt of its request ran. None left the
+    /// client, or the server refused it with HTTP 429.
     NotApplied,
     /// The server can have applied the operation in full, in part or not at all.
     Unknown,

@@ -16,8 +16,9 @@ pub const REQUEST_WINDOW: Duration = Duration::from_mins(1);
 /// 10 left of screeps.com's 120 stay for the user's own requests, which never wait.
 pub const REQUEST_BUDGET: usize = 110;
 
-/// Wait for background requests after HTTP 429 without the endpoint's limit (the server-wide
-/// limit counts per minute).
+/// Longest wait for background requests after HTTP 429 of the server-wide limit (it counts
+/// per minute). A refusal that reports the limit's reset waits until then; one without
+/// `X-RateLimit-*` headers waits this long.
 pub const GLOBAL_RATE_LIMIT_WAIT: Duration = Duration::from_mins(1);
 
 /// How urgent a background request is (see [`Client::budget_ready_at`]).
@@ -50,8 +51,8 @@ impl Priority {
 pub(crate) struct Budget {
     /// Send times of the requests of the latest [`REQUEST_WINDOW`], oldest first.
     sent: VecDeque<Instant>,
-    /// The latest HTTP 429 without the endpoint's limit.
-    refused: Option<Instant>,
+    /// Until when the latest HTTP 429 of the server-wide limit holds every priority.
+    held_until: Option<Instant>,
     /// Until when the token is exempt from rate limits (milliseconds since the Unix epoch).
     exempt_until: Option<u64>,
 }
@@ -63,9 +64,9 @@ impl Budget {
         self.sent.push_back(now);
     }
 
-    /// Records HTTP 429 without the endpoint's limit at `now`.
-    pub(crate) const fn refused(&mut self, now: Instant) {
-        self.refused = Some(now);
+    /// Records HTTP 429 of the server-wide limit: every priority waits until `until`.
+    pub(crate) fn refused(&mut self, until: Instant) {
+        self.held_until = Some(self.held_until.map_or(until, |held| held.max(until)));
     }
 
     /// Requests sent in the window ending at `now`.
@@ -93,10 +94,7 @@ impl Budget {
         now: Instant,
     ) -> Option<Instant> {
         self.prune(now);
-        let refused = self
-            .refused
-            .map(|at| at + GLOBAL_RATE_LIMIT_WAIT)
-            .filter(|until| *until > now);
+        let refused = self.held_until.filter(|until| *until > now);
         let budget = priority.budget();
         let used = self.sent.len() + pending;
         let window = (used >= budget).then(|| {
@@ -152,8 +150,8 @@ mod tests {
         let later = start + REQUEST_WINDOW + Duration::from_millis(1);
         assert_eq!(budget.count(later), REQUEST_BUDGET - 12);
         assert_eq!(budget.ready_at(Priority::Background, 0, later), None);
-        // HTTP 429 without the endpoint's limit: a minute for everyone.
-        budget.refused(later);
+        // HTTP 429 of the server-wide limit: everyone waits until it resets.
+        budget.refused(later + REQUEST_WINDOW);
         assert_eq!(
             budget.ready_at(Priority::Viewed, 0, later),
             Some(later + REQUEST_WINDOW)

@@ -4,7 +4,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use overseer_core::api::ApiError;
 use overseer_core::api::official::endpoints::UserRespawn;
 use overseer_core::model::platform::ServerKind;
 use overseer_core::{ServerUrl, Token};
@@ -79,7 +78,7 @@ async fn a_connection_lost_after_the_request_was_written_is_unknown() {
 }
 
 #[tokio::test]
-async fn every_answer_of_the_server_is_unknown() {
+async fn every_answer_of_the_server_but_429_is_unknown() {
     let replies = [
         (401, r#"{"error":"unauthorized"}"#),
         (429, "{}"),
@@ -104,15 +103,21 @@ async fn every_answer_of_the_server_is_unknown() {
         .rate_limit(None)
         .build()
         .unwrap();
-    for _ in replies {
+    for (status, _) in replies {
         let error = client.send(&UserRespawn).await.unwrap_err();
         assert!(matches!(error, Error::Api(_)), "{error:?}");
-        assert_eq!(error.outcome(), Outcome::Unknown, "{error:?}");
+        // Every server refuses a request over a rate limit before it runs the request.
+        let expected = if status == 429 {
+            Outcome::NotApplied
+        } else {
+            Outcome::Unknown
+        };
+        assert_eq!(error.outcome(), expected, "{error:?}");
     }
 }
 
 #[tokio::test]
-async fn a_retry_after_http_429_that_is_not_sent_stays_unknown() {
+async fn a_retry_after_http_429_that_is_not_sent_is_not_applied() {
     let server = Server::start_refusing_after(|_: &Request| (429, "{}".to_owned()), 1).await;
     let client = Client::builder(server.url())
         .token(Token::new("t"))
@@ -120,14 +125,9 @@ async fn a_retry_after_http_429_that_is_not_sent_stays_unknown() {
         .build()
         .unwrap();
     let error = client.send(&UserRespawn).await.unwrap_err();
-    let Error::RetryNotSent { answer, source } = &error else {
-        panic!("a retry that was not sent, not {error:?}");
-    };
-    assert!(matches!(answer, ApiError::RateLimited(None)), "{answer:?}");
-    // The retry alone could not connect, but the first attempt reached the server.
-    assert!(matches!(**source, Error::Http(_)), "{source:?}");
-    assert_eq!(source.outcome(), Outcome::NotApplied);
-    assert_eq!(error.outcome(), Outcome::Unknown);
+    // The refused attempt did not run, and the retry could not connect.
+    assert!(matches!(error, Error::Http(_)), "{error:?}");
+    assert_eq!(error.outcome(), Outcome::NotApplied);
     assert_eq!(server.requests().len(), 1);
 }
 
@@ -151,10 +151,9 @@ async fn a_retry_after_http_401_that_is_not_sent_stays_unknown() {
             .build()
             .unwrap();
         let error = client.send(&UserRespawn).await.unwrap_err();
-        let Error::RetryNotSent { answer, source } = &error else {
+        let Error::RetryNotSent { source } = &error else {
             panic!("a retry that was not sent, not {error:?}");
         };
-        assert!(matches!(answer, ApiError::Unauthorized), "{answer:?}");
         assert!(matches!(**source, Error::Http(_)), "{source:?}");
         assert_eq!(error.outcome(), Outcome::Unknown);
         let paths: Vec<_> = server.requests().into_iter().map(|r| r.path).collect();

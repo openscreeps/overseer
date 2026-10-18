@@ -10,9 +10,10 @@ use crate::rt::{SystemTime, UNIX_EPOCH};
 
 /// How requests rejected with HTTP 429 ([`ApiError::RateLimited`]) are retried.
 ///
-/// A request over its endpoint's limit is retried once after the window resets
-/// ([`RateLimit::reset`]), unless that is more than [`Self::max_wait`] away; a request over the
-/// server-wide limit (no `X-RateLimit-*` headers) is retried once after
+/// A request that a limit refused is retried once after that limit's window resets
+/// ([`RateLimit::reset`]), unless that is more than [`Self::max_wait`] away. This includes the
+/// server-wide limit when the server reports it in the `X-RateLimit-*` headers, as screeps.com
+/// does. A request refused without these headers is retried once after
 /// [`Self::global_delay`]. A request that is rejected again returns the error. Set with
 /// [`ClientBuilder::rate_limit`]; `None` there disables retries.
 ///
@@ -45,10 +46,28 @@ impl RateLimitPolicy {
         let Some(limit) = limit else {
             return Some(self.global_delay);
         };
-        let reset = UNIX_EPOCH + Duration::from_secs(limit.reset);
-        let wait = reset.duration_since(now).unwrap_or(Duration::ZERO);
+        let wait = until_reset(limit, now);
         (wait <= self.max_wait).then_some(wait)
     }
+}
+
+/// The limit of each token per [`REQUEST_WINDOW`](super::REQUEST_WINDOW) over every endpoint.
+/// screeps.com and screepsmod-auth report it as `X-RateLimit-Limit: 120` on the replies of
+/// endpoints without their own limit and on the HTTP 429 that it causes. No endpoint limit has
+/// this size: the endpoint limits are 60, 240, 360 and 1440.
+const SERVER_WIDE_LIMIT: u32 = 120;
+
+/// Whether the HTTP 429 that reported `limit` comes from the server-wide limit: it carries no
+/// `X-RateLimit-*` headers (as the official contract describes it), or the headers of the
+/// server-wide limit (as screeps.com sends them).
+pub(crate) fn is_server_wide(limit: Option<&RateLimit>) -> bool {
+    limit.is_none_or(|limit| limit.limit == SERVER_WIDE_LIMIT)
+}
+
+/// The time from `now` until the window of `limit` resets; zero for a reset in the past.
+pub(crate) fn until_reset(limit: &RateLimit, now: SystemTime) -> Duration {
+    let reset = UNIX_EPOCH + Duration::from_secs(limit.reset);
+    reset.duration_since(now).unwrap_or(Duration::ZERO)
 }
 
 /// The latest rate limit the server reported for one endpoint.

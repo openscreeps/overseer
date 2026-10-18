@@ -59,7 +59,7 @@ const MIN_LIMIT_WAIT: Duration = Duration::from_secs(1);
 /// Wait after a request failed for another reason than the rate limit.
 const RETRY: Duration = Duration::from_secs(30);
 
-/// Wait after HTTP 429 without the endpoint's limit (the server-wide limit counts per minute).
+/// Wait after HTTP 429 without `X-RateLimit-*` headers (the server-wide limit counts per minute).
 const GLOBAL_RETRY: Duration = Duration::from_secs(60);
 
 /// When a room's overview was learnt and when it goes stale (the overview itself is in the

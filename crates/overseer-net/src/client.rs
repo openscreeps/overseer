@@ -27,7 +27,7 @@ use crate::rt::{Instant, SystemTime, UNIX_EPOCH, sleep, sleep_until};
 use crate::socket::{ReconnectPolicy, Socket};
 use crate::{Error, USER_AGENT, World};
 use budget::Budget;
-use rate_limit::RateLimits;
+use rate_limit::{RateLimits, is_server_wide, until_reset};
 
 /// HTTP API client and socket connector for one account on one server.
 ///
@@ -168,8 +168,8 @@ impl Client {
     /// Returns [`Error::Request`] when the request cannot be built (for example a missing token),
     /// [`Error::Http`] for transport failures and [`Error::Api`] for error replies, including
     /// those of a needed sign-in and [`ApiError::RateLimited`] when a retry is not allowed or
-    /// fails again. A retry after HTTP 401 or 429 that fails before it sends anything more
-    /// returns [`Error::RetryNotSent`]. [`Error::outcome`] covers every attempt.
+    /// fails again. A retry after HTTP 401 that fails before it sends anything more returns
+    /// [`Error::RetryNotSent`]. [`Error::outcome`] covers every attempt.
     pub async fn send<E: Endpoint + Sync>(
         &self,
         endpoint: &E,
@@ -187,9 +187,7 @@ impl Client {
                     self.renew_token(credentials, used.as_ref()).await?;
                     self.execute(endpoint).await.1
                 };
-                retry
-                    .await
-                    .map_err(|error| error.after_answer(ApiError::Unauthorized))
+                retry.await.map_err(Error::after_unauthorized)
             }
             (result, _) => result,
         }
@@ -236,7 +234,7 @@ impl Client {
     ///   the persistent world and the season), or [`ClientBuilder::server_kind`] forced the
     ///   official contract. Only screeps.com speaks that contract, so a forced official
     ///   server on another address is screeps.com behind something. Its server-wide limit of
-    ///   120 requests per minute per token sends no headers.
+    ///   120 requests per minute per token applies before any reply reports it.
     /// - A response carried `X-RateLimit-*` headers.
     /// - A response was refused with HTTP 429.
     #[must_use]
@@ -270,9 +268,9 @@ impl Client {
     /// counts over a sliding [`REQUEST_WINDOW`], and a request of `priority` waits while
     /// [`Priority::budget`] are in it ([`REQUEST_BUDGET`], 110 of screeps.com's 120 per
     /// minute, for viewed rooms, 5 and 10 fewer for visible and background ones). A sliding
-    /// window also bounds every fixed minute. After HTTP 429 without the endpoint's limit
-    /// every priority waits [`GLOBAL_RATE_LIMIT_WAIT`]. Servers without rate limits, and a
-    /// token exempt from them, have no budget: `None`.
+    /// window also bounds every fixed minute. After HTTP 429 of the server-wide limit every
+    /// priority waits until the limit resets, at most [`GLOBAL_RATE_LIMIT_WAIT`]. Servers
+    /// without rate limits, and a token exempt from them, have no budget: `None`.
     #[must_use]
     pub fn budget_ready_at(&self, priority: Priority, pending: usize) -> Option<Instant> {
         if !self.has_rate_limits() || self.is_rate_limit_exempt() {
@@ -500,7 +498,8 @@ impl Client {
     }
 
     /// Sends a request, retrying once after HTTP 429 when the policy allows; returns the token
-    /// the last attempt used. A retry that sends nothing fails with [`Error::RetryNotSent`].
+    /// the last attempt used. A refused attempt did not run ([`Error::outcome`]), so the retry
+    /// cannot apply the request twice.
     async fn execute<E: Endpoint + Sync>(
         &self,
         endpoint: &E,
@@ -510,10 +509,8 @@ impl Client {
             (&result, &self.inner.rate_limit)
             && let Some(wait) = policy.retry_delay(limit.as_ref(), SystemTime::now())
         {
-            let answer = ApiError::RateLimited(*limit);
             sleep(wait).await;
-            let (used, result) = self.attempt(endpoint).await;
-            return (used, result.map_err(|error| error.after_answer(answer)));
+            return self.attempt(endpoint).await;
         }
         (used, result)
     }
@@ -539,8 +536,11 @@ impl Client {
             Ok(reply) => reply.rate_limit,
             Err(Error::Api(ApiError::RateLimited(limit))) => {
                 self.inner.rate_limited.fetch_add(1, Ordering::Relaxed);
-                if limit.is_none() {
-                    lock(&self.inner.budget).refused(Instant::now());
+                if is_server_wide(limit.as_ref()) {
+                    let wait = limit.as_ref().map_or(GLOBAL_RATE_LIMIT_WAIT, |limit| {
+                        until_reset(limit, SystemTime::now()).min(GLOBAL_RATE_LIMIT_WAIT)
+                    });
+                    lock(&self.inner.budget).refused(Instant::now() + wait);
                 }
                 *limit
             }

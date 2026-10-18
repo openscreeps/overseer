@@ -184,7 +184,7 @@ async fn budget_waits_follow_the_budget_and_cancel_when_dropped() {
     client.wait_for_budget(Priority::Background, 0).await;
     assert!(started.elapsed() < Duration::from_secs(1));
     client.send(&endpoints::AuthMe).await.unwrap_err();
-    // HTTP 429 without the endpoint's limit: every priority waits a minute.
+    // HTTP 429 of the server-wide limit without headers: every priority waits a minute.
     let ready = client.budget_ready_at(Priority::Viewed, 0).unwrap();
     assert!(ready > Instant::now() + GLOBAL_RATE_LIMIT_WAIT - Duration::from_secs(5));
     let cancelled = tokio::time::timeout(
@@ -198,6 +198,28 @@ async fn budget_waits_follow_the_budget_and_cancel_when_dropped() {
     let started = Instant::now();
     client.wait_for_budget(Priority::Background, 1000).await;
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn a_server_wide_refusal_with_headers_holds_the_budget_until_its_reset() {
+    // screeps.com reports its server-wide limit (120 per minute) in the headers of the 429.
+    let reset = now_secs() + 20;
+    let server =
+        rate_limited_server(1, move || limited(120, 0, reset, 429, "{}"), reset + 60).await;
+    let server_wide = client(&server, None);
+    server_wide.send(&endpoints::AuthMe).await.unwrap_err();
+    let ready = server_wide
+        .budget_ready_at(Priority::Viewed, 0)
+        .expect("held");
+    let now = Instant::now();
+    assert!(ready > now + Duration::from_secs(15) && ready < now + Duration::from_secs(25));
+
+    // A refusal by the endpoint's own limit holds no other request.
+    let reset = now_secs() + 3600;
+    let server = rate_limited_server(1, move || limited(60, 0, reset, 429, "{}"), reset).await;
+    let endpoint = client(&server, None);
+    endpoint.send(&endpoints::AuthMe).await.unwrap_err();
+    assert_eq!(endpoint.budget_ready_at(Priority::Viewed, 0), None);
 }
 
 /// An encoded terrain: wall at (0, 0), swamp at (1, 0), wall-and-swamp at (2, 0), plain

@@ -79,7 +79,7 @@ const RETRY: Duration = Duration::from_secs(30);
 /// Longest wait before a room whose room-objects requests keep failing is asked again.
 const RETRY_MAX: Duration = Duration::from_hours(1);
 
-/// Wait after HTTP 429 without the endpoint's limit (the server-wide limit counts per minute).
+/// Wait after HTTP 429 without `X-RateLimit-*` headers (the server-wide limit counts per minute).
 const GLOBAL_RETRY: Duration = Duration::from_mins(1);
 
 /// Shortest wait after HTTP 429 with the endpoint's limit.

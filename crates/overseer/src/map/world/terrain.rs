@@ -33,7 +33,7 @@ pub const TERRAIN_IN_FLIGHT: usize = 2;
 /// Wait after a failed request before its rooms are asked for again.
 const RETRY: Duration = Duration::from_secs(10);
 
-/// Wait after HTTP 429 without the endpoint's limit (the server-wide limit counts per minute).
+/// Wait after HTTP 429 without `X-RateLimit-*` headers (the server-wide limit counts per minute).
 const GLOBAL_RETRY: Duration = Duration::from_secs(60);
 
 /// Shortest wait after HTTP 429 with the endpoint's limit.
