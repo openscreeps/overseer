@@ -1,7 +1,7 @@
 // The tick duration: the status bar's tick item adds how long a tick of the shard on the map
 // takes, with its unit (`tick N · 3.1 s/tick`, `250 ms/tick` on fast servers), and its tooltip
 // gives it in seconds and in ticks per second and says where it comes from: the server reports
-// it, or the app measures it from the game time.
+// it, or the session (`overseer::Map::tick_speed`) measures it from the game time.
 //
 // The `player` fixture's bot keeps the disposable world ticking.
 
@@ -17,9 +17,11 @@ test.describe('tick duration', { tag: '@openscreeps' }, () => {
     const item = status(page).getByTitle('Game tick');
     // The duration ends the item, with its unit: `250 ms/tick`, `3.1 s/tick` or `12 s/tick`.
     await expect(item).toHaveText(/(^|· )(\d+ ms|\d+(\.\d)? s)\/tick$/, { timeout: 30_000 });
+    // The tooltip: the item's full text (a narrow window cuts it), then where the duration
+    // comes from.
     await expect(item).toHaveAttribute(
       'title',
-      /^Game tick and tick duration: \d+\.\d\d s per tick \(\d+\.\d\d ticks per second\), (reported by the server|measured from game time)$/,
+      /^.+\/tick\nGame tick and tick duration: \d+\.\d\d s per tick \(\d+\.\d\d ticks per second\), (reported by the server|measured from game time)$/,
     );
   });
 });

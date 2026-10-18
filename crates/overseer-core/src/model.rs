@@ -17,7 +17,8 @@
 //! - [`account`]: the signed-in user's profile, notification preferences and API tokens.
 //! - [`code`]: branches and code modules.
 //! - [`memory`]: Memory and Memory segments.
-//! - [`world`]: map, rooms, terrain, room history and room objects.
+//! - [`world`]: map, rooms, terrain, room history, room objects and the tick duration measured
+//!   from game ticks.
 //! - [`market`]: orders, market statistics and the credit history.
 //! - [`messages`]: private messages.
 //! - [`power_creeps`]: the account's power creeps.

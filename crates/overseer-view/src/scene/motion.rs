@@ -2,12 +2,15 @@
 //! arrival times, the eased glide of an object over most of a tick, and its turn towards a
 //! new heading.
 
+use std::collections::VecDeque;
+
 use glam::Vec2;
 use overseer::map::RoomCoord;
+use overseer::model::world::tick::{self, MAX_GAP, Observation};
 
 use crate::{MAX_TICK_MS, MIN_TICK_MS, MOVE_DURATION_MS};
 
-/// Tick duration assumed before two snapshots of a room were measured, in milliseconds.
+/// Tick duration assumed before the snapshots of the rooms were measured, in milliseconds.
 pub const DEFAULT_TICK_MS: f64 = 1000.0;
 /// Share of a tick an object glides for: it arrives just before the next tick.
 pub const GLIDE_SHARE: f64 = 0.82;
@@ -18,73 +21,65 @@ pub const TURN_MS: f64 = 200.0;
 pub const DEFAULT_HEADING: f32 = 0.5;
 /// Intervals kept for the estimate.
 const SAMPLES: usize = 9;
-/// Snapshots further apart (in ticks) say nothing about the tick rate (a lost connection).
-const MAX_TICK_GAP: u64 = 5;
+/// Rooms whose latest snapshot is kept: the rooms of the detail slots, a handful at most.
+const ROOMS: usize = 8;
 
-/// The tick duration of the server, estimated from snapshot arrival times: the median of
-/// the latest [`SAMPLES`] intervals between two snapshots of a room (divided by the ticks
-/// between them), within [`MIN_TICK_MS`]..=[`MAX_TICK_MS`].
+/// The tick duration of the server, estimated from snapshot arrival times: the estimate
+/// ([`tick::estimate`]) of the latest [`SAMPLES`] intervals between two snapshots of a room
+/// (divided by the ticks between them, at most [`MAX_GAP`] ticks apart), within
+/// [`MIN_TICK_MS`]..=[`MAX_TICK_MS`]; [`DEFAULT_TICK_MS`] before there is an estimate.
 #[derive(Clone, Debug, Default)]
 pub struct TickClock {
-    /// Ring of measured tick durations (ms).
-    samples: [f64; SAMPLES],
-    len: usize,
-    next: usize,
-    /// Latest snapshot per room: room, game time, arrival (ms).
-    last: Vec<(RoomCoord, u64, f64)>,
+    /// The latest measured tick durations (ms), oldest first.
+    samples: VecDeque<f64>,
+    /// The estimate of `samples`, updated with them.
+    estimate: Option<f64>,
+    /// Latest snapshot per room: its game time and arrival (ms).
+    last: Vec<(RoomCoord, Observation)>,
 }
 
 impl TickClock {
-    /// Records that a snapshot of `room` at game tick `time` arrived at `now` (ms).
+    /// Records that a snapshot of `room` at game tick `time` arrived at `now` (ms). The same
+    /// tick again and an earlier one say nothing.
     pub fn observe(&mut self, room: RoomCoord, time: Option<u64>, now: f64) {
         let Some(time) = time else {
             return;
         };
-        let previous = self.last.iter_mut().find(|(seen, _, _)| *seen == room);
-        let Some((_, last_time, last_arrival)) = previous else {
-            // Rooms of the detail slots: a handful at most.
-            if self.last.len() >= 8 {
+        let seen = Observation {
+            tick: time,
+            at: now,
+        };
+        let previous = self.last.iter_mut().find(|(known, _)| *known == room);
+        let Some((_, last)) = previous else {
+            if self.last.len() >= ROOMS {
                 self.last.remove(0);
             }
-            self.last.push((room, time, now));
+            self.last.push((room, seen));
             return;
         };
-        if time <= *last_time {
+        if time <= last.tick {
             return;
         }
-        let ticks = time - *last_time;
-        let interval = now - *last_arrival;
-        (*last_time, *last_arrival) = (time, now);
-        if ticks > MAX_TICK_GAP || interval <= 0.0 {
-            return;
+        let sample = last.ms_per_tick(seen, Some(MAX_GAP));
+        *last = seen;
+        if let Some(sample) = sample {
+            if self.samples.len() == SAMPLES {
+                self.samples.pop_front();
+            }
+            self.samples.push_back(sample);
+            self.estimate = tick::estimate(self.samples.iter().copied());
         }
-        #[expect(clippy::cast_precision_loss, reason = "a few ticks")]
-        let sample = interval / ticks as f64;
-        self.samples[self.next] = sample;
-        self.next = (self.next + 1) % SAMPLES;
-        self.len = (self.len + 1).min(SAMPLES);
     }
 
     /// Forgets a room's latest snapshot (its next one starts a new interval).
     pub fn forget(&mut self, room: RoomCoord) {
-        self.last.retain(|(seen, _, _)| *seen != room);
+        self.last.retain(|(known, _)| *known != room);
     }
 
     /// The estimated tick duration (ms).
     pub fn tick_ms(&self) -> f64 {
-        if self.len == 0 {
-            return DEFAULT_TICK_MS;
-        }
-        let mut sorted = self.samples;
-        let sorted = &mut sorted[..self.len];
-        sorted.sort_unstable_by(f64::total_cmp);
-        let middle = self.len / 2;
-        let median = if self.len % 2 == 1 {
-            sorted[middle]
-        } else {
-            f64::midpoint(sorted[middle - 1], sorted[middle])
-        };
-        median.clamp(MIN_TICK_MS, MAX_TICK_MS)
+        self.estimate
+            .map_or(DEFAULT_TICK_MS, |ms| ms.clamp(MIN_TICK_MS, MAX_TICK_MS))
     }
 
     /// How long an object glides to its new tile: [`GLIDE_SHARE`] of a tick, at least

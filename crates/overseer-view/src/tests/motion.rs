@@ -1,5 +1,5 @@
-//! Tick timing: the tick duration measured from snapshot arrivals, and glides that arrive
-//! just before the next tick.
+//! Tick timing: the tick duration measured from snapshot arrivals (the estimator itself is
+//! tested in `overseer-core`), and glides that arrive just before the next tick.
 
 use glam::Vec2;
 use overseer::RoomSnapshot;
@@ -17,17 +17,17 @@ fn feed(clock: &mut TickClock, room: RoomCoord, ticks: &[(u64, f64)]) {
 }
 
 #[test]
-fn the_tick_is_the_median_of_recent_intervals() {
+fn the_tick_is_the_estimate_of_recent_intervals() {
     let w1n1 = room("W1N1");
     let mut clock = TickClock::default();
     assert_eq!(clock.tick_ms(), DEFAULT_TICK_MS, "before any interval");
+    feed(&mut clock, w1n1, &[(100, 0.0), (101, 3100.0)]);
+    assert_eq!(clock.tick_ms(), DEFAULT_TICK_MS, "one interval is too few");
     // About three seconds a tick, with jitter and one late snapshot.
     feed(
         &mut clock,
         w1n1,
         &[
-            (100, 0.0),
-            (101, 3100.0),
             (102, 6000.0),
             (103, 9050.0),
             (104, 15_000.0),
@@ -40,14 +40,14 @@ fn the_tick_is_the_median_of_recent_intervals() {
 }
 
 #[test]
-fn skipped_ticks_divide_and_gaps_repeats_and_other_rooms_do_not_mislead() {
+fn rooms_are_measured_apart_and_a_forgotten_room_starts_over() {
     let (a, b) = (room("W1N1"), room("W2N1"));
     let mut clock = TickClock::default();
     // Two ticks apart: half the interval each.
-    feed(&mut clock, a, &[(10, 0.0), (12, 1000.0)]);
+    feed(&mut clock, a, &[(10, 0.0), (12, 1000.0), (14, 2000.0)]);
     assert_eq!(clock.tick_ms(), 500.0);
     // The same tick again and an earlier one say nothing.
-    feed(&mut clock, a, &[(12, 1100.0), (11, 1200.0)]);
+    feed(&mut clock, a, &[(14, 2100.0), (13, 2200.0)]);
     assert_eq!(clock.tick_ms(), 500.0);
     // A long gap (a lost connection) says nothing either.
     feed(&mut clock, a, &[(40, 30_000.0)]);
@@ -73,7 +73,7 @@ fn the_tick_stays_within_sensible_bounds() {
         "never quicker than the shortest glide"
     );
     let mut slow = TickClock::default();
-    feed(&mut slow, w1n1, &[(1, 0.0), (2, 60_000.0)]);
+    feed(&mut slow, w1n1, &[(1, 0.0), (2, 60_000.0), (3, 120_000.0)]);
     assert_eq!(slow.tick_ms(), MAX_TICK_MS);
 }
 

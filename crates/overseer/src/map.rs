@@ -1,12 +1,13 @@
 //! The world map: the continuous [`WorldMap`] and what it knows ([`WorldKnowledge`]), room
 //! map views, map statistics, terrain, portals, player badges, world size, game time, tick
-//! duration and map visuals.
+//! duration, the tick speed of a shard ([`TickWatch`]) and map visuals.
 
 mod coord;
 mod knowledge;
 mod portal;
 mod rect;
 mod stat;
+mod tick;
 mod view;
 mod world;
 
@@ -16,6 +17,8 @@ pub use overseer_net::model::world::{RoomMap, Terrain};
 pub use portal::{Portal, PortalDestination, may_have_portals};
 pub use rect::RoomRect;
 pub use stat::{RoomOwner, RoomReservation, RoomStat, RoomStatus};
+pub(crate) use tick::Ticks;
+pub use tick::{TickSource, TickSpeed, TickWatch};
 pub use view::{MapView, ViewChange};
 pub use world::{
     DETAIL_FIRST, DetailState, HELD_ROOM_MAPS, Interest, MINIMAP_CAP, PORTAL_BACKGROUND_IN_FLIGHT,
@@ -173,6 +176,21 @@ impl Map {
         self.overseer.ensure_open()?;
         let shard = self.overseer.resolve_shard(shard);
         Ok(self.overseer.api().tick_duration(shard.as_deref()).await?)
+    }
+
+    /// The tick speed of `shard`, kept up to date while the returned handle lives: the
+    /// server's duration ([`Self::tick_duration`]) while fresh, else the duration measured from
+    /// the game ticks of the live room updates of the shard and, while none arrive, of
+    /// `GET /api/game/time` (see [`TickWatch`]). Every handle of a shard in this session shares
+    /// one state and one series of requests, paced by the background request budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown).
+    pub fn tick_speed(&self, shard: Option<&str>) -> Result<TickWatch, Error> {
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(tick::follow(&self.overseer, shard))
     }
 
     /// The badge of the user named `username` as an SVG document, optionally with a border
