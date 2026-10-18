@@ -554,13 +554,11 @@ pub fn RateLimitsPanel() -> impl IntoView {
     let map = MapState::expect();
     let ui = RateLimitsUi::expect();
     let close = NodeRef::<Button>::new();
+    // The panel takes the focus as soon as its close button mounts (an effect runs before the
+    // next input event): Escape right after the panel opens closes it.
     Effect::new(move |_| {
-        if ui.open.get() {
-            request_animation_frame(move || {
-                if let Some(close) = close.get_untracked() {
-                    let _ = close.focus();
-                }
-            });
+        if let Some(close) = close.get() {
+            let _ = close.focus();
         }
     });
     let keydown = move |event: KeyboardEvent| {
