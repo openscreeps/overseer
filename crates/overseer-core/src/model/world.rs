@@ -19,7 +19,7 @@ use crate::api::plugins::screepsmod_admin_utils::types as admin_utils;
 
 pub use map_stats::{MapStats, MapStatsMineral, MapStatsOwner, MapStatsRoom};
 pub use shards::ShardInfo;
-pub use terrain::{Terrain, TerrainError, Tile};
+pub use terrain::{EncodedTerrain, Terrain, TerrainError, Tile};
 
 /// Every contract's room objects are these types (the room-objects reply, the socket's room
 /// state and room history hold them alike).

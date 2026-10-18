@@ -2,7 +2,10 @@
 //! [`Terrain`].
 //!
 //! A [`Terrain`] keeps its tiles packed, 2 bits per tile ([`Terrain::packed`]): 625 bytes per room,
-//! so a whole shard of 182×182 rooms takes about 20 MB.
+//! so a whole shard of 182×182 rooms takes about 20 MB. [`Terrain::encoded`] writes the standard
+//! 2500-digit form again.
+
+use std::fmt;
 
 use crate::api::community::types as community;
 use crate::api::official::types as official;
@@ -79,7 +82,7 @@ impl Terrain {
     pub const PACKED_LEN: usize = TILES / PER_BYTE;
 
     /// Decodes the 2500-digit form, indexed by `y * 50 + x`. Each digit is a bit mask: 1 wall,
-    /// 2 swamp; a tile with both bits is a wall.
+    /// 2 swamp; a tile with both bits is a wall. [`Self::encoded`] writes this form again.
     ///
     /// # Errors
     ///
@@ -168,6 +171,17 @@ impl Terrain {
         &self.packed
     }
 
+    /// The standard 2500-digit form, indexed by `y * 50 + x`: `0` plain, `1` wall, `2` swamp.
+    /// [`Self::decode`] reads it back to the same terrain. The digits are the normalized
+    /// tiles, so a wall that [`Self::decode`] read with both bits (`3`) comes back as `1`.
+    ///
+    /// The result writes the digits through `Display` without an allocation: use `write!`,
+    /// serde's `Serializer::collect_str`, or `to_string` for a `String`.
+    #[must_use]
+    pub const fn encoded(&self) -> EncodedTerrain<'_> {
+        EncodedTerrain(self)
+    }
+
     /// The tile at `(x, y)`, or `None` outside `0..50`.
     #[must_use]
     pub fn get(&self, x: u8, y: u8) -> Option<Tile> {
@@ -183,6 +197,25 @@ impl Terrain {
                 _ => Tile::Plain,
             },
         )
+    }
+}
+
+/// The 2500-digit form of a [`Terrain`], written by `Display` (see [`Terrain::encoded`]).
+#[derive(Clone, Copy, Debug)]
+pub struct EncodedTerrain<'a>(&'a Terrain);
+
+impl fmt::Display for EncodedTerrain<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut row = [0; SIZE];
+        for y in 0..SIZE {
+            for (x, digit) in row.iter_mut().enumerate() {
+                let index = y * SIZE + x;
+                // The packed code is the digit: 0 plain, 1 wall, 2 swamp.
+                *digit = b'0' + ((self.0.packed[index / PER_BYTE] >> shift(index)) & 0b11);
+            }
+            f.write_str(std::str::from_utf8(&row).map_err(|_| fmt::Error)?)?;
+        }
+        Ok(())
     }
 }
 
@@ -292,6 +325,29 @@ mod tests {
                 assert_eq!(back.get(x, y), terrain.get(x, y), "{x},{y}");
             }
         }
+        assert_eq!(terrain.encoded().to_string(), digits);
+    }
+
+    #[test]
+    fn encoded_form_is_the_normalized_digits_and_decodes_back() {
+        // Room corners, the packed-byte boundary 3/4, the row boundary 49/50 and a tile with
+        // both bits (a wall).
+        let tiles = [
+            (0, b'1'),
+            (3, b'2'),
+            (4, b'1'),
+            (49, b'2'),
+            (50, b'3'),
+            (51, b'2'),
+            (49 * 50, b'2'),
+            (2499, b'1'),
+        ];
+        let terrain = Terrain::decode(&encoded(&tiles)).unwrap();
+        let normalized =
+            tiles.map(|(index, digit)| (index, if digit == b'3' { b'1' } else { digit }));
+        let text = terrain.encoded().to_string();
+        assert_eq!(text, encoded(&normalized));
+        assert_eq!(Terrain::decode(&text).unwrap(), terrain);
     }
 
     #[test]
