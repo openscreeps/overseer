@@ -1,19 +1,19 @@
 //! The editor of the Memory tab: the selected value as JSON, or a new key and its value; Save,
 //! Delete (after a confirmation) and "Add key"; and the state of the latest write.
 //!
-//! The server queues a write: the player's code applies it on its next tick. After the server
-//! takes the write, the editor reads the path again at most three times ([`POLLS`]), because
-//! screeps.com limits the reads of Memory per day. When the new value (or its absence) shows,
-//! the editor puts it into the loaded tree and into all of `Memory` of the account (the
-//! console completes the new key); else it reports the write as late (Reload shows it).
-//! Reload shows the rest of `Memory` again.
+//! The server queues a write: the player's code applies it on its next tick. The library
+//! sends it and reads the path again until the change shows
+//! ([`overseer::Memory::write_and_observe`], at most three reads: screeps.com limits the reads
+//! of Memory per day), and then puts it into the session's snapshots: the tree and the
+//! console's completion show it. A write that does not show in time is reported as late
+//! (Reload shows it). The editor shows the progress, and selects a new key when it shows.
 
-use std::time::Duration;
-
+use futures_util::StreamExt as _;
+use futures_util::future::abortable;
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::net::rt;
+use overseer::memory::{MemoryChange, MemoryPath, ObservePolicy, WriteProgress};
 use serde_json::Value;
 
 use super::TEXT_AREA;
@@ -22,14 +22,6 @@ use super::tree::TreeState;
 use crate::session;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
-
-/// The pauses before each read of a written path: reads at about 2, 5 and 10 seconds after the
-/// server took the write (a few ticks). A write that does not show by then is reported as late.
-const POLLS: [Duration; 3] = [
-    Duration::from_secs(2),
-    Duration::from_secs(3),
-    Duration::from_secs(5),
-];
 
 /// The editor: under the tree, as tall as its content up to half of the panel.
 const EDITOR: &str = "flex-[1_1_55%] has-[>p]:flex-none min-h-0 overflow-auto p-3 bg-panel-2 \
@@ -64,67 +56,60 @@ pub enum Write {
 }
 
 impl TreeState {
-    /// Writes `value` at `keys` (path `path`) under the loaded value, or deletes the value there
-    /// for `None`; then waits until the player's code applied the write.
-    fn write(self, keys: Keys, path: String, value: Option<Value>) {
-        let write = self.writes.get_value() + 1;
-        self.writes.set_value(write);
+    /// Queues `change` of the value at `keys` (path `path`) under the loaded value, and shows
+    /// its progress until the player's code applied it. A newer write stops observing this
+    /// one.
+    fn write(self, keys: Keys, path: &MemoryPath, change: MemoryChange) {
         let memory = self.account.memory();
         let shard = self.account.shard.get_untracked();
         let base = self.base();
-        self.write.set(Write::Sending(path.clone()));
-        spawn_local(async move {
-            let sent = match &value {
-                Some(value) => memory.set(&path, value.clone(), shard.as_deref()).await,
-                None => memory.delete(&path, shard.as_deref()).await,
-            };
-            let current = move || self.writes.try_get_value() == Some(write);
-            if !current() {
-                return;
-            }
-            if let Err(error) = sent {
-                let verb = if value.is_some() { "save" } else { "delete" };
-                self.write.try_set(Write::Failed(format!(
-                    "Could not {verb} {path}: {}",
-                    session::error_message(&error)
-                )));
-                return;
-            }
-            self.write.try_set(Write::Waiting(path.clone()));
-            for pause in POLLS {
-                rt::sleep(pause).await;
-                if !current() {
-                    return;
-                }
-                let Ok(read) = memory.get(&path, shard.as_deref()).await else {
-                    continue;
+        let text = path.to_string();
+        self.write.set(Write::Sending(text.clone()));
+        let deleted = change == MemoryChange::Delete;
+        let mut progress = Box::pin(memory.write_and_observe(
+            path,
+            change,
+            shard.as_deref(),
+            ObservePolicy::default(),
+        ));
+        let (task, handle) = abortable(async move {
+            while let Some(step) = progress.next().await {
+                let state = match step {
+                    WriteProgress::Queued => Write::Waiting(text.clone()),
+                    WriteProgress::Observed(_) => {
+                        self.sync();
+                        self.show_write(&base, shard.as_deref(), keys.clone(), deleted);
+                        Write::Done(if deleted {
+                            format!("{text} is deleted from Memory.")
+                        } else {
+                            format!("{text} is now in Memory.")
+                        })
+                    }
+                    WriteProgress::NotObserved => Write::Late(text.clone()),
+                    WriteProgress::Failed(error) => {
+                        let verb = if deleted { "delete" } else { "save" };
+                        Write::Failed(format!(
+                            "Could not {verb} {text}: {}",
+                            session::error_message(&error)
+                        ))
+                    }
                 };
-                if !current() {
-                    return;
-                }
-                if model::shows_write(&read, value.as_ref()) {
-                    let done = if value.is_some() {
-                        format!("{path} is now in Memory.")
-                    } else {
-                        format!("{path} is deleted from Memory.")
-                    };
-                    self.show_write(&base, shard.as_deref(), keys, value);
-                    self.write.try_set(Write::Done(done));
-                    return;
-                }
+                self.write.try_set(state);
             }
-            self.write.try_set(Write::Late(path));
+        });
+        self.observe(Some(handle));
+        spawn_local(async move {
+            // `Err` only says it was aborted.
+            let _ = task.await;
         });
     }
 
-    /// Puts the applied write of `value` at `keys` into `Memory` ([`TreeState::apply_write`]),
-    /// when the write was under path `base` on `shard`; when the tree still shows that value,
-    /// selects a new key, and closes the editor of a deleted value.
-    fn show_write(self, base: &str, shard: Option<&str>, keys: Keys, value: Option<Value>) {
-        let deleted = value.is_none();
-        self.apply_write(base, shard, &keys, value);
+    /// When the tree still shows the value at path `base` on `shard`, under which the write at
+    /// `keys` applied: selects a new key, and closes the editor of a deleted value. The
+    /// library has put the write into the values shown.
+    fn show_write(self, base: &MemoryPath, shard: Option<&str>, keys: Keys, deleted: bool) {
         let same_tree = self.account.shard.try_get_untracked().flatten().as_deref() == shard
-            && self.base() == base;
+            && self.base() == *base;
         if !same_tree {
             return;
         }
@@ -230,14 +215,14 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
     let base = state.base();
     let object = state.with_value(&keys, |value| value.is_some_and(Value::is_object));
     let title = match (&path, adding) {
-        (Some(path), true) if path.is_empty() => "New key in Memory".to_owned(),
+        (Some(path), true) if path.is_root() => "New key in Memory".to_owned(),
         (Some(path), true) => format!("New key in {path}"),
-        (Some(path), false) => path.clone(),
+        (Some(path), false) => path.to_string(),
         (None, _) => keys.join(" › "),
     };
     // All of Memory is not saved or deleted at once (that would replace every key); a new key
     // of it is.
-    let writable = path.as_ref().is_some_and(|path| adding || !path.is_empty());
+    let writable = path.as_ref().is_some_and(|path| adding || !path.is_root());
     let can_delete = writable && !adding;
     let can_add = writable && !adding && object;
     let save = {
@@ -266,8 +251,8 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
                     .err()
                     .map(|error| format!("Not valid JSON: {error}.")),
             );
-            if let (true, Ok(value), Some(path)) = (key_ok, value, model::path_of(&base, &keys)) {
-                state.write(keys, path, Some(value));
+            if let (true, Ok(value), Ok(path)) = (key_ok, value, base.join(&keys)) {
+                state.write(keys, &path, MemoryChange::Set(value));
             }
         }
     };
@@ -276,7 +261,7 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
         let path = path.clone().unwrap_or_default();
         move |_| {
             confirming.set(false);
-            state.write(keys.clone(), path.clone(), None);
+            state.write(keys.clone(), &path, MemoryChange::Delete);
         }
     };
     let add_keys = keys.clone();
@@ -309,7 +294,7 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
             </div>
         }
     });
-    let path_title = path.clone().unwrap_or_default();
+    let path_title = path.as_ref().map(ToString::to_string).unwrap_or_default();
     view! {
         <section class=EDITOR aria-label="Value editor">
             <form class="flex flex-col" on:submit=save>
@@ -374,7 +359,7 @@ fn DraftEditor(state: TreeState, draft: Draft) -> impl IntoView {
                 >
                     <div class="flex flex-wrap items-center gap-2 mt-3" role="group" aria-label="Confirm deletion">
                         <p class="basis-full text-sm">
-                            "Delete " <code class="font-mono break-all">{path.clone()}</code> " from Memory?"
+                            "Delete " <code class="font-mono break-all">{path.as_ref().map(ToString::to_string)}</code> " from Memory?"
                         </p>
                         <button type="button" class=style::BUTTON_DANGER_SM on:click=delete.clone()>"Delete for good"</button>
                         <button type="button" class=style::BUTTON_SM on:click=move |_| confirming.set(false)>"Cancel"</button>

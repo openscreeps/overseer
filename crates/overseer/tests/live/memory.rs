@@ -2,8 +2,13 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use overseer::core::api::ApiError;
-use overseer::memory::MemoryValue;
+use overseer::memory::{
+    MemoryChange, MemoryPath, MemoryPathError, MemoryValue, ObservePolicy, SegmentError,
+    WriteProgress,
+};
+use overseer::net::api::MemoryApi as _;
 use overseer::{Error, Memory, Watch, net};
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
@@ -21,7 +26,7 @@ async fn eventually(
 ) -> MemoryValue {
     timeout(PATIENCE, async {
         loop {
-            let value = memory.get(path, None).await.expect("Memory reads");
+            let value = memory.get(&at(path), None).await.expect("Memory reads");
             if wanted(&value) {
                 break value;
             }
@@ -30,6 +35,11 @@ async fn eventually(
     })
     .await
     .unwrap_or_else(|_| panic!("Memory.{path} did not reach the expected value in time"))
+}
+
+/// The Memory path `text`.
+fn at(text: &str) -> MemoryPath {
+    MemoryPath::parse(text).expect("a valid path")
 }
 
 /// `Memory.ticks`, counted by the bot.
@@ -70,7 +80,11 @@ async fn ticks_increase() {
     .await;
     assert!(ticks(&later).is_some_and(|count| count > first));
 
-    let MemoryValue::Json(all) = memory.get("", None).await.expect("all of Memory") else {
+    let MemoryValue::Json(all) = memory
+        .get(&MemoryPath::root(), None)
+        .await
+        .expect("all of Memory")
+    else {
         panic!("Memory is an object");
     };
     assert!(
@@ -99,7 +113,7 @@ async fn set_and_delete_a_path() {
     let value = json!({"answer": 42, "name": "live", "list": [1, "two", null]});
 
     memory
-        .set("live", json!({}), None)
+        .set(&at("live"), json!({}), None)
         .await
         .expect("the write is queued");
     eventually(&memory, "live", |read| {
@@ -107,7 +121,7 @@ async fn set_and_delete_a_path() {
     })
     .await;
     memory
-        .set("live.data", value.clone(), None)
+        .set(&at("live.data"), value.clone(), None)
         .await
         .expect("the write is queued");
     eventually(&memory, "live.data", |read| {
@@ -116,45 +130,53 @@ async fn set_and_delete_a_path() {
     .await;
     assert_eq!(
         memory
-            .get("live.data.answer", None)
+            .get(&at("live.data.answer"), None)
             .await
             .expect("Memory reads"),
         MemoryValue::Json(json!(42))
     );
     assert_eq!(
         memory
-            .get("live.missing", None)
+            .get(&at("live.missing"), None)
             .await
             .expect("Memory reads"),
         MemoryValue::Undefined
     );
     assert_eq!(
         memory
-            .get("live.missing.deeper", None)
+            .get(&at("live.missing.deeper"), None)
             .await
             .expect("Memory reads"),
         MemoryValue::IncorrectPath
     );
 
     memory
-        .delete("live.data", None)
+        .delete(&at("live.data"), None)
         .await
         .expect("the deletion is queued");
     eventually(&memory, "live.data", |read| *read == MemoryValue::Undefined).await;
     assert_eq!(
-        memory.get("live", None).await.expect("Memory reads"),
+        memory.get(&at("live"), None).await.expect("Memory reads"),
         MemoryValue::Json(json!({}))
     );
 
     // `openscreeps/server` refuses an empty path part before queueing anything; the community
     // server queues any path (the expression then throws in the player's runtime).
-    let result = memory.set("live..data", json!(1), None).await;
+    // A `MemoryPath` cannot hold it: the request goes through the server's operations.
+    assert_eq!(
+        MemoryPath::parse("live..data"),
+        Err(MemoryPathError::EmptyKey)
+    );
+    let result = overseer
+        .api()
+        .set_memory("live..data", json!(1), None)
+        .await;
     if support::community() {
         assert!(result.is_ok(), "{result:?}");
     } else {
         let error = result.expect_err("an empty path part is refused");
         assert!(
-            matches!(&error, Error::Net(net::Error::Api(ApiError::Server(message))) if message == "Incorrect memory path"),
+            matches!(&error, net::Error::Api(ApiError::Server(message)) if message == "Incorrect memory path"),
             "unexpected error: {error:?}"
         );
     }
@@ -189,11 +211,11 @@ async fn segments_round_trip() {
     );
     assert!(matches!(
         memory.segment(100, None).await,
-        Err(Error::InvalidInput(_))
+        Err(Error::Segment(SegmentError::Id(100)))
     ));
     assert!(matches!(
         memory.set_segment(100, "x", None).await,
-        Err(Error::InvalidInput(_))
+        Err(Error::Segment(SegmentError::Id(100)))
     ));
 }
 
@@ -207,9 +229,9 @@ async fn watches_paths() {
     let player = support::player().await;
     let overseer = player.account.connect().await;
     let memory = overseer.memory();
-    let mut count = memory.watch("ticks", None).expect("the watch");
-    let mut parent = memory.watch("watched", None).expect("the watch");
-    let mut flag = memory.watch("watched.flag", None).expect("the watch");
+    let mut count = memory.watch(&at("ticks"), None).expect("the watch");
+    let mut parent = memory.watch(&at("watched"), None).expect("the watch");
+    let mut flag = memory.watch(&at("watched.flag"), None).expect("the watch");
 
     let first: u64 = watched("a count", &mut count, |value| value.parse::<u64>().is_ok())
         .await
@@ -229,7 +251,7 @@ async fn watches_paths() {
     );
 
     memory
-        .set("watched", json!({}), None)
+        .set(&at("watched"), json!({}), None)
         .await
         .expect("the write is queued");
     watched("the new object", &mut parent, |value| {
@@ -237,12 +259,49 @@ async fn watches_paths() {
     })
     .await;
     memory
-        .set("watched.flag", json!("on"), None)
+        .set(&at("watched.flag"), json!("on"), None)
         .await
         .expect("the write is queued");
     watched("the set flag", &mut flag, |value| value == "on").await;
     assert!(matches!(
-        memory.watch("", None),
+        memory.watch(&MemoryPath::root(), None),
         Err(Error::InvalidInput(_))
     ));
+}
+
+/// A write is queued, and a later read of its path shows it: the shared snapshots of the
+/// session above the path get it too.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live private server: cargo xtask e2e"]
+async fn a_write_is_observed() {
+    let player = support::player().await;
+    let overseer = player.account.connect().await;
+    let memory = overseer.memory();
+    let root = memory
+        .snapshot(&MemoryPath::root(), None)
+        .expect("the snapshot");
+    root.refresh(None).await.expect("all of Memory");
+    let value = json!({ "mark": support::unique("w") });
+
+    let progress: Vec<WriteProgress> = timeout(
+        PATIENCE * 2,
+        memory
+            .write_and_observe(
+                &at("observed"),
+                MemoryChange::Set(value.clone()),
+                None,
+                ObservePolicy::default(),
+            )
+            .collect(),
+    )
+    .await
+    .expect("the observation ends");
+    let [WriteProgress::Queued, WriteProgress::Observed(read)] = progress.as_slice() else {
+        panic!("{progress:?}");
+    };
+    assert_eq!(read.value, MemoryValue::Json(value.clone()));
+    let MemoryValue::Json(all) = &root.latest().expect("a read").value else {
+        panic!("Memory is an object");
+    };
+    assert_eq!(all.get("observed"), Some(&value));
 }

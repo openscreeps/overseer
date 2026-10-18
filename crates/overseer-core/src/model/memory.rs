@@ -1,15 +1,30 @@
-//! Memory: values at Memory paths (plain or gzip-encoded) and raw Memory segments.
+//! Memory: values at Memory paths (plain or gzip-encoded), the paths themselves
+//! ([`MemoryPath`]), queued changes ([`MemoryChange`]) and raw Memory segments with their
+//! limits ([`SEGMENT_MAX_UNITS`]).
 //!
 //! Every contract defines the Memory operations identically (codegen re-exports the official
 //! types from the others), so each conversion here is written once.
+
+mod change;
+mod path;
+mod segment;
+
+pub use change::{MemoryChange, json_at};
+pub use path::{MemoryPath, MemoryPathError};
+pub use segment::{
+    MAX_SEGMENT, SEGMENT_MAX_UNITS, SegmentError, check_segment, check_segment_data, segment_units,
+};
 
 use crate::api::official::types::{
     UserMemoryGetResponse, UserMemorySegmentGetResponse, UserMemorySegmentGetResponseData,
 };
 use crate::gz::{self, GzError};
 
-/// The highest Memory segment id; segments are numbered `0..=MAX_SEGMENT`.
-pub const MAX_SEGMENT: u8 = 99;
+/// The most serialised Memory that the server keeps for the account on each shard: 2 MiB, in
+/// bytes. The usage of each run of the code reports the current size
+/// ([`UserCpu::memory`](crate::model::socket::UserCpu::memory)). This is not the limit of one
+/// write request, which each server sets on its own.
+pub const MEMORY_CAPACITY: u64 = 2 * 1024 * 1024;
 
 /// A `Memory` value (`GET /api/user/memory`).
 #[derive(Clone, Debug, PartialEq, Eq)]

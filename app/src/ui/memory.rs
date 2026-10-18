@@ -1,14 +1,15 @@
 //! The drawer's Memory tab: the signed-in user's `Memory` on a shard, and its raw segments.
 //!
-//! - Tree ([`tree`]): all of `Memory` (`Memory::get` with an empty path), or the value at the
-//!   path in the path field. Objects and arrays expand from the loaded value, [`model::PAGE`]
-//!   children at a time ("Show more" shows more). The status line tells when the tree loaded.
-//!   All of `Memory` is the [`Account`]'s: the console completes its keys.
+//! - Tree ([`tree`]): all of `Memory`, or the value at the path in the path field, from the
+//!   session's snapshots (`overseer::Memory::snapshot`). Objects and arrays expand from the
+//!   loaded value, [`model::PAGE`] children at a time ("Show more" shows more). The status line
+//!   tells when the value was read. All of `Memory` is the [`Account`]'s: the console completes
+//!   its keys.
 //! - Editor ([`editor`]): the selected value as JSON. Save, Delete and "Add key" queue a write
-//!   that the player's code applies on its next tick: the tab reads the path again (at most
-//!   three times) and puts the new value into the tree, or reports the write as late. A key with
-//!   a dot, a backslash or a line break cannot be a part of a path ([`model`]): values under such
-//!   a key are read-only.
+//!   that the player's code applies on its next tick: the library reads the path again (at
+//!   most three times) and puts the new value into the snapshots, or the tab reports the write
+//!   as late. A key with a dot, a backslash or a line break cannot be a key of a path
+//!   (`overseer::memory::MemoryPath`): values under such a key are read-only.
 //! - Segments ([`segments`]): load a segment by number, edit its raw text, save it (at once).
 //!
 //! The drawer makes one [`MemoryState`] and keeps it: the tab keeps its tree, its selection and

@@ -2,123 +2,92 @@
 //! act on, and all of `Memory` on that shard.
 //!
 //! The drawer makes one [`Account`] for its Console and Memory tabs; the console window makes
-//! its own. The two tabs act on one shard: the console completes the keys of the `Memory` that
-//! the Memory tab shows. Thus both read `Memory` from one place: a key that the Memory tab adds
-//! shows in the completion without a second read, and a read of one serves the other.
+//! its own. All of `Memory` is the library's session snapshot
+//! ([`overseer::Memory::snapshot`]): the tabs and the windows of the session read it, a read
+//! of one serves the others, and a write that the Memory tab confirmed shows in the console's
+//! completion. The account only follows that snapshot into a signal.
 
-use std::time::Duration;
+use std::sync::Arc;
 
+use futures_util::future::{AbortHandle, abortable};
 use leptos::prelude::*;
-use overseer::memory::MemoryValue;
+use leptos::task::spawn_local;
+use overseer::cache::Freshness;
+use overseer::memory::{MemoryPath, MemoryRead, MemorySnapshot};
 use overseer::net::Priority;
-use overseer::net::rt::{Instant, SystemTime};
 use overseer::{Memory, Overseer};
 
-use crate::session;
-use crate::ui::clock;
 use crate::ui::style::{self, concatcp};
 
-/// A value read from `Memory`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Read {
-    /// The shard it was read on.
-    pub shard: Option<String>,
-    /// The value.
-    pub value: MemoryValue,
-    /// When it was read (`HH:MM:SS`).
-    pub time: String,
-}
-
-impl Read {
-    /// `value`, read on `shard` now.
-    pub fn now(shard: Option<String>, value: MemoryValue) -> Self {
-        Self {
-            shard,
-            value,
-            time: clock(SystemTime::now()),
-        }
-    }
-}
-
-/// When a part of the server's data was last read, and for which shard.
-#[derive(Debug, Default)]
-pub struct Load {
-    /// The shard it was read for.
-    shard: Option<String>,
-    /// When the read ended, also after a failure.
-    at: Option<Instant>,
-    /// The read gave nothing (or failed).
-    empty: bool,
-    /// A read runs.
-    busy: bool,
-}
-
-impl Load {
-    /// Whether the part must be read (again) for `shard`: no read runs, and the last one was
-    /// for another shard or is older than `fresh` (`fresh_empty` when it gave nothing).
-    pub fn stale(&self, shard: Option<&str>, fresh: Duration, fresh_empty: Duration) -> bool {
-        let fresh = if self.empty { fresh_empty } else { fresh };
-        !self.busy
-            && (self.shard.as_deref() != shard || self.at.is_none_or(|at| at.elapsed() >= fresh))
-    }
-
-    /// Whether the last read was for `shard`.
-    pub fn is_for(&self, shard: Option<&str>) -> bool {
-        self.shard.as_deref() == shard
-    }
-
-    /// Marks a read for `shard` as started.
-    pub fn start(&mut self, shard: Option<&str>) {
-        self.shard = shard.map(str::to_owned);
-        self.busy = true;
-    }
-
-    /// Marks the read as ended; `empty` when it gave nothing.
-    pub fn finish(&mut self, empty: bool) {
-        self.at = Some(Instant::now());
-        self.empty = empty;
-        self.busy = false;
-    }
-}
-
-/// What an [`Account`] holds out of line: the session, the server's shards, and the reads of
-/// all of `Memory`.
+/// What an [`Account`] holds out of line: the session, the server's shards, and the task that
+/// follows all of `Memory` on the shard.
 struct Session {
     /// The session.
     overseer: Overseer,
     /// The server's shards (empty on single-world servers).
     shards: Vec<String>,
-    /// The reads of all of `Memory`.
-    root_load: Load,
-    /// The number of the latest read of all of `Memory`: the result of an older one is dropped.
-    root_reads: u64,
+    /// Stops following the snapshot of all of `Memory` of the previous shard.
+    follow: Option<AbortHandle>,
+}
+
+/// All of `Memory` as last read on a shard.
+struct Root {
+    /// The shard (`None`: the server's only world).
+    shard: Option<String>,
+    /// The read.
+    read: Arc<MemoryRead>,
 }
 
 /// The session, the shard and all of `Memory` there, for the console and the Memory tab;
 /// `Copy`.
 #[derive(Clone, Copy)]
 pub struct Account {
-    /// The session, the shards and the reads of [`Self::root`].
+    /// The session, the shards and the task that follows [`Self::root`].
     session: StoredValue<Session, LocalStorage>,
     /// The shard to act on (`None`: the server's only world).
     pub shard: RwSignal<Option<String>>,
-    /// All of `Memory`, as last read.
-    root: RwSignal<Option<Read>>,
+    /// All of `Memory`, as the session's snapshot last had it.
+    root: RwSignal<Option<Root>, LocalStorage>,
 }
 
 impl Account {
-    /// The account of `overseer`'s user, on `shard` first. Reads nothing yet.
+    /// The account of `overseer`'s user, on `shard` first. Reads nothing; follows the session's
+    /// snapshot of all of `Memory` on the shard.
     pub fn new(overseer: &Overseer, shard: Option<String>) -> Self {
-        Self {
+        let account = Self {
             session: StoredValue::new_local(Session {
                 overseer: overseer.clone(),
                 shards: overseer.world().shards().to_vec(),
-                root_load: Load::default(),
-                root_reads: 0,
+                follow: None,
             }),
             shard: RwSignal::new(shard),
-            root: RwSignal::new(None),
-        }
+            root: RwSignal::new_local(None),
+        };
+        Effect::new(move |_| {
+            let shard = account.shard.get();
+            let follow = account.root_snapshot().map(|snapshot| {
+                follow(snapshot, move |read| {
+                    let root = read.map(|read| Root {
+                        shard: shard.clone(),
+                        read,
+                    });
+                    account.root.try_set(root).is_none()
+                })
+            });
+            account.session.update_value(|session| {
+                if let Some(previous) = std::mem::replace(&mut session.follow, follow) {
+                    previous.abort();
+                }
+            });
+        });
+        on_cleanup(move || {
+            account.session.try_update_value(|session| {
+                if let Some(follow) = session.follow.take() {
+                    follow.abort();
+                }
+            });
+        });
+        account
     }
 
     /// The session.
@@ -133,78 +102,95 @@ impl Account {
 
     /// Calls `f` with all of `Memory` on the current shard; `None` before it was read there.
     /// Tracks both.
-    pub fn with_root<T>(self, f: impl FnOnce(Option<&Read>) -> T) -> T {
+    pub fn with_root<T>(self, f: impl FnOnce(Option<&MemoryRead>) -> T) -> T {
         self.shard.with(|shard| {
-            self.root
-                .with(|root| f(root.as_ref().filter(|root| root.shard == *shard)))
+            self.root.with(|root| {
+                f(root
+                    .as_ref()
+                    .filter(|root| root.shard == *shard)
+                    .map(|root| &*root.read))
+            })
         })
     }
 
-    /// Whether all of `Memory` on the current shard must be read (again) for a completion: no
-    /// read runs, and the last one was for another shard or is older than `fresh`
-    /// (`fresh_empty` when it gave no keys or failed).
-    pub fn root_stale(self, fresh: Duration, fresh_empty: Duration) -> bool {
+    /// The session's snapshot of all of `Memory` on the current shard; `None` once the session
+    /// is closed.
+    fn root_snapshot(self) -> Option<MemorySnapshot> {
         let shard = self.shard.get_untracked();
-        self.session.with_value(|session| {
-            session
-                .root_load
-                .stale(shard.as_deref(), fresh, fresh_empty)
-        })
+        self.memory()
+            .snapshot(&MemoryPath::root(), shard.as_deref())
+            .ok()
     }
 
-    /// Reads all of `Memory` on the current shard. In the `background`, the read first waits
-    /// for the session's request budget. The read starts now; the future gives its result.
+    /// Takes the latest read of all of `Memory` on the current shard from the session's
+    /// snapshot now, before the task that follows it does: a view that the library just
+    /// changed reads the change at once.
+    pub fn sync_root(self) {
+        if let Some(snapshot) = self.root_snapshot() {
+            let shard = self.shard.get_untracked();
+            self.root
+                .try_set(snapshot.latest().map(|read| Root { shard, read }));
+        }
+    }
+
+    /// Reads all of `Memory` on the current shard ([`MemorySnapshot::refresh`]): at once for
+    /// `None`, else after the request budget of `pace`.
     ///
     /// # Errors
     ///
     /// The future returns the failure of the read.
-    pub fn read_root(
+    pub fn refresh_root(
         self,
-        background: bool,
+        pace: Option<Priority>,
     ) -> impl Future<Output = Result<(), overseer::Error>> + use<> {
-        let shard = self.shard.get_untracked();
-        self.session.update_value(|session| {
-            session.root_reads += 1;
-            session.root_load.start(shard.as_deref());
-        });
-        let (read, overseer) = self
-            .session
-            .with_value(|session| (session.root_reads, session.overseer.clone()));
+        let snapshot = self.root_snapshot();
         async move {
-            if background {
-                session::wait_for_budget(&overseer, Priority::Background, 0).await;
+            match snapshot {
+                Some(snapshot) => snapshot.refresh(pace).await.map(drop),
+                None => Err(overseer::Error::Closed),
             }
-            let result = overseer.memory().get("", shard.as_deref()).await;
-            let empty = !matches!(&result, Ok(MemoryValue::Json(value)) if has_keys(value));
-            let latest = self.session.try_update_value(|session| {
-                let latest = session.root_reads == read;
-                if latest {
-                    session.root_load.finish(empty);
-                }
-                latest
-            });
-            if latest != Some(true) {
-                return result.map(drop);
-            }
-            let value = result?;
-            self.root.try_set(Some(Read::now(shard, value)));
-            Ok(())
         }
     }
 
-    /// Changes all of `Memory` with `change`, when it was read on `shard`.
-    pub fn update_root(self, shard: Option<&str>, change: impl FnOnce(&mut MemoryValue)) {
-        self.root.try_update(|root| {
-            if let Some(root) = root.as_mut().filter(|root| root.shard.as_deref() == shard) {
-                change(&mut root.value);
-            }
-        });
+    /// Reads all of `Memory` on the current shard in the background when no read runs and
+    /// the last one is older than `freshness` allows. A failure leaves the last read; the next
+    /// call after [`Freshness::fresh_empty`] reads again.
+    pub fn refresh_root_stale(self, freshness: &Freshness) {
+        let Some(snapshot) = self.root_snapshot() else {
+            return;
+        };
+        if snapshot.is_stale(freshness) {
+            spawn_local(async move {
+                let _ = snapshot.refresh(Some(Priority::Background)).await;
+            });
+        }
     }
 }
 
-/// Whether `value` is an object with keys.
-fn has_keys(value: &serde_json::Value) -> bool {
-    value.as_object().is_some_and(|map| !map.is_empty())
+/// Gives the latest read of `snapshot`, then every later one, to `set` until it returns
+/// `false` or the returned handle aborts. The task keeps the snapshot.
+pub fn follow(
+    snapshot: MemorySnapshot,
+    mut set: impl FnMut(Option<Arc<MemoryRead>>) -> bool + 'static,
+) -> AbortHandle {
+    let (task, handle) = abortable(async move {
+        if !set(snapshot.latest()) {
+            return;
+        }
+        let mut changes = snapshot.watch();
+        changes.borrow_and_update();
+        while changes.changed().await.is_ok() {
+            let read = changes.borrow_and_update().clone();
+            if !set(read) {
+                break;
+            }
+        }
+    });
+    spawn_local(async move {
+        // `Err` only says it was aborted.
+        let _ = task.await;
+    });
+    handle
 }
 
 /// The shard selector of `account` on a sharded server; nothing on a single world.
@@ -235,32 +221,4 @@ pub fn ShardSelect(account: Account) -> impl IntoView {
             </select>
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::Load;
-
-    const FRESH: Duration = Duration::from_mins(5);
-    const FRESH_EMPTY: Duration = Duration::ZERO;
-
-    #[test]
-    fn a_part_is_read_again_for_another_shard_or_once_old() {
-        let mut load = Load::default();
-        assert!(load.stale(None, FRESH, FRESH_EMPTY));
-        load.start(Some("shard0"));
-        // A read runs: no second one.
-        assert!(!load.stale(Some("shard0"), FRESH, FRESH_EMPTY));
-        assert!(!load.stale(Some("shard1"), FRESH, FRESH_EMPTY));
-        load.finish(false);
-        assert!(load.is_for(Some("shard0")));
-        assert!(!load.stale(Some("shard0"), FRESH, FRESH_EMPTY));
-        assert!(load.stale(Some("shard1"), FRESH, FRESH_EMPTY));
-        // An empty result is old at once here.
-        load.start(Some("shard0"));
-        load.finish(true);
-        assert!(load.stale(Some("shard0"), FRESH, FRESH_EMPTY));
-    }
 }

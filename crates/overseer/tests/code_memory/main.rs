@@ -1,12 +1,13 @@
 //! Code branches, code directories and Memory: directory sync on temporary directories, and
-//! requests and live data against an in-process server.
+//! requests, live data, shared Memory snapshots and observed writes against an in-process
+//! server.
 
 mod code;
 mod dir;
 mod memory;
 #[path = "../session/server.rs"]
-#[expect(dead_code, reason = "only the world harness holds responses")]
 mod server;
+mod snapshot;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,8 +107,15 @@ fn queries(server: &Server, path: &str) -> Vec<String> {
 
 /// Connects user `u1` and completes the socket handshake.
 async fn connect(server: &mut Server) -> (Overseer, Ws) {
+    let url = server.url();
+    connect_as(server, url).await
+}
+
+/// [`connect`] with the server known as `url` (for example a stand-in for screeps.com,
+/// [`ServerUrl::proxied`](overseer::core::ServerUrl::proxied)).
+async fn connect_as(server: &mut Server, url: overseer::core::ServerUrl) -> (Overseer, Ws) {
     let profile = ServerProfile {
-        url: server.url(),
+        url,
         auth: Auth::Token(Token::new("t1")),
         server_password: None,
         default_shard: None,

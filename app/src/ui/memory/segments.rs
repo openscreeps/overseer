@@ -1,14 +1,15 @@
 //! The segments of the Memory tab: load a segment by number (`0` to `99`), edit its raw text,
-//! save it. A segment write applies at once (no tick); the server takes at most
-//! [`SEGMENT_LIMIT`] characters.
+//! save it. A segment write applies at once (no tick); a segment holds at most
+//! [`SEGMENT_MAX_UNITS`] characters (UTF-16 units), which the library checks before it sends.
 
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use overseer::memory::{SEGMENT_MAX_UNITS, SegmentError, segment_units};
 use overseer::net::rt::SystemTime;
 
 use super::TEXT_AREA;
-use super::model::{self, SEGMENT_LIMIT};
+use super::model;
 use crate::session;
 use crate::ui::account::Account;
 use crate::ui::clock;
@@ -129,12 +130,6 @@ impl SegmentState {
             return;
         };
         let data = self.text.get_untracked();
-        if model::segment_length(&data) > SEGMENT_LIMIT {
-            self.error.set(Some(format!(
-                "Segment {id} is too long: a segment holds at most {SEGMENT_LIMIT} characters."
-            )));
-            return;
-        }
         let request = self.start();
         let memory = self.account.memory();
         let shard = self.account.shard.get_untracked();
@@ -148,6 +143,12 @@ impl SegmentState {
                     self.status.try_set(Some(format!(
                         "Saved segment {id} at {}.",
                         clock(SystemTime::now())
+                    )));
+                }
+                Err(overseer::Error::Segment(SegmentError::TooLong { .. })) => {
+                    self.error.try_set(Some(format!(
+                        "Segment {id} is too long: a segment holds at most {SEGMENT_MAX_UNITS} \
+                         characters."
                     )));
                 }
                 Err(error) => {
@@ -167,7 +168,7 @@ pub fn SegmentsView(
     /// The segments.
     state: SegmentState,
 ) -> impl IntoView {
-    let length = move || state.text.with(|text| model::segment_length(text));
+    let length = move || state.text.with(|text| segment_units(text));
     let save_label = move || match state.loaded.get() {
         Some(id) => format!("Save segment {id}"),
         None => "Save segment".to_owned(),
@@ -236,7 +237,7 @@ pub fn SegmentsView(
                         {save_label}
                     </button>
                     <span class="ml-auto text-xs text-muted tabular-nums">
-                        {move || format!("{} of {SEGMENT_LIMIT} characters", length())}
+                        {move || format!("{} of {SEGMENT_MAX_UNITS} characters", length())}
                     </span>
                 </div>
             </form>
