@@ -62,6 +62,7 @@ mod state;
 )]
 mod terrain_cache;
 mod ui;
+mod usage;
 
 fn main() {
     #[cfg(target_arch = "wasm32")]

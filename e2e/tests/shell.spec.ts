@@ -177,8 +177,8 @@ test.describe('shell', () => {
     await expect(servers).toHaveAttribute('aria-expanded', 'false');
     await expect(account).toHaveAttribute('aria-expanded', 'true');
     await expect(menu).toHaveCount(1);
-    await expect(menu.getByRole('menuitem')).toHaveText(['Profile', 'Rate limits', 'Sign out']);
-    await status(page).click();
+    await expect(menu.getByRole('menuitem')).toHaveText(['Profile', 'Usage', 'Rate limits', 'Sign out']);
+    await status(page).getByText('Connected', { exact: true }).click();
     await expect(menu).toBeHidden();
     await expect(account).toHaveAttribute('aria-expanded', 'false');
   });

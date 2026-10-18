@@ -10,7 +10,6 @@ use leptos::task::spawn_local;
 use overseer::Overseer;
 use overseer::model::account::{Profile, UserNotifyPrefs, UserWorldStatus};
 use overseer::model::platform::Subsystem;
-use overseer::model::socket::{UserCpu, UserCpuCpu};
 
 use crate::register::{confirm_error, email_error, password_error};
 use crate::route::{Route, Shard, parse_room};
@@ -24,6 +23,8 @@ use crate::ui::player::summary::{
 };
 use crate::ui::spawn_scoped;
 use crate::ui::style::{self, concatcp};
+use crate::ui::usage::UsageUi;
+use crate::usage::run_text;
 use cpu_shards::CpuShards;
 
 /// Choices of the notification interval, in minutes (as the official client offers them).
@@ -90,6 +91,7 @@ pub fn Profile() -> impl IntoView {
         .into_any();
     };
     let overseer = session.overseer;
+    let usage = UsageUi::expect();
     let me = RwSignal::new(None::<Result<Arc<Profile>, String>>);
     let reload = {
         let overseer = overseer.clone();
@@ -102,6 +104,9 @@ pub fn Profile() -> impl IntoView {
                 } else {
                     account.me().await
                 };
+                if let Ok(profile) = &result {
+                    usage.loaded(profile);
+                }
                 me.set(Some(result.map_err(|error| session::describe(&error))));
             });
         }
@@ -141,7 +146,8 @@ fn Summary(
     let world_status = RwSignal::new(None::<String>);
     let start_room = RwSignal::new(None::<String>);
     let start_route = RwSignal::new(None::<Route>);
-    let cpu = RwSignal::new(None::<UserCpu>);
+    let usage = UsageUi::expect();
+    let latest_run = Memo::new(move |_| usage.runs.with(|runs| runs.latest().copied()));
     {
         let overseer = overseer.clone();
         spawn_scoped(async move {
@@ -168,16 +174,6 @@ fn Summary(
                 Ok(None) => "none".to_owned(),
                 Err(error) => session::describe(&error),
             }));
-        });
-    }
-    if let Ok(mut watch) = overseer.account().cpu() {
-        spawn_scoped(async move {
-            if let Some(latest) = watch.latest() {
-                cpu.set(Some((*latest).clone()));
-            }
-            while let Ok(latest) = watch.changed().await {
-                cpu.set(Some((*latest).clone()));
-            }
         });
     }
     let signing_out = RwSignal::new(false);
@@ -222,7 +218,7 @@ fn Summary(
                     <dt class=STAT_NAME>"CPU limit"</dt>
                     <dd class=STAT_VALUE>{cpu_limit}</dd>
                     <dt class=STAT_NAME>"CPU used"</dt>
-                    <dd class=STAT_VALUE>{move || cpu.get().map_or_else(|| "waiting for the next tick…".to_owned(), |cpu| cpu_text(&cpu))}</dd>
+                    <dd class=STAT_VALUE>{move || latest_run.get().map_or_else(|| "waiting for the next tick…".to_owned(), |run| run_text(&run))}</dd>
                     <dt class=STAT_NAME>"Credits"</dt>
                     <dd class=STAT_VALUE>{credits}</dd>
                     <dt class=STAT_NAME>"World status"</dt>
@@ -283,25 +279,6 @@ fn pending_text(value: Option<String>) -> AnyView {
         },
         IntoAny::into_any,
     )
-}
-
-/// The latest run's CPU and Memory use.
-fn cpu_text(cpu: &UserCpu) -> String {
-    let used = match cpu.cpu {
-        UserCpuCpu::Number(ms) => format!("{ms:.2} ms"),
-        UserCpuCpu::Error => "limit exceeded".to_owned(),
-    };
-    match cpu.memory {
-        Some(bytes) => {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "Memory sizes are far below 2^52"
-            )]
-            let kilobytes = bytes as f64 / 1024.0;
-            format!("{used}, Memory {kilobytes:.1} KB")
-        }
-        None => used,
-    }
 }
 
 /// How the world status reads.

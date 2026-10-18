@@ -1,5 +1,5 @@
 //! The status bar: connection · shard and tick · zoom level · hovered room · loading progress
-//! · rate limits lifted … frame time, graphics backend and platform.
+//! · rate limits lifted … CPU and Memory usage, frame time, graphics backend and platform.
 //!
 //! An item shows only once its value is known (no "—" placeholders). While a map is shown its
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
@@ -9,7 +9,10 @@
 //! A narrow window drops whole items, lowest priority first: the platform and the frame time,
 //! then (on phones) the hovered room, the graphics backend and the fixed widths. The
 //! connection, the tick and the zoom level always stay. The hovered room never shows for a
-//! finger (no hover). The bar keeps the bottom safe-area inset under its items.
+//! finger (no hover). The usage of a signed-in account ([`StatusUsage`]) takes the space left
+//! before the items at the right: it shows less as the space shrinks (bars and values, then
+//! percentages, then the CPU alone) and goes last, before the items that always stay. The bar
+//! keeps the bottom safe-area inset under its items.
 
 use leptos::prelude::*;
 use overseer::ConnectionStatus;
@@ -22,6 +25,7 @@ use crate::ui::hover::{MapRooms, place_text};
 use crate::ui::rate_limits::{RateLimitsUi, StatusLifted, StatusReset};
 use crate::ui::style;
 use crate::ui::topbar::status_class;
+use crate::ui::usage::StatusUsage;
 use crate::ui::world::{MapState, Phase};
 
 /// The name of a zoom level, from the whole world in to one room.
@@ -283,6 +287,7 @@ pub fn StatusBar() -> impl IntoView {
             )}
             {progress}
             <StatusLifted />
+            <StatusUsage />
             <span class="inline-flex items-center gap-5 max-md:gap-3 ml-auto">
                 {item(
                     frame,

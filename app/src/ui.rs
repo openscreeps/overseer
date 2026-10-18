@@ -31,6 +31,7 @@ mod style;
 mod surface;
 mod toast;
 mod topbar;
+mod usage;
 mod window;
 mod world;
 
@@ -107,9 +108,12 @@ pub fn App(
     let limits = rate_limits::RateLimitsUi::new();
     provide_context(limits);
     limits.listen(map);
+    let usage = usage::UsageUi::new(limits.now.into());
+    provide_context(usage);
     provide_context(Toasts::new());
     state.start();
     limits.follow(state, map);
+    usage.follow(state);
     follow_shards(state, map);
     resolve_shard(state);
     let page = Memo::new(move |_| page(state));
@@ -188,6 +192,7 @@ pub fn App(
         return view! {
             <Banner />
             <main id="main" class=MAIN_FULL>{content}</main>
+            <usage::UsagePanel />
             <ToastRegion />
             <StatusBar />
         }
@@ -198,6 +203,7 @@ pub fn App(
         <Banner />
         <main id="main" class=move || if world_page() { MAIN_FULL } else { MAIN }>{content}</main>
         <rate_limits::RateLimitsPanel />
+        <usage::UsagePanel />
         <rate_limits::LiftPrompt />
         <ToastRegion />
         <StatusBar />

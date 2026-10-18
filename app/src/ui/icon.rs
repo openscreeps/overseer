@@ -71,6 +71,8 @@ pub enum IconKind {
     Grip,
     /// Memory (braces).
     Memory,
+    /// CPU (a chip).
+    Cpu,
 }
 
 impl IconKind {
@@ -121,6 +123,9 @@ impl IconKind {
             Self::Grip => "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01",
             Self::Memory => {
                 "M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"
+            }
+            Self::Cpu => {
+                "M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM10 10h4v4h-4zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"
             }
         }
     }

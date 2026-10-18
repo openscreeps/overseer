@@ -39,37 +39,20 @@ use crate::ui::style::{self, concatcp};
 use crate::ui::toast::{ToastKind, Toasts};
 use crate::ui::world::MapState;
 
-/// What both floating panels share: at the window's right edge, clear of the bars and the
-/// safe-area insets, scrolled when taller than the space between the bars.
-const FLOATING: &str = "fixed right-[calc(0.75rem+var(--spacing-safe-r))] \
-    max-h-[calc(100dvh-var(--spacing-topbar-safe)-var(--spacing-statusbar-safe)-2rem)] \
-    overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-edge rounded-lg \
-    shadow-lg animate-pop-in";
-/// The rate-limits panel: a [`FLOATING`] panel under the top bar.
+/// The rate-limits panel: a [`style::FLOATING`] panel under the top bar.
 const LIMITS_PANEL: &str = concatcp!(
-    FLOATING,
+    style::FLOATING,
     " top-[calc(var(--spacing-topbar-safe)+0.5rem)] z-40 \
     w-[min(34rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] \
     origin-top-right"
 );
-/// The lift prompt: a [`FLOATING`] panel over the status bar, with a warning edge.
+/// The lift prompt: a [`style::FLOATING`] panel over the status bar, with a warning edge.
 const LIFT_PANEL: &str = concatcp!(
-    FLOATING,
+    style::FLOATING,
     " bottom-[calc(var(--spacing-statusbar-safe)+1rem)] z-61 \
     w-[min(26rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))] border-l-3 \
     border-l-warn origin-bottom-right"
 );
-/// The head of a floating panel: title, then its close button.
-const PANEL_HEAD: &str = "flex items-center justify-between gap-4 mb-3";
-/// The title of a floating panel, after its icon.
-const PANEL_TITLE: &str = "flex items-center gap-2 text-lg font-semibold leading-tight";
-/// A cell of the limits table.
-const LIMITS_CELL: &str = "py-2 pr-3 text-left border-b border-edge";
-/// A column head of the limits table.
-const LIMITS_COLUMN: &str = "py-2 pr-3 text-left border-b border-edge text-xs font-semibold \
-    tracking-[0.04em] uppercase text-muted";
-/// A row head of the limits table (the endpoint).
-const LIMITS_ROW: &str = "py-2 pr-3 text-left border-b border-edge font-normal";
 
 /// What [`RateLimitsUi::follow`] tracks of the live session.
 #[derive(Debug, Default)]
@@ -369,7 +352,7 @@ impl RateLimitsUi {
 }
 
 /// Now, in milliseconds since the Unix epoch.
-fn epoch_millis() -> u64 {
+pub fn epoch_millis() -> u64 {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -596,14 +579,14 @@ pub fn RateLimitsPanel() -> impl IntoView {
                     .map_or_else(|| "already reset".to_owned(), |left| format!("in {left}"));
                 view! {
                     <tr>
-                        <th scope="row" class=LIMITS_ROW>
+                        <th scope="row" class=style::TABLE_ROW>
                             <code class="font-mono text-[0.92em]">
                                 {format!("{} /{}", endpoint.method, endpoint.path)}
                             </code>
                         </th>
-                        <td class=LIMITS_CELL>{endpoint.limit.limit}</td>
-                        <td class=LIMITS_CELL>{endpoint.limit.remaining}</td>
-                        <td class=LIMITS_CELL title=local_time(reset)>{resets}</td>
+                        <td class=style::TABLE_CELL>{endpoint.limit.limit}</td>
+                        <td class=style::TABLE_CELL>{endpoint.limit.remaining}</td>
+                        <td class=style::TABLE_CELL title=local_time(reset)>{resets}</td>
                     </tr>
                 }
             })
@@ -612,10 +595,10 @@ pub fn RateLimitsPanel() -> impl IntoView {
             <table class="w-full border-collapse text-sm tabular-nums">
                 <thead>
                     <tr>
-                        <th scope="col" class=LIMITS_COLUMN>"Endpoint"</th>
-                        <th scope="col" class=LIMITS_COLUMN>"Limit"</th>
-                        <th scope="col" class=LIMITS_COLUMN>"Remaining"</th>
-                        <th scope="col" class=LIMITS_COLUMN>"Resets"</th>
+                        <th scope="col" class=style::TABLE_COLUMN>"Endpoint"</th>
+                        <th scope="col" class=style::TABLE_COLUMN>"Limit"</th>
+                        <th scope="col" class=style::TABLE_COLUMN>"Remaining"</th>
+                        <th scope="col" class=style::TABLE_COLUMN>"Resets"</th>
                     </tr>
                 </thead>
                 <tbody>{rows}</tbody>
@@ -701,8 +684,8 @@ pub fn RateLimitsPanel() -> impl IntoView {
                     aria-labelledby="rate-limits-title"
                     on:keydown=keydown
                 >
-                    <div class=PANEL_HEAD>
-                        <h2 id="rate-limits-title" class=PANEL_TITLE>
+                    <div class=style::FLOATING_HEAD>
+                        <h2 id="rate-limits-title" class=style::FLOATING_TITLE>
                             <Icon kind=IconKind::Gauge class=style::ICON_MUTED />
                             "Rate limits"
                         </h2>
@@ -792,8 +775,8 @@ pub fn LiftPrompt() -> impl IntoView {
                 on:keydown=keydown
                 on:focusin=focusin
             >
-                <div class=PANEL_HEAD>
-                    <h2 id="lift-prompt-title" class=PANEL_TITLE>
+                <div class=style::FLOATING_HEAD>
+                    <h2 id="lift-prompt-title" class=style::FLOATING_TITLE>
                         <Icon kind=IconKind::Gauge class=style::ICON_MUTED />
                         "Rate limit running low"
                     </h2>

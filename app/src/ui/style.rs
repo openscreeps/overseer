@@ -146,6 +146,25 @@ pub const CARD_HEAD: &str = "flex items-center gap-3 mb-5 [&>div]:min-w-0";
 /// A card's title.
 pub const CARD_TITLE: &str = "text-lg font-semibold leading-tight";
 
+/// What every floating panel shares (Rate limits, Usage, the lift prompt): at the window's
+/// right edge, clear of the bars and the safe-area insets, scrolled when taller than the space
+/// between the bars. Add its place, layer and width.
+pub const FLOATING: &str = "fixed right-[calc(0.75rem+var(--spacing-safe-r))] \
+    max-h-[calc(100dvh-var(--spacing-topbar-safe)-var(--spacing-statusbar-safe)-2rem)] \
+    overflow-auto overscroll-contain p-5 max-xs:p-4 bg-panel-2 border border-edge rounded-lg \
+    shadow-lg animate-pop-in";
+/// The head of a [`FLOATING`] panel: title, then its close button.
+pub const FLOATING_HEAD: &str = "flex items-center justify-between gap-4 mb-3";
+/// The title of a [`FLOATING`] panel, after its icon.
+pub const FLOATING_TITLE: &str = "flex items-center gap-2 text-lg font-semibold leading-tight";
+/// A cell of a table in a panel.
+pub const TABLE_CELL: &str = "py-2 pr-3 text-left border-b border-edge";
+/// A column head of a table in a panel.
+pub const TABLE_COLUMN: &str = "py-2 pr-3 text-left border-b border-edge text-xs font-semibold \
+    tracking-[0.04em] uppercase text-muted";
+/// A row head of a table in a panel.
+pub const TABLE_ROW: &str = "py-2 pr-3 text-left border-b border-edge font-normal";
+
 /// A whole-page state (loading, failure, missing): an icon over a title and its message.
 pub const STATE_CARD: &str = "flex flex-col items-center gap-2 text-center";
 /// The title of a [`STATE_CARD`].
@@ -219,7 +238,7 @@ pub const METER_TEXT: &str = "text-xs text-muted tabular-nums whitespace-nowrap"
 /// What every meter bar shares.
 const METER_BAR: &str = "w-full h-2 appearance-none border-none rounded-full overflow-hidden \
     bg-panel-3 [&::-webkit-progress-bar]:bg-panel-3 [&::-webkit-progress-value]:rounded-full";
-/// The bar of a hit points [`METER`].
+/// The bar of a hit points [`METER`], and of a usage well below its limit (CPU, Memory).
 pub const METER_BAR_HITS: &str = concatcp!(
     METER_BAR,
     " [&::-webkit-progress-value]:bg-ok [&::-moz-progress-bar]:bg-ok"
@@ -233,6 +252,21 @@ pub const METER_BAR_ENERGY: &str = concatcp!(
 pub const METER_BAR_PROGRESS: &str = concatcp!(
     METER_BAR,
     " [&::-webkit-progress-value]:bg-info [&::-moz-progress-bar]:bg-info"
+);
+/// The bar of a usage [`METER`] near its limit.
+pub const METER_BAR_WARN: &str = concatcp!(
+    METER_BAR,
+    " [&::-webkit-progress-value]:bg-warn [&::-moz-progress-bar]:bg-warn"
+);
+/// The bar of a usage [`METER`] at its limit.
+pub const METER_BAR_ERROR: &str = concatcp!(
+    METER_BAR,
+    " [&::-webkit-progress-value]:bg-error [&::-moz-progress-bar]:bg-error"
+);
+/// The bar of a usage [`METER`] that is not current (no recent run).
+pub const METER_BAR_IDLE: &str = concatcp!(
+    METER_BAR,
+    " [&::-webkit-progress-value]:bg-faint [&::-moz-progress-bar]:bg-faint"
 );
 
 /// What every tooltip shares: `data-tip` holds the text (the accessible name stays in

@@ -20,6 +20,7 @@ use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::rate_limits::RateLimitsUi;
 use crate::ui::style::{self, concatcp};
+use crate::ui::usage::{Anchor, UsageUi};
 use crate::ui::world::MapState;
 
 /// The brand link: logo and name, back to the server list. Gone on phones (the server menu
@@ -668,11 +669,13 @@ fn signed_in_account(
     })
 }
 
-/// The signed-in account: profile, rate limits and sign-out.
+/// The signed-in account: profile, usage, rate limits and sign-out. One panel of the menu
+/// shows at a time.
 #[component]
 fn AccountMenu() -> impl IntoView {
     let state = AppState::expect();
     let limits = RateLimitsUi::expect();
+    let usage = UsageUi::expect();
     let server = Signal::derive(move || {
         state
             .session
@@ -714,7 +717,24 @@ fn AccountMenu() -> impl IntoView {
                             type="button"
                             class=MENU_ITEM
                             role="menuitem"
-                            on:click=move |_| limits.open.set(true)
+                            on:click=move |_| {
+                                limits.open.set(false);
+                                usage.open.set(Some(Anchor::Top));
+                            }
+                        >
+                            <Icon kind=IconKind::Cpu class=style::ICON_MUTED />
+                            <span class=ITEM_MAIN>"Usage"</span>
+                        </button>
+                    </li>
+                    <li role="none">
+                        <button
+                            type="button"
+                            class=MENU_ITEM
+                            role="menuitem"
+                            on:click=move |_| {
+                                usage.open.set(None);
+                                limits.open.set(true);
+                            }
                         >
                             <Icon kind=IconKind::Gauge class=style::ICON_MUTED />
                             <span class=ITEM_MAIN>"Rate limits"</span>
