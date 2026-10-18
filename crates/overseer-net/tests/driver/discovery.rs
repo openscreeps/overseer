@@ -129,6 +129,9 @@ async fn assert_accessors_follow_subsystems(api: &Api, server: &Server) {
             Subsystem::CpuShards,
         );
     }
+    if !api.supports(Subsystem::ShardsInfo) {
+        unsupported(api.shards_info().await.unwrap_err(), Subsystem::ShardsInfo);
+    }
     assert_eq!(server.requests().len(), before, "unsupported sent nothing");
 }
 
@@ -306,7 +309,7 @@ async fn community_servers_with_screepsmod_auth_sign_in_and_lift_rate_limits() {
 }
 
 #[tokio::test]
-async fn community_servers_with_screepsmod_admin_utils_have_room_objects_only() {
+async fn community_servers_with_screepsmod_admin_utils_have_shards_info_and_room_objects_only() {
     let server = Server::start(routes(MODDED_VERSION, None), |_| true).await;
     let anonymous = Client::builder(server.url()).build().unwrap();
     let world = anonymous.world().await.unwrap();
@@ -317,7 +320,7 @@ async fn community_servers_with_screepsmod_admin_utils_have_room_objects_only() 
     assert_eq!(world.connection().plugins, admin_utils);
     assert_eq!(
         world.subsystems().iter().collect::<Vec<_>>(),
-        [Subsystem::RoomObjects]
+        [Subsystem::ShardsInfo, Subsystem::RoomObjects]
     );
     let api = anonymous.api().await.unwrap();
     assert_accessors_follow_subsystems(&api, &server).await;

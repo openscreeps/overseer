@@ -148,6 +148,10 @@ pub enum Subsystem {
     /// Allocating the account's CPU between shards (`POST /api/user/cpu-shards`): screeps.com
     /// and its Season server. The profile (`GET /api/auth/me`) holds the current allocation.
     CpuShards,
+    /// The shards of the server with their CPU limits and tick durations
+    /// (`GET /api/game/shards/info`): screeps.com and its Season server,
+    /// screepsmod-admin-utils.
+    ShardsInfo,
     /// Every object of a room over HTTP (`GET /api/game/room-objects`): screeps.com,
     /// `OpenScreeps`, screepsmod-admin-utils.
     RoomObjects,
@@ -168,7 +172,7 @@ pub enum Subsystem {
 
 impl Subsystem {
     /// Every subsystem, in declaration order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::PasswordSignIn,
         Self::PasswordAccounts,
         Self::ApiTokens,
@@ -176,6 +180,7 @@ impl Subsystem {
         Self::UsernameLookup,
         Self::AccountWebsite,
         Self::CpuShards,
+        Self::ShardsInfo,
         Self::RoomObjects,
         Self::RoomHistory,
         Self::RoomDecorations,
@@ -194,6 +199,7 @@ impl Subsystem {
             Self::UsernameLookup => "the username lookup",
             Self::AccountWebsite => "an account website",
             Self::CpuShards => "CPU allocation between shards",
+            Self::ShardsInfo => "shard information",
             Self::RoomObjects => "room objects",
             Self::RoomHistory => "room history",
             Self::RoomDecorations => "room decorations",
@@ -233,6 +239,7 @@ impl Subsystems {
                 .with(Subsystem::UsernameLookup)
                 .with(Subsystem::AccountWebsite)
                 .with(Subsystem::CpuShards)
+                .with(Subsystem::ShardsInfo)
                 .with(Subsystem::RoomObjects)
                 .with(Subsystem::RoomHistory)
                 .with(Subsystem::RoomDecorations)
@@ -257,10 +264,12 @@ impl Subsystems {
     /// - screeps.com: everything but [`Subsystem::PasswordAccounts`] (its website registers
     ///   accounts and changes passwords).
     /// - `OpenScreeps`: everything but [`Subsystem::ApiTokens`], [`Subsystem::RateLimitLift`],
-    ///   [`Subsystem::AccountWebsite`] and [`Subsystem::CpuShards`].
+    ///   [`Subsystem::AccountWebsite`], [`Subsystem::CpuShards`] and
+    ///   [`Subsystem::ShardsInfo`].
     /// - The stock community server: none; screepsmod-auth adds password sign-in, password
     ///   accounts, API tokens, lifting their rate limits and the username lookup,
-    ///   screepsmod-admin-utils room objects, a room-history mod room history.
+    ///   screepsmod-admin-utils shard information and room objects, a room-history mod room
+    ///   history.
     #[must_use]
     pub const fn of(kind: ServerKind, plugins: Plugins) -> Self {
         let base = Self::base(kind);
@@ -277,7 +286,8 @@ impl Subsystems {
             base
         };
         let base = if plugins.screepsmod_admin_utils {
-            base.with(Subsystem::RoomObjects)
+            base.with(Subsystem::ShardsInfo)
+                .with(Subsystem::RoomObjects)
         } else {
             base
         };
@@ -785,7 +795,7 @@ mod tests {
     fn subsystems_follow_the_kind_and_the_plugins() {
         use Subsystem::{
             AccountWebsite, ApiTokens, CpuShards, NoviceRooms, ObjectSearch, PasswordAccounts,
-            PasswordSignIn, RateLimitLift, RoomDecorations, RoomHistory, RoomObjects,
+            PasswordSignIn, RateLimitLift, RoomDecorations, RoomHistory, RoomObjects, ShardsInfo,
             UsernameLookup,
         };
         let auth = Plugins {
@@ -812,6 +822,7 @@ mod tests {
             UsernameLookup,
             AccountWebsite,
             CpuShards,
+            ShardsInfo,
             RoomObjects,
             RoomHistory,
             RoomDecorations,
@@ -844,11 +855,11 @@ mod tests {
         assert_eq!(subsystems(ServerKind::Community, auth), screepsmod_auth);
         assert_eq!(
             subsystems(ServerKind::Community, admin_utils),
-            [RoomObjects]
+            [ShardsInfo, RoomObjects]
         );
         assert_eq!(subsystems(ServerKind::Community, history), [RoomHistory]);
         let mut with_both = screepsmod_auth.to_vec();
-        with_both.push(RoomObjects);
+        with_both.extend([ShardsInfo, RoomObjects]);
         assert_eq!(subsystems(ServerKind::Community, both), with_both);
     }
 
@@ -903,6 +914,7 @@ mod tests {
             Subsystems::of(ServerKind::Community, info.plugins)
         );
         assert!(info.subsystems().contains(Subsystem::RoomObjects));
+        assert!(info.subsystems().contains(Subsystem::ShardsInfo));
         assert!(!info.subsystems().contains(Subsystem::RoomHistory));
     }
 }

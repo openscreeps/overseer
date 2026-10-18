@@ -1,15 +1,16 @@
-//! World area: terrain, room information, map statistics, world size, room history and the
-//! actions on rooms (flags, construction sites, names, intents, the first spawn, invaders),
-//! plus the subsystem of reading a room's objects ([`RoomObjectsSource`]).
+//! World area: shards, terrain, room information, map statistics, world size, room history and
+//! the actions on rooms (flags, construction sites, names, intents, the first spawn,
+//! invaders), plus the subsystem of reading a room's objects ([`RoomObjectsSource`]).
 //!
 //! Every contract shares the request and reply types of these operations except map
 //! statistics (the ranking's shape), the created invader (`OpenScreeps` returns the creep)
 //! and room history (screeps.com serves static chunks per shard, `OpenScreeps`
-//! `GET /room-history`). The community contract lacks room decorations, the object lookup,
-//! the random novice room, room objects and room history (its stock server keeps none);
-//! screepsmod-admin-utils provides room objects and adapts the first spawn (a name is
-//! required). Operations of a [`Subsystem`](crate::model::platform::Subsystem) the server lacks
-//! fail with [`Error::Unsupported`] without a request.
+//! `GET /room-history`). The community contract lacks the shard information, room
+//! decorations, the object lookup, the random novice room, room objects and room history (its
+//! stock server keeps none); screepsmod-admin-utils provides the shard information and room
+//! objects and adapts the first spawn (a name is required). `OpenScreeps` lacks the shard
+//! information. Operations of a [`Subsystem`](crate::model::platform::Subsystem) the server
+//! lacks fail with [`Error::Unsupported`] without a request.
 
 mod contracts;
 mod room_objects;
@@ -20,7 +21,7 @@ use overseer_core::api::{RateLimit, official};
 use overseer_core::model::world::{
     FlagColor, GameAddObjectIntentRequestIntent, GameBuildableStructureType,
     GameRandomNoviceRoomResponse, GameRoomDecoration, GameRoomOverviewResponse, GameRoomStatus,
-    GameWorldSizeResponse, InvaderRequest, MapStats, Terrain,
+    GameWorldSizeResponse, InvaderRequest, MapStats, ShardInfo, Terrain,
 };
 use serde_json::Value;
 
@@ -32,6 +33,19 @@ pub use room_objects::{RoomObjectsSource, RoomObjectsSourceApi};
 /// The world: terrain, rooms, the map and the actions on rooms. `shard` names the shard of the
 /// operation (`None`: the client's default shard); servers serving one world ignore it.
 pub trait WorldApi {
+    /// Every shard of the server with its CPU limit and average tick duration
+    /// (`GET /api/game/shards/info`;
+    /// [`Subsystem::ShardsInfo`](crate::model::platform::Subsystem::ShardsInfo)), in the
+    /// server's order. screeps.com and its Season server list every shard;
+    /// screepsmod-admin-utils lists the one world of a community server without a CPU limit,
+    /// and no shard while its `shardName` setting is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Client::send`]; [`Error::Unsupported`] on servers without the
+    /// shard information.
+    fn shards_info(&self) -> impl Future<Output = Result<Vec<ShardInfo>, Error>>;
+
     /// The terrain of `room` (`GET /api/game/room-terrain?encoded=1`), read in whichever form
     /// the server answers (encoded, or wall and swamp tiles).
     ///
@@ -352,6 +366,10 @@ pub trait WorldApi {
 }
 
 impl WorldApi for Api {
+    async fn shards_info(&self) -> Result<Vec<ShardInfo>, Error> {
+        delegate!(self, api => api.shards_info().await)
+    }
+
     async fn room_terrain(&self, shard: Option<&str>, room: &str) -> Result<Terrain, Error> {
         delegate!(self, api => api.room_terrain(shard, room).await)
     }

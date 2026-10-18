@@ -36,6 +36,7 @@ Servers do not all have the same features. Overseer names each feature that can 
 | `UsernameLookup` | yes | yes | with screepsmod-auth |
 | `AccountWebsite` | yes | no | no |
 | `CpuShards` (CPU allocation between shards) | yes | no | no |
+| `ShardsInfo` (shards with their CPU limits) | yes | no | with screepsmod-admin-utils |
 | `RoomObjects` | yes | yes | with screepsmod-admin-utils |
 | `RoomHistory` | yes | yes | with a room-history mod |
 | `RoomDecorations` | yes | yes | no |

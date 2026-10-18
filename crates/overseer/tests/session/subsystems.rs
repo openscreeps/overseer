@@ -1,5 +1,7 @@
-//! The session's subsystems and connection info, discovered or forced through the profile, and
-//! the operations of absent subsystems failing without a request.
+//! The session's subsystems and connection info, discovered or forced through the profile, the
+//! operations of absent subsystems failing without a request, and the cached shard information.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use overseer::core::{ServerUrl, Token};
 use overseer::model::platform::{Plugins, ServerKind, Subsystem, Subsystems};
@@ -77,6 +79,7 @@ async fn a_discovered_session_reports_its_subsystems_and_connection() {
     assert_unsupported(account.rate_limit_lift(), Subsystem::RateLimitLift);
     let cpu = [("shard0".to_owned(), 20)].into_iter().collect();
     assert_unsupported(account.set_cpu_shards(cpu).await, Subsystem::CpuShards);
+    assert_unsupported(overseer.shards_info().await, Subsystem::ShardsInfo);
     assert_eq!(server.requests().len(), requested, "nothing was sent");
     overseer.shutdown().await;
 }
@@ -177,5 +180,55 @@ async fn a_profile_forcing_official_lifts_rate_limits_on_a_page() {
         "{}",
         page.url
     );
+    overseer.shutdown().await;
+}
+
+/// screeps.com's shards: shard3 caps the CPU at 20, shard0 reports no cap (0).
+const SHARDS_INFO: &str = r#"{"ok":1,"shards":[
+    {"name":"shard0","lastTicks":[4100],"cpuLimit":0,"rooms":30000,"users":1200,"tick":4000},
+    {"name":"shard3","lastTicks":[3100],"cpuLimit":20,"rooms":4000,"users":900,"tick":3100}]}"#;
+
+#[tokio::test]
+async fn the_shard_information_is_fetched_once_per_session_after_a_success() {
+    // The first request fails; every later one answers the shards.
+    let asked = AtomicUsize::new(0);
+    let mut server = Server::start(
+        move |request: &Request| match request.path.as_str() {
+            "/api/game/shards/info" => {
+                if asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (200, r#"{"error":"busy"}"#.to_owned())
+                } else {
+                    (200, SHARDS_INFO.to_owned())
+                }
+            }
+            _ => routes(request),
+        },
+        |_| true,
+    )
+    .await;
+    let url = server.url();
+    let overseer = connect_forced(&mut server, url, "t1", Some(ServerKind::Official), None).await;
+    assert!(overseer.world().supports(Subsystem::ShardsInfo));
+    let sent = |server: &Server| {
+        server
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == "/api/game/shards/info")
+            .count()
+    };
+    // A failure is not cached: the next call asks again.
+    assert!(overseer.shards_info().await.is_err());
+    assert_eq!(sent(&server), 1);
+    let shards = overseer.shards_info().await.unwrap();
+    assert_eq!(sent(&server), 2);
+    let limits: Vec<_> = shards
+        .iter()
+        .map(|shard| (shard.name.as_str(), shard.cpu_limit))
+        .collect();
+    assert_eq!(limits, [("shard0", None), ("shard3", Some(20.0))]);
+    // Then the cache answers, also through a clone of the session.
+    let again = overseer.clone().shards_info().await.unwrap();
+    assert!(std::sync::Arc::ptr_eq(&shards, &again));
+    assert_eq!(sent(&server), 2, "the cache answered");
     overseer.shutdown().await;
 }

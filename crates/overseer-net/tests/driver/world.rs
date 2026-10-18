@@ -1,11 +1,12 @@
-//! The world operations where the contracts differ: room objects (native, or
+//! The world operations where the contracts differ: the shard information (native, or
+//! screepsmod-admin-utils' on community servers), room objects (native, or
 //! screepsmod-admin-utils' on community servers), the first spawn (screepsmod-admin-utils
 //! requires a name), room history and the operations stock community servers lack, and the
 //! ranking of map statistics.
 
 use overseer_core::Token;
 use overseer_core::model::platform::Subsystem;
-use overseer_core::model::world::{GameRoomObject, Tile};
+use overseer_core::model::world::{GameRoomObject, ShardInfo, Tile};
 use overseer_net::api::{RoomObjectsSource as _, WorldApi as _};
 use overseer_net::{Client, Error};
 use serde_json::{Value, json};
@@ -158,6 +159,104 @@ async fn stock_community_servers_lack_room_objects_decorations_and_history() {
         body(&server, "/api/game/place-spawn"),
         json!({"room": "W1N1", "x": 10, "y": 12})
     );
+}
+
+/// The shard of `name` with `cpu_limit` and `tick`.
+fn shard(name: &str, cpu_limit: Option<f64>, tick: Option<f64>) -> ShardInfo {
+    ShardInfo {
+        name: name.to_owned(),
+        cpu_limit,
+        tick,
+    }
+}
+
+/// The only request to `GET /api/game/shards/info`.
+fn shards_info_request(server: &Server) -> Request {
+    let mut sent = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/api/game/shards/info");
+    let request = sent.next().expect("a request to /api/game/shards/info");
+    assert!(sent.next().is_none(), "one request");
+    request
+}
+
+#[tokio::test]
+async fn official_shards_info_reads_capped_and_uncapped_shards() {
+    let server = Server::start(
+        routes(OFFICIAL_VERSION, |request| match request.path.as_str() {
+            "/api/game/shards/info" => Some((
+                200,
+                r#"{"ok":1,"shards":[
+                    {"name":"shard0","lastTicks":[4100,3900],"cpuLimit":0,"rooms":30000,"users":1200,"tick":4000},
+                    {"name":"shard3","lastTicks":[3100,3200],"cpuLimit":20,"rooms":4000,"users":900,"tick":3150.5}]}"#
+                    .to_owned(),
+            )),
+            _ => None,
+        }),
+        |_| true,
+    )
+    .await;
+    let api = client(&server, true).api().await.unwrap();
+    assert!(api.supports(Subsystem::ShardsInfo));
+    let shards = api.shards_info().await.unwrap();
+    assert_eq!(
+        shards,
+        [
+            shard("shard0", None, Some(4000.0)),
+            shard("shard3", Some(20.0), Some(3150.5)),
+        ]
+    );
+    let request = shards_info_request(&server);
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.query, "");
+}
+
+#[tokio::test]
+async fn community_shards_info_comes_from_screepsmod_admin_utils() {
+    let server = Server::start(
+        routes(ADMIN_UTILS_VERSION, |request| match request.path.as_str() {
+            "/api/game/shards/info" => Some((
+                200,
+                r#"{"ok":1,"shards":[
+                    {"name":"shardS","cpuLimit":0,"lastTicks":[1000,1200],"rooms":169,"tick":1100},
+                    {"name":null,"cpuLimit":0,"lastTicks":[],"rooms":169,"tick":null}]}"#
+                    .to_owned(),
+            )),
+            _ => None,
+        }),
+        |_| true,
+    )
+    .await;
+    let api = client(&server, false).api().await.unwrap();
+    assert!(api.supports(Subsystem::ShardsInfo));
+    // The plugin reports no cap (0); an entry without a name is skipped.
+    let shards = api.shards_info().await.unwrap();
+    assert_eq!(shards, [shard("shardS", None, Some(1100.0))]);
+    assert_eq!(shards_info_request(&server).method, "GET");
+}
+
+#[tokio::test]
+async fn other_servers_refuse_the_shards_info_without_a_request() {
+    for version in [VERSION, STOCK_VERSION] {
+        let server = Server::start(
+            routes(version, |request| match request.path.as_str() {
+                "/room-history" => Some((500, "not implemented".to_owned())),
+                _ => None,
+            }),
+            |_| true,
+        )
+        .await;
+        let api = client(&server, false).api().await.unwrap();
+        assert!(!api.supports(Subsystem::ShardsInfo));
+        let before = server.requests().len();
+        let error = api.shards_info().await.unwrap_err();
+        assert!(
+            matches!(error, Error::Unsupported(Subsystem::ShardsInfo)),
+            "{error:?}"
+        );
+        assert_eq!(server.requests().len(), before, "nothing was sent");
+    }
 }
 
 /// A map-statistics reply for `W1N1` whose `energyHarvested8` ranking is `ranking`.

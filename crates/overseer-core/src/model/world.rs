@@ -1,6 +1,7 @@
-//! World: the map (world size, map statistics, room status, overview), rooms and their
-//! terrain, decorations and room objects, room history, and the actions on rooms (flags,
-//! construction sites, spawns, intents, invaders).
+//! World: the shards (their CPU limits and tick durations), the map (world size, map
+//! statistics, room status, overview), rooms and their terrain, decorations and room objects,
+//! room history, and the actions on rooms (flags, construction sites, spawns, intents,
+//! invaders).
 //!
 //! Room objects, room users, room visuals, map visuals and room map views are the same in
 //! every contract (codegen re-exports the official types from the others): they are
@@ -9,12 +10,14 @@
 mod map_stats;
 mod room_map;
 mod room_object;
+mod shards;
 mod terrain;
 
 use crate::api::official::types as official;
 use crate::api::plugins::screepsmod_admin_utils::types as admin_utils;
 
 pub use map_stats::{MapStats, MapStatsMineral, MapStatsOwner, MapStatsRoom};
+pub use shards::ShardInfo;
 pub use terrain::{Terrain, TerrainError, Tile};
 
 /// Every contract's room objects are these types (the room-objects reply, the socket's room

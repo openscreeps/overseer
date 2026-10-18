@@ -2,8 +2,8 @@
 //! [`OpenScreeps`] and the community server ([`Community`]).
 //!
 //! A macro writes the operations that every contract shares. Each contract implements the
-//! other operations itself. A [`Community`] server uses screepsmod-admin-utils for the first
-//! spawn when the plugin is present.
+//! other operations itself. A [`Community`] server uses screepsmod-admin-utils for the shard
+//! information and the first spawn when the plugin is present.
 
 use std::collections::BTreeMap;
 use std::future::{Ready, ready};
@@ -16,7 +16,7 @@ use overseer_core::model::world::PlatformHistory;
 use overseer_core::model::world::{
     FlagColor, GameAddObjectIntentRequestIntent, GameBuildableStructureType,
     GameRandomNoviceRoomResponse, GameRoomDecoration, GameRoomOverviewResponse, GameRoomStatus,
-    GameWorldSizeResponse, InvaderRequest, MapStats, Terrain,
+    GameWorldSizeResponse, InvaderRequest, MapStats, ShardInfo, Terrain,
 };
 use serde_json::Value;
 
@@ -382,6 +382,11 @@ fn place_spawn_body(
 impl WorldApi for Official {
     shared_operations!(official);
 
+    async fn shards_info(&self) -> Result<Vec<ShardInfo>, Error> {
+        let info = official::endpoints::GameShardsInfo;
+        Ok(self.client.send(&info).await?.body.into())
+    }
+
     async fn room_decorations(
         &self,
         shard: Option<&str>,
@@ -459,6 +464,10 @@ impl WorldApi for Official {
 impl WorldApi for OpenScreeps {
     shared_operations!(openscreeps);
 
+    fn shards_info(&self) -> impl Future<Output = Result<Vec<ShardInfo>, Error>> {
+        ready(Err(Error::Unsupported(Subsystem::ShardsInfo)))
+    }
+
     async fn room_decorations(
         &self,
         shard: Option<&str>,
@@ -530,6 +539,13 @@ impl WorldApi for OpenScreeps {
 
 impl WorldApi for Community {
     shared_operations!(community);
+
+    async fn shards_info(&self) -> Result<Vec<ShardInfo>, Error> {
+        let admin_utils = self
+            .screepsmod_admin_utils()
+            .ok_or(Error::Unsupported(Subsystem::ShardsInfo))?;
+        admin_utils.shards_info().await
+    }
 
     fn room_decorations(
         &self,
@@ -603,6 +619,12 @@ impl WorldApi for Community {
 }
 
 impl ScreepsmodAdminUtils<'_> {
+    /// screepsmod-admin-utils' shards: the named entries.
+    async fn shards_info(&self) -> Result<Vec<ShardInfo>, Error> {
+        let info = screepsmod_admin_utils::endpoints::GameShardsInfo;
+        Ok(self.client.send(&info).await?.body.into())
+    }
+
     /// screepsmod-admin-utils' first spawn: always named.
     async fn place_spawn(&self, room: &str, (x, y): (u8, u8), name: String) -> Result<(), Error> {
         let body = screepsmod_admin_utils::types::GamePlaceSpawnRequest {

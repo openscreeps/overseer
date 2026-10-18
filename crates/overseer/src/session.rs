@@ -5,9 +5,11 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use overseer_net::api::WorldApi as _;
 use overseer_net::core::Token;
 use overseer_net::core::socket::{Channel, Payload};
 use overseer_net::model::account::Profile;
+use overseer_net::model::world::ShardInfo;
 use overseer_net::rt::JoinHandle;
 use overseer_net::{Api, Client, World};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -94,6 +96,9 @@ struct Inner {
     /// The signed-in user's profile once fetched ([`Account::me`]); the async lock makes
     /// concurrent first reads share one request.
     me: tokio::sync::Mutex<Option<Arc<Profile>>>,
+    /// The server's shards once fetched ([`Overseer::shards_info`]); the async lock makes
+    /// concurrent first reads share one request.
+    shards: tokio::sync::Mutex<Option<Arc<[ShardInfo]>>>,
 }
 
 impl Drop for Inner {
@@ -175,6 +180,7 @@ impl Overseer {
                 tasks: Mutex::new(tasks),
                 commands: Mutex::new(VecDeque::new()),
                 me: tokio::sync::Mutex::new(me.map(Arc::new)),
+                shards: tokio::sync::Mutex::new(None),
             }),
         })
     }
@@ -239,6 +245,32 @@ impl Overseer {
             // Tasks only end by returning; a panic would already have been reported.
             let _ = task.await;
         }
+    }
+
+    /// Every shard of the server with its CPU limit and average tick duration
+    /// (`GET /api/game/shards/info`), on servers with the shard information
+    /// ([`Subsystem::ShardsInfo`](overseer_net::model::platform::Subsystem::ShardsInfo)):
+    /// screeps.com and its Season server, and community servers with screepsmod-admin-utils.
+    /// Anonymous sessions can read it too.
+    ///
+    /// The first successful call fetches the shards. Later calls return them from a cache that
+    /// is kept for the session and shared by every clone. A failed call does not fill the
+    /// cache, so the next call sends the request again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Self::shutdown`], and [`Error::Net`] when the request
+    /// fails or the server has no shard information
+    /// ([`overseer_net::Error::Unsupported`], sent without a request).
+    pub async fn shards_info(&self) -> Result<Arc<[ShardInfo]>, Error> {
+        self.ensure_open()?;
+        let mut cached = self.inner.shards.lock().await;
+        if let Some(shards) = &*cached {
+            return Ok(Arc::clone(shards));
+        }
+        let shards: Arc<[ShardInfo]> = self.inner.api.shards_info().await?.into();
+        *cached = Some(Arc::clone(&shards));
+        Ok(shards)
     }
 
     /// Account, profile and game state of the signed-in user.
