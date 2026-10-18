@@ -1,6 +1,11 @@
 //! Account: the signed-in user's profile (`GET /api/auth/me`), e-mail notification
 //! preferences, persistent API tokens, registration, world status and start room, and the
-//! statistics overview.
+//! statistics overview. The rules of a new account's fields are in [`check_username`],
+//! [`check_email`] and [`check_password`]; the allocation of the account's CPU to the shards
+//! is in [`cpu`].
+
+pub mod cpu;
+mod registration;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -10,6 +15,11 @@ use crate::api::official::types as official;
 use crate::api::openscreeps::types as openscreeps;
 use crate::api::plugins::screepsmod_admin_utils::types as admin_utils;
 use crate::model::code::Modules;
+
+pub use registration::{
+    EmailError, PASSWORD_MAX_UNITS, PASSWORD_MIN_UNITS, PasswordError, RegistrationErrors,
+    USERNAME_MIN, UsernameError, check_email, check_password, check_username,
+};
 
 /// Every contract's `notifyPrefs` and badge are this type (codegen re-exports the official
 /// one from the others), and so is every type a badge holds.

@@ -18,8 +18,9 @@
 //! The task also hands what the world fetched (terrain, rooms without terrain, overviews,
 //! scanned portals) to the app's cache and reports the world's loading progress
 //! ([`progress_label`] for the status bar, including when the rate limit holds overviews
-//! back); after the user lifted the limit, [`Feed::recheck_rate_limit`] resumes them, and
-//! [`Feed::set_rate_limit_exempt_until`] lets them load regardless of the budget while lifted.
+//! back); after the user lifted the limit, [`Feed::recheck_rate_limit`] resumes them. While
+//! the limits are lifted the world map follows the session's exemption on its own
+//! ([`overseer::RateLimits::exemption`]).
 //!
 //! The task ends when the feed and every subscription are dropped or the session closes;
 //! dropping the `WorldMap` then ends its subscriptions.
@@ -75,7 +76,6 @@ enum Command {
     Interest(u64, Interest),
     Unsubscribe(u64),
     RecheckRateLimit,
-    RateLimitExemptUntil(Option<u64>),
 }
 
 /// A running world; cheap to clone.
@@ -153,13 +153,6 @@ impl Feed {
     pub fn recheck_rate_limit(&self) {
         // A send fails only once the task ended.
         let _ = self.commands.send(Command::RecheckRateLimit);
-    }
-
-    /// The token's rate limits are lifted until `until` (milliseconds since the Unix epoch),
-    /// or not (`None`): see [`WorldMap::set_rate_limit_exempt_until`].
-    pub fn set_rate_limit_exempt_until(&self, until: Option<u64>) {
-        // A send fails only once the task ended.
-        let _ = self.commands.send(Command::RateLimitExemptUntil(until));
     }
 }
 
@@ -292,9 +285,6 @@ impl Command {
             }
             Self::RecheckRateLimit => {
                 world.recheck_rate_limit();
-            }
-            Self::RateLimitExemptUntil(until) => {
-                world.set_rate_limit_exempt_until(until);
             }
         }
     }

@@ -4,12 +4,13 @@
 //!
 //! The draft text of each shard's field is the one source of truth: the slider and the buttons
 //! read it and write it. No control takes more than the CPU that the other shards leave of the
-//! account's CPU, so the total cannot pass it while the user edits.
+//! account's CPU ([`CpuAllocation::remaining_for`]), so the total cannot pass it while the
+//! user edits. The rules of a valid allocation are the model's ([`CpuAllocation::validate`]).
 //!
-//! Some shards cap the CPU that a player can use (`GET /api/game/shards/info`; screeps.com's
-//! shard3 allows 20). A row shows that cap and warns when the shard gets more, but the form
-//! does not block such an allocation: the server accepts it, and a wrong cap must not block
-//! the form.
+//! Some shards cap the CPU that a player can use (the session's usage knows the caps,
+//! [`overseer::Account::usage`]; screeps.com's shard3 allows 20). A row shows that cap and
+//! warns when the shard gets more, but the form does not block such an allocation: the
+//! server accepts it, and a wrong cap must not block the form.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -20,6 +21,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::Overseer;
 use overseer::model::account::Profile;
+use overseer::model::account::cpu::{self, AllocationError, CpuAllocation};
 use overseer::model::platform::Subsystem;
 use wasm_bindgen::JsValue;
 
@@ -27,11 +29,7 @@ use crate::session;
 use crate::ui::form::{FormError, FormStatus};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
-use crate::usage;
-
-/// The time the server makes the account wait between two changes of the allocation: 12
-/// hours, in milliseconds.
-const COOLDOWN_MS: f64 = 12.0 * 60.0 * 60.0 * 1000.0;
+use crate::ui::usage::UsageUi;
 
 /// How often the clock of the cooldown advances.
 const TICK: Duration = Duration::from_secs(15);
@@ -80,18 +78,8 @@ const LEFT_OVER: &str = "text-sm text-error tabular-nums";
 enum Blocker {
     /// The field of this shard does not hold a whole number.
     NotANumber(String),
-    /// The server does not report the account's CPU.
-    UnknownLimit,
-    /// The limits do not total the account's CPU.
-    Total {
-        /// The sum of the fields.
-        total: u32,
-        /// The account's CPU.
-        limit: f64,
-    },
-    /// The previous change is too recent. The next change is allowed at this time, in
-    /// milliseconds since the Unix epoch.
-    Cooldown(f64),
+    /// The allocation breaks a rule of the server.
+    Rule(AllocationError),
 }
 
 /// A step of the − or + button of a shard.
@@ -104,7 +92,7 @@ enum Step {
 }
 
 /// The CPU of a field: a whole number; a blank field reads as 0.
-fn parse_limit(text: &str) -> Option<u32> {
+fn parse_limit(text: &str) -> Option<u64> {
     let text = text.trim();
     if text.is_empty() {
         Some(0)
@@ -115,47 +103,29 @@ fn parse_limit(text: &str) -> Option<u32> {
 
 /// The sum of the `fields` (shard, text), or the first shard whose field does not hold a
 /// whole number.
-fn total(fields: &[(String, String)]) -> Result<u32, String> {
-    fields.iter().try_fold(0_u32, |sum, (shard, text)| {
+fn total(fields: &[(String, String)]) -> Result<u64, String> {
+    fields.iter().try_fold(0_u64, |sum, (shard, text)| {
         parse_limit(text)
             .map(|cpu| sum.saturating_add(cpu))
             .ok_or_else(|| shard.clone())
     })
 }
 
-/// When the next change is allowed, in milliseconds since the Unix epoch: 12 hours after the
-/// previous change `updated`. `None` when that time is not after `now`, or when no change is
-/// known.
-fn next_change(updated: Option<f64>, now: f64) -> Option<f64> {
-    updated
-        .map(|updated| updated + COOLDOWN_MS)
-        .filter(|next| *next > now)
-}
-
-/// The limits to send for the `fields` (shard, text), by shard, when the account's CPU
-/// `limit` is known, the fields total it, and the cooldown after the previous change
-/// `updated` is over at `now`. Otherwise the first reason that blocks the change.
+/// The limits to send for the `fields` (shard, text), by shard, when every field holds a
+/// whole number and the allocation keeps the account's `rules` at `now`. Otherwise the first
+/// reason that blocks the change.
 fn allocation(
     fields: &[(String, String)],
-    limit: Option<f64>,
-    updated: Option<f64>,
+    rules: CpuAllocation,
     now: f64,
 ) -> Result<BTreeMap<String, u64>, Blocker> {
-    let total = total(fields).map_err(Blocker::NotANumber)?;
-    let limit = limit.ok_or(Blocker::UnknownLimit)?;
-    if (f64::from(total) - limit).abs() >= 0.5 {
-        return Err(Blocker::Total { total, limit });
-    }
-    if let Some(next) = next_change(updated, now) {
-        return Err(Blocker::Cooldown(next));
-    }
-    Ok(fields
+    total(fields).map_err(Blocker::NotANumber)?;
+    let allocation: BTreeMap<String, u64> = fields
         .iter()
-        .map(|(shard, text)| {
-            let cpu = parse_limit(text).map_or(0, u64::from);
-            (shard.clone(), cpu)
-        })
-        .collect())
+        .map(|(shard, text)| (shard.clone(), parse_limit(text).unwrap_or(0)))
+        .collect();
+    rules.validate(&allocation, now).map_err(Blocker::Rule)?;
+    Ok(allocation)
 }
 
 /// What the form tells about `blocker` under the Save button; `None` for the cooldown, which
@@ -163,11 +133,13 @@ fn allocation(
 fn blocker_text(blocker: &Blocker) -> Option<String> {
     match blocker {
         Blocker::NotANumber(shard) => Some(format!("Enter a whole number of CPU for {shard}.")),
-        Blocker::UnknownLimit => Some("The server does not report your CPU limit.".to_owned()),
-        Blocker::Total { total, limit } => Some(format!(
-            "The shards get {total} CPU in total. Give them exactly {limit} CPU."
+        Blocker::Rule(AllocationError::UnknownCpu) => {
+            Some("The server does not report your CPU limit.".to_owned())
+        }
+        Blocker::Rule(AllocationError::Total { total, cpu }) => Some(format!(
+            "The shards get {total} CPU in total. Give them exactly {cpu} CPU."
         )),
-        Blocker::Cooldown(_) => None,
+        Blocker::Rule(AllocationError::Cooldown { .. }) => None,
     }
 }
 
@@ -177,55 +149,50 @@ fn field_text(drafts: &BTreeMap<String, String>, shard: &str) -> String {
     drafts.get(shard).cloned().unwrap_or_else(|| "0".to_owned())
 }
 
-/// The CPU of the field texts `drafts` (by shard) whose shard `keep` accepts. A field that
-/// does not hold a whole number counts as 0.
-fn draft_sum(drafts: &BTreeMap<String, String>, keep: impl Fn(&str) -> bool) -> u32 {
+/// The CPU of each field text of `drafts` (by shard). A field that does not hold a whole
+/// number counts as 0.
+fn draft_cpu(drafts: &BTreeMap<String, String>) -> BTreeMap<String, u64> {
     drafts
         .iter()
-        .filter(|(shard, _)| keep(shard))
-        .map(|(_, text)| parse_limit(text).unwrap_or(0))
-        .fold(0, u32::saturating_add)
+        .map(|(shard, text)| (shard.clone(), parse_limit(text).unwrap_or(0)))
+        .collect()
 }
 
 /// The CPU of `shard` among the field texts `drafts`: absent, or not a whole number, reads
 /// as 0.
-fn cpu_of(drafts: &BTreeMap<String, String>, shard: &str) -> u32 {
+fn cpu_of(drafts: &BTreeMap<String, String>, shard: &str) -> u64 {
     drafts
         .get(shard)
         .and_then(|text| parse_limit(text))
         .unwrap_or(0)
 }
 
-/// `cpu` as a whole number of CPU: rounded, 0 or more.
-fn whole(cpu: f64) -> u32 {
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "clamped to the u32 range first"
-    )]
-    let whole = cpu.clamp(0.0, f64::from(u32::MAX)).round() as u32;
-    whole
-}
-
-/// The end of every slider: the account's CPU `limit`, or, when the server does not report
-/// it, the CPU of the field texts `drafts` (by shard).
-fn scale(limit: Option<f64>, drafts: &BTreeMap<String, String>) -> u32 {
-    limit.map_or_else(|| draft_sum(drafts, |_| true), whole)
+/// The end of every slider: the account's CPU ([`CpuAllocation::total`]), or, when the
+/// server does not report it, the CPU of the field texts `drafts` (by shard).
+fn scale(rules: CpuAllocation, drafts: &BTreeMap<String, String>) -> u64 {
+    rules.total().unwrap_or_else(|| {
+        draft_cpu(drafts)
+            .values()
+            .fold(0, |sum, cpu| sum.saturating_add(*cpu))
+    })
 }
 
 /// The most CPU `shard` can get: what the other shards of the field texts `drafts` leave of
-/// `scale`. That is its CPU plus the CPU left to give.
-fn shard_max(drafts: &BTreeMap<String, String>, shard: &str, scale: u32) -> u32 {
-    scale.saturating_sub(draft_sum(drafts, |other| other != shard))
+/// the account's CPU ([`CpuAllocation::remaining_for`]); its own CPU when the server does not
+/// report the account's CPU.
+fn shard_max(drafts: &BTreeMap<String, String>, shard: &str, rules: CpuAllocation) -> u64 {
+    rules
+        .remaining_for(&draft_cpu(drafts), shard)
+        .unwrap_or_else(|| cpu_of(drafts, shard))
 }
 
 /// The text that a shard's field keeps when the user enters `text`: a whole number past
 /// `max` (the most CPU the shard can get) becomes `max`; other text stays as it is.
-fn typed(text: &str, max: u32) -> String {
+fn typed(text: &str, max: u64) -> String {
     let digits = text.trim();
     let past = match parse_limit(digits) {
         Some(cpu) => cpu > max,
-        // A whole number too large for a u32.
+        // A whole number too large for a u64.
         None => !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()),
     };
     if past {
@@ -237,7 +204,7 @@ fn typed(text: &str, max: u32) -> String {
 
 /// The CPU after a `step` from `cpu`: 1 less, down to 0, or 1 more, up to `max` (the most
 /// CPU the shard can get). A step past an end gives `cpu` back.
-fn stepped(cpu: u32, step: Step, max: u32) -> u32 {
+fn stepped(cpu: u64, step: Step, max: u64) -> u64 {
     match step {
         Step::Less => cpu.saturating_sub(1),
         Step::More if cpu < max => cpu + 1,
@@ -247,7 +214,7 @@ fn stepped(cpu: u32, step: Step, max: u32) -> u32 {
 
 /// What the line next to the total tells about the shards' `total` against the account's CPU
 /// `limit`, and its class.
-fn left(total: u32, limit: u32) -> (String, &'static str) {
+fn left(total: u64, limit: u64) -> (String, &'static str) {
     match total.cmp(&limit) {
         Ordering::Less => (format!("{} CPU left to give", limit - total), LEFT),
         Ordering::Equal => ("All CPU given".to_owned(), LEFT_DONE),
@@ -255,10 +222,12 @@ fn left(total: u32, limit: u32) -> (String, &'static str) {
     }
 }
 
-/// The warning for `shard` when it gets more `cpu` than its `cap` lets it use.
-fn over_cap(shard: &str, cpu: u32, cap: Option<f64>) -> Option<String> {
-    let cpu = f64::from(cpu);
-    let usable = usage::usable(cpu, cap);
+/// The warning for `shard` when it gets more `cpu` than its `cap` lets it use
+/// ([`cpu::usable`]).
+fn over_cap(shard: &str, cpu: u64, cap: Option<f64>) -> Option<String> {
+    #[expect(clippy::cast_precision_loss, reason = "CPU amounts are far below 2^52")]
+    let cpu = cpu as f64;
+    let usable = cpu::usable(cpu, cap);
     (usable < cpu).then(|| format!("Only {usable} of {cpu} CPU usable on {shard}."))
 }
 
@@ -272,12 +241,11 @@ fn local_time(at: f64) -> String {
 /// The CPU limit of each shard, with a form to change it. Shows nothing on a server without
 /// the CPU allocation ([`Subsystem::CpuShards`]), and nothing while fewer than 2 shards are
 /// known (the server's shards and the shards of the allocation): one shard always gets all
-/// the CPU. `reload` fetches the profile `me` again after a change.
+/// the CPU. After a change the session publishes the new profile `me`.
 #[component]
 pub fn CpuShards(
     overseer: Overseer,
     me: RwSignal<Option<Result<Arc<Profile>, String>>>,
-    reload: Callback<()>,
 ) -> impl IntoView {
     if !overseer.world().supports(Subsystem::CpuShards) {
         return ().into_any();
@@ -286,7 +254,7 @@ pub fn CpuShards(
     let profile = move || me.get().and_then(Result::ok);
     // The server's shards, then the shards that only the allocation names.
     let shards = Memo::new(move |_| match profile() {
-        Some(me) => usage::shard_order(&world_shards, &me.cpu_shards),
+        Some(me) => cpu::shard_order(&world_shards, &me.cpu_shards),
         None => world_shards.clone(),
     });
     let values = RwSignal::new(BTreeMap::<String, String>::new());
@@ -303,15 +271,16 @@ pub fn CpuShards(
     });
     // The caps are extra information: without them (a failure, a server without the shard
     // information), the rows show no cap.
-    let caps = RwSignal::new(BTreeMap::<String, f64>::new());
-    {
-        let overseer = overseer.clone();
-        spawn_local(async move {
-            if let Ok(shards) = overseer.shards_info().await {
-                caps.set(usage::shard_caps(&shards));
-            }
-        });
-    }
+    let usage = UsageUi::expect();
+    let caps = Memo::new(move |_| {
+        usage.usage.with(|usage| {
+            usage
+                .shards
+                .iter()
+                .filter_map(|shard| shard.cap.map(|cap| (shard.name.clone(), cap)))
+                .collect::<BTreeMap<_, _>>()
+        })
+    });
     let now = RwSignal::new(js_sys::Date::now());
     if let Ok(handle) = set_interval_with_handle(move || now.set(js_sys::Date::now()), TICK) {
         on_cleanup(move || handle.clear());
@@ -326,10 +295,13 @@ pub fn CpuShards(
             })
         })
     };
-    let limit = move || profile().and_then(|me| me.cpu);
-    let updated = move || profile().and_then(|me| me.cpu_shards_updated);
-    let scale = Memo::new(move |_| values.with(|values| scale(limit(), values)));
-    let check = Memo::new(move |_| allocation(&fields(), limit(), updated(), now.get()));
+    let rules = Memo::new(move |_| {
+        profile().map_or_else(CpuAllocation::default, |me| CpuAllocation::of(&me))
+    });
+    let limit = move || rules.get().cpu;
+    let updated = move || rules.get().changed;
+    let scale = Memo::new(move |_| values.with(|values| scale(rules.get(), values)));
+    let check = Memo::new(move |_| allocation(&fields(), rules.get(), now.get()));
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let saved = RwSignal::new(None::<String>);
@@ -346,10 +318,7 @@ pub fn CpuShards(
             let result = overseer.account().set_cpu_shards(cpu).await;
             busy.set(false);
             match result {
-                Ok(()) => {
-                    saved.set(Some("CPU allocation saved.".to_owned()));
-                    reload.run(());
-                }
+                Ok(()) => saved.set(Some("CPU allocation saved.".to_owned())),
                 Err(failure) => error.set(Some(session::error_message(&failure))),
             }
         });
@@ -362,7 +331,7 @@ pub fn CpuShards(
     let total_class = move || {
         if matches!(
             check.get(),
-            Err(Blocker::Total { .. } | Blocker::NotANumber(_))
+            Err(Blocker::Rule(AllocationError::Total { .. }) | Blocker::NotANumber(_))
         ) {
             TOTAL_WRONG
         } else {
@@ -376,7 +345,7 @@ pub fn CpuShards(
         }
         _ => None,
     };
-    let next_line = move || match (next_change(updated(), now.get()), updated()) {
+    let next_line = move || match (rules.get().next_change_at(now.get()), updated()) {
         (Some(next), _) => Some(format!("Next change allowed: {}", local_time(next))),
         (None, Some(updated)) => Some(format!(
             "Last change: {}. You can change it now.",
@@ -398,7 +367,7 @@ pub fn CpuShards(
                 </p>
                 <div class=ROWS>
                     <For each=move || shards.get() key=Clone::clone let(shard)>
-                        <ShardRow shard values scale caps />
+                        <ShardRow shard values scale rules caps />
                     </For>
                 </div>
                 <p class=TOTALS aria-live="polite">
@@ -427,14 +396,16 @@ pub fn CpuShards(
 
 /// The row of one shard's CPU limit: its name and cap, a slider from 0 to `scale`, − and +
 /// buttons, and a number field. All of them edit the shard's entry of `values` (absent reads
-/// as 0), and none gives the shard more than the other shards leave of `scale`. The row warns
-/// when the shard gets more CPU than its cap among `caps` lets it use.
+/// as 0), and none gives the shard more than the other shards leave of the account's CPU
+/// (`rules`). The row warns when the shard gets more CPU than its cap among `caps` lets it
+/// use.
 #[component]
 fn ShardRow(
     shard: String,
     values: RwSignal<BTreeMap<String, String>>,
-    scale: Memo<u32>,
-    caps: RwSignal<BTreeMap<String, f64>>,
+    scale: Memo<u64>,
+    rules: Memo<CpuAllocation>,
+    caps: Memo<BTreeMap<String, f64>>,
 ) -> impl IntoView {
     let id = format!("cpu-shard-{shard}");
     let label_id = format!("{id}-label");
@@ -454,7 +425,7 @@ fn ShardRow(
     };
     let max = {
         let shard = shard.clone();
-        Memo::new(move |_| values.with(|values| shard_max(values, &shard, scale.get())))
+        Memo::new(move |_| values.with(|values| shard_max(values, &shard, rules.get())))
     };
     let cap = {
         let shard = shard.clone();
@@ -495,7 +466,9 @@ fn ShardRow(
         <div class=ROW>
             <div class=HEAD>
                 <div class=NAME>
-                    <label id=label_id.clone() for=id.clone() class=ROW_LABEL>{shard.clone()}</label>
+                    <label id=label_id.clone() for=id.clone() class=ROW_LABEL title=shard.clone()>
+                        {shard.clone()}
+                    </label>
                     {move || cap.get().map(|cap| view! { <span class=CAP>{format!("max {cap} usable")}</span> })}
                 </div>
                 <input

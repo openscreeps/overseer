@@ -4,6 +4,9 @@
 
 use leptos::html::{Button, Section};
 use leptos::prelude::*;
+use overseer::account::usage::{RUNS_KEPT, RunCpu, Runs};
+use overseer::model::account::cpu::ShardCpu;
+use overseer::model::memory::MEMORY_CAPACITY;
 use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
@@ -12,9 +15,9 @@ use crate::state::AppState;
 use crate::tick;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
-use crate::ui::usage::{Anchor, UsageUi, tone};
+use crate::ui::usage::{Anchor, UsageUi, shown_shard, tone};
 use crate::ui::world::MapState;
-use crate::usage::{self, Level, MEMORY_LIMIT, RunCpu, Runs, ShardCpu};
+use crate::usage::{self, Level};
 
 /// The width of a panel: at most 28rem, inside the window and its safe-area insets.
 const WIDTH: &str = "w-[min(28rem,calc(100vw-1.5rem-var(--spacing-safe-l)-var(--spacing-safe-r)))]";
@@ -45,7 +48,7 @@ const SHARD_WARNING: &str =
     "mt-3 px-3 py-2 text-sm bg-warn-soft border-l-3 border-warn rounded-r-sm";
 /// The width of a sparkline's box: one unit for each step between two runs.
 #[expect(clippy::cast_precision_loss, reason = "the window holds a few runs")]
-const SPARK_WIDTH: f64 = (usage::WINDOW - 1) as f64;
+const SPARK_WIDTH: f64 = (RUNS_KEPT - 1) as f64;
 /// The height of a sparkline's box.
 const SPARK_HEIGHT: f64 = 32.0;
 
@@ -108,7 +111,7 @@ pub fn UsagePanel() -> impl IntoView {
     };
     let limit = Memo::new(move |_| ui.cpu_limit(map));
     let idle = Memo::new(move |_| ui.idle());
-    let shards = Memo::new(move |_| ui.shards(map));
+    let shards = Memo::new(move |_| ui.shards());
     let status = move || {
         let now = ui.now.get();
         ui.runs.with(|runs| match runs.latest() {
@@ -116,7 +119,7 @@ pub fn UsagePanel() -> impl IntoView {
             Some(run) => {
                 let ago = usage::ago(now.saturating_sub(run.at));
                 if runs.is_idle(now) {
-                    format!("No run in the last 10 s. The latest run arrived {ago}.")
+                    format!("{}The latest run arrived {ago}.", usage::idle_text())
                 } else {
                     format!(
                         "Latest run {ago}. Average and peak of the last {} runs.",
@@ -174,6 +177,7 @@ fn CpuPart(
     shards: Memo<Vec<ShardCpu>>,
 ) -> impl IntoView {
     let ui = UsageUi::expect();
+    let map = MapState::expect();
     let latest = Memo::new(move |_| ui.runs.with(|runs| runs.latest().map(|run| run.cpu)));
     let stats = Memo::new(move |_| ui.runs.with(Runs::cpu));
     let level = move || {
@@ -235,19 +239,25 @@ fn CpuPart(
     };
     // Where the server allocates CPU to each shard, say which limit the bar uses.
     let limit_note = move || {
+        let shown = shown_shard(map);
         let note = shards.with(|shards| {
             if shards.is_empty() {
                 return None;
             }
-            Some(shards.iter().find(|shard| shard.shown).map_or_else(
-                || "The limit is the CPU of the account.".to_owned(),
-                |shard| {
-                    format!(
-                        "The limit is the usable CPU of {}, the shard on the map.",
-                        shard.name
-                    )
-                },
-            ))
+            Some(
+                shards
+                    .iter()
+                    .find(|shard| shown.as_deref() == Some(shard.name.as_str()))
+                    .map_or_else(
+                        || "The limit is the CPU of the account.".to_owned(),
+                        |shard| {
+                            format!(
+                                "The limit is the usable CPU of {}, the shard on the map.",
+                                shard.name
+                            )
+                        },
+                    ),
+            )
         })?;
         Some(view! { <p class=concatcp!(style::HELP, " mt-2")>{note}</p> })
     };
@@ -311,8 +321,8 @@ fn MemoryPart(idle: Memo<bool>) -> impl IntoView {
         Some(view! {
             <progress
                 class=meter_bar(level(), idle.get())
-                max=MEMORY_LIMIT.to_string()
-                value=bytes.min(MEMORY_LIMIT).to_string()
+                max=MEMORY_CAPACITY.to_string()
+                value=bytes.min(MEMORY_CAPACITY).to_string()
                 aria-label="Memory of the latest run"
             ></progress>
         })
@@ -330,7 +340,7 @@ fn MemoryPart(idle: Memo<bool>) -> impl IntoView {
         )
     };
     #[expect(clippy::cast_precision_loss, reason = "2 MiB is exact")]
-    let memory_limit = MEMORY_LIMIT as f64;
+    let memory_limit = MEMORY_CAPACITY as f64;
     let top = Signal::derive(move || {
         usage::sparkline_top(Some(memory_limit), stats.get().map(|stats| stats.peak))
     });
@@ -362,7 +372,7 @@ fn MemoryPart(idle: Memo<bool>) -> impl IntoView {
                 </div>
                 <div>
                     <dt class=FIGURE_NAME>"Limit"</dt>
-                    <dd>{format!("{} KB", usage::cpu_amount(usage::kilobytes(MEMORY_LIMIT)))}</dd>
+                    <dd>{format!("{} KB", usage::cpu_amount(usage::kilobytes(MEMORY_CAPACITY)))}</dd>
                 </div>
             </dl>
         </section>
@@ -462,7 +472,9 @@ fn Sparkline(
 fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
     let state = AppState::expect();
     let ui = UsageUi::expect();
-    let info_known = Memo::new(move |_| ui.info.with(Option::is_some));
+    let map = MapState::expect();
+    let info_known = Memo::new(move |_| ui.shards_known());
+    let shown = Memo::new(move |_| shown_shard(map));
     let open_profile = move |_| {
         let slug = state
             .session_server()
@@ -477,6 +489,7 @@ fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
             .get()
             .into_iter()
             .map(|shard| {
+                let on_map = shown.with(|shown| shown.as_deref() == Some(shard.name.as_str()));
                 let cap = match (shard.cap, info_known.get()) {
                     (Some(cap), _) => usage::cpu_amount(cap),
                     (None, true) => "none".to_owned(),
@@ -494,7 +507,7 @@ fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
                     <tr>
                         <th scope="row" class=style::TABLE_ROW>
                             {shard.name.clone()}
-                            {shard.shown.then(|| view! { <span class="ml-1.5 text-xs text-muted">"on the map"</span> })}
+                            {on_map.then(|| view! { <span class="ml-1.5 text-xs text-muted">"on the map"</span> })}
                         </th>
                         <td class=style::TABLE_CELL>{usage::cpu_amount(shard.assigned)}</td>
                         <td class=style::TABLE_CELL>{cap}</td>

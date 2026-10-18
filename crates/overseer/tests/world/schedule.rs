@@ -668,7 +668,9 @@ async fn an_exempt_token_paces_nothing_on_servers_with_rate_limits() {
     let mut world = overseer.map().world(None).await.unwrap();
     tokio::time::pause();
     let bounds = world.bounds();
-    world.set_rate_limit_exempt_until(Some(epoch_millis() + 3_600_000));
+    overseer
+        .rate_limits()
+        .set_exempt_until(Some(epoch_millis() + 3_600_000));
     world.set_interest(&Interest {
         stats: Some(bounds),
         ..Interest::default()

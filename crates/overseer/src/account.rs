@@ -1,6 +1,7 @@
 //! The signed-in user's account: profile, overview statistics, world status, start room, respawn, CPU and its allocation between shards, resources, badge, e-mail, username and password, notification preferences, API tokens and power creeps.
 
 mod power_creeps;
+pub mod usage;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use overseer_net::api::{
 };
 use overseer_net::core::Token;
 use overseer_net::core::socket::{Channel, Payload};
+use overseer_net::model::account::cpu::CpuAllocation;
 use overseer_net::model::account::{
     AuthToken, AuthTokenRequest, Overview, Profile, StartRoom, UserBadgeInput, UserNotifyPrefs,
     UserRoomStatName, UserWorldStatus,
@@ -17,11 +19,35 @@ use overseer_net::model::account::{
 use overseer_net::model::platform::Subsystem;
 use overseer_net::model::socket::{UserCpu, UserResources};
 use overseer_net::rt::{SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 
 use crate::rooms::StatInterval;
 use crate::{Error, Overseer, Watch};
 
 pub use power_creeps::PowerCreeps;
+pub use usage::Usage;
+
+/// The account state that the session keeps for every [`Account`] handle.
+pub(crate) struct Shared {
+    /// The latest profile ([`Account::profile_watch`]).
+    me: watch::Sender<Option<Arc<Profile>>>,
+    /// Whether the latest profile is out of date (after a change that was not read back);
+    /// the async lock makes concurrent reads share one request.
+    stale: tokio::sync::Mutex<bool>,
+    /// The usage while a task keeps it ([`Account::usage`]).
+    usage: usage::Slot,
+}
+
+impl Shared {
+    /// The state of a session that read profile `me` while connecting, if any.
+    pub(crate) fn new(me: Option<Profile>) -> Self {
+        Self {
+            me: watch::Sender::new(me.map(Arc::new)),
+            stale: tokio::sync::Mutex::new(false),
+            usage: usage::Slot::default(),
+        }
+    }
+}
 
 /// The signed-in user's account: profile, overview statistics, world status, start room, respawn, CPU and its allocation between shards, resources, badge, e-mail, username and password, notification preferences, API tokens and power creeps.
 ///
@@ -44,10 +70,11 @@ impl Account {
     ///
     /// Read once per session (by [`Overseer::connect`] while discovering the server, so the
     /// first call makes no request) and then served from a cache shared by every handle;
-    /// [`Self::refresh`] fetches it again. The account's own changes made through this crate
-    /// ([`Self::set_badge`], [`Self::set_email`], [`Self::set_username`],
+    /// [`Self::refresh`] fetches it again. After each of the account's own changes made
+    /// through this crate ([`Self::set_badge`], [`Self::set_email`], [`Self::set_username`],
     /// [`Self::set_notify_prefs`], [`Self::set_cpu_shards`], [`Self::respawn`],
-    /// [`PowerCreeps::start_experimentation`]) clear the cache, so the next call fetches it.
+    /// [`PowerCreeps::start_experimentation`]) the session fetches it again at once. Every
+    /// profile that the session reads is published on [`Self::profile_watch`].
     ///
     /// # Errors
     ///
@@ -55,17 +82,19 @@ impl Account {
     /// fails.
     pub async fn me(&self) -> Result<Arc<Profile>, Error> {
         let api = self.overseer.user_api()?;
-        let mut cached = self.overseer.me_cache().lock().await;
-        if let Some(me) = &*cached {
-            return Ok(Arc::clone(me));
+        let shared = self.overseer.account_state();
+        let mut stale = shared.stale.lock().await;
+        if !*stale && let Some(me) = shared.me.borrow().clone() {
+            return Ok(me);
         }
         let me = Arc::new(api.me().await?);
-        *cached = Some(Arc::clone(&me));
+        shared.me.send_replace(Some(Arc::clone(&me)));
+        *stale = false;
         Ok(me)
     }
 
-    /// Fetches the signed-in user's profile again, replaces the cached one ([`Self::me`]) and
-    /// returns it.
+    /// Fetches the signed-in user's profile again, replaces the cached one ([`Self::me`]),
+    /// publishes it ([`Self::profile_watch`]) and returns it.
     ///
     /// # Errors
     ///
@@ -73,10 +102,37 @@ impl Account {
     /// fails; the cache is kept then.
     pub async fn refresh(&self) -> Result<Arc<Profile>, Error> {
         let api = self.overseer.user_api()?;
-        let mut cached = self.overseer.me_cache().lock().await;
+        let shared = self.overseer.account_state();
+        let mut stale = shared.stale.lock().await;
         let me = Arc::new(api.me().await?);
-        *cached = Some(Arc::clone(&me));
+        shared.me.send_replace(Some(Arc::clone(&me)));
+        *stale = false;
         Ok(me)
+    }
+
+    /// The latest profile that the session read ([`Self::me`], [`Self::refresh`], and the
+    /// read after each change of the account), and every later one. `None` until the session
+    /// read one. Every handle and every receiver share it. Reading the receiver sends no
+    /// request: call [`Self::me`] to read the profile when the receiver holds `None`.
+    #[must_use]
+    pub fn profile_watch(&self) -> watch::Receiver<Option<Arc<Profile>>> {
+        self.overseer.account_state().me.subscribe()
+    }
+
+    /// The CPU and Memory usage of the code, kept by the session for every consumer
+    /// ([`usage`]): the last [`usage::RUNS_KEPT`] runs, the account's CPU and the CPU of each
+    /// shard. The first receiver subscribes to `user:<user>/cpu` and reads the profile and,
+    /// where the server allocates CPU to each shard, the shards ([`Overseer::shards_info`]);
+    /// later receivers share it. The usage follows every profile that the session publishes
+    /// ([`Self::profile_watch`]). After the last receiver is dropped the session
+    /// unsubscribes and forgets the runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Anonymous`] and [`Error::Closed`].
+    pub fn usage(&self) -> Result<watch::Receiver<Usage>, Error> {
+        let user = self.user()?;
+        Ok(usage::subscribe(&self.overseer, || self.cpu_watch(user)))
     }
 
     /// Per-room series of `stat` over `interval` and their totals, for the overview page
@@ -132,7 +188,7 @@ impl Account {
     /// fails or the server refuses (for example right after a previous respawn).
     pub async fn respawn(&self) -> Result<(), Error> {
         self.overseer.user_api()?.respawn().await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 
@@ -153,14 +209,18 @@ impl Account {
     ///
     /// Returns [`Error::Anonymous`] and [`Error::Closed`].
     pub fn cpu(&self) -> Result<Watch<UserCpu>, Error> {
-        let user = self.user()?;
-        Ok(self.overseer.watch(Channel::Cpu { user }, |payload| {
+        Ok(self.cpu_watch(self.user()?))
+    }
+
+    /// The watch of `user`'s `user:<user>/cpu` ([`Self::cpu`]).
+    fn cpu_watch(&self, user: String) -> Watch<UserCpu> {
+        self.overseer.watch(Channel::Cpu { user }, |payload| {
             if let Payload::Cpu(cpu) = payload {
                 Some(cpu)
             } else {
                 None
             }
-        }))
+        })
     }
 
     /// Credits and account resources (pixels, CPU unlocks, access keys, …) whenever they
@@ -205,7 +265,7 @@ impl Account {
     /// fails or the server rejects the badge (`invalid params`).
     pub async fn set_badge(&self, badge: UserBadgeInput) -> Result<(), Error> {
         self.overseer.user_api()?.set_badge(badge).await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 
@@ -213,18 +273,32 @@ impl Account {
     /// (`POST /api/user/cpu-shards`), on servers with the CPU allocation
     /// ([`Subsystem::CpuShards`]). Omitted shards get 0. The limits must total the account's
     /// CPU ([`Profile::cpu`]), and the server refuses a change within 12 hours after the
-    /// previous one ([`Profile::cpu_shards_updated`]). After success the cached profile is
-    /// cleared, so the next [`Self::me`] reads the new allocation ([`Profile::cpu_shards`]).
+    /// previous one ([`Profile::cpu_shards_updated`]): the session checks both against the
+    /// [profile](Self::me) first ([`CpuAllocation::validate`]) and sends nothing when they
+    /// fail. A limit above a shard's cap is valid. After success the session fetches the
+    /// profile again and publishes it ([`Self::profile_watch`]), with the new allocation
+    /// ([`Profile::cpu_shards`]).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Anonymous`], [`Error::Closed`], [`Error::Net`] with
     /// [`Unsupported`](overseer_net::Error::Unsupported) on a server without the CPU
-    /// allocation (nothing is sent), and [`Error::Net`] when the request fails or the server
-    /// refuses the limits.
+    /// allocation (nothing is sent), [`Error::InvalidInput`] with the
+    /// [`AllocationError`](overseer_net::model::account::cpu::AllocationError) text when the
+    /// limits do not pass the check (nothing is sent), the errors of [`Self::me`], and
+    /// [`Error::Net`] when the request fails or the server refuses the limits.
     pub async fn set_cpu_shards(&self, cpu: BTreeMap<String, u64>) -> Result<(), Error> {
+        self.require(Subsystem::CpuShards)?;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the epoch time in milliseconds is far below 2^52"
+        )]
+        let now = epoch_millis() as f64;
+        CpuAllocation::of(&*self.me().await?)
+            .validate(&cpu, now)
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
         self.overseer.user_api()?.set_cpu_shards(cpu).await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 
@@ -237,7 +311,7 @@ impl Account {
     /// fails or the server refuses the address (`invalid email`, `email already exists`).
     pub async fn set_email(&self, email: &str) -> Result<(), Error> {
         self.overseer.user_api()?.set_email(email).await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 
@@ -255,7 +329,7 @@ impl Account {
             .user_api()?
             .set_username(username, email)
             .await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 
@@ -264,7 +338,8 @@ impl Account {
     /// [account website](Subsystem::AccountWebsite) change passwords there).
     /// `old_password` is the current one, `None` for an account without a password yet.
     /// `OpenScreeps` ends every session of the account afterwards: connect again with the new
-    /// password.
+    /// password. For that reason the session does not read the profile again: it marks it out
+    /// of date, so the next [`Self::me`] fetches it.
     ///
     /// # Errors
     ///
@@ -286,7 +361,7 @@ impl Account {
             ))?
             .set_password(old_password, password)
             .await?;
-        forget_me(&self.overseer).await;
+        *self.overseer.account_state().stale.lock().await = true;
         Ok(())
     }
 
@@ -309,7 +384,7 @@ impl Account {
     /// fails.
     pub async fn set_notify_prefs(&self, prefs: UserNotifyPrefs) -> Result<(), Error> {
         self.overseer.user_api()?.set_notify_prefs(prefs).await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 
@@ -343,6 +418,11 @@ impl Account {
     /// exemption has passed or was never granted, and for sessions not signed in with an API
     /// token (a password sign-in's session token matches no entry).
     ///
+    /// The session keeps the answer ([`RateLimits::exemption`](crate::RateLimits::exemption))
+    /// and gives it to the client's request budget at once
+    /// ([`net::Client::set_rate_limit_exempt_until`](crate::net::Client::set_rate_limit_exempt_until)),
+    /// which every world map of the session follows; a failed check changes nothing.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Net`] with [`Unsupported`](overseer_net::Error::Unsupported) on a
@@ -352,7 +432,11 @@ impl Account {
         self.require(Subsystem::RateLimitLift)?;
         let tokens = self.auth_tokens().await?;
         let session = self.overseer.tokens().borrow().clone();
-        Ok(session.and_then(|session| exemption(&tokens, &session, epoch_millis())))
+        let until = session.and_then(|session| exemption(&tokens, &session, epoch_millis()));
+        self.overseer
+            .rate_limit_state()
+            .store(self.overseer.client(), until);
+        Ok(until)
     }
 
     /// How the session's API token gets its rate limits lifted ([`Subsystem::RateLimitLift`]):
@@ -419,9 +503,23 @@ impl Account {
     }
 }
 
-/// Clears the cached profile after a change of the account.
-async fn forget_me(overseer: &Overseer) {
-    *overseer.me_cache().lock().await = None;
+/// Reads the profile again after a change of the account and publishes it
+/// ([`Account::profile_watch`]). The change succeeded, so a failed read is no error: the
+/// profile is marked out of date, and the next [`Account::me`] fetches it.
+pub(super) async fn changed(overseer: &Overseer) {
+    let shared = overseer.account_state();
+    let mut stale = shared.stale.lock().await;
+    let me = match overseer.user_api() {
+        Ok(api) => api.me().await.ok(),
+        Err(_) => None,
+    };
+    match me {
+        Some(me) => {
+            shared.me.send_replace(Some(Arc::new(me)));
+            *stale = false;
+        }
+        None => *stale = true,
+    }
 }
 
 /// How many leading characters of a token the API token list ([`Account::auth_tokens`])
@@ -450,7 +548,7 @@ fn exemption(tokens: &[AuthToken], session: &Token, now: u64) -> Option<u64> {
 }
 
 /// Now, in milliseconds since the Unix epoch.
-fn epoch_millis() -> u64 {
+pub(crate) fn epoch_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

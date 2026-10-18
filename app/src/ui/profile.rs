@@ -91,29 +91,29 @@ pub fn Profile() -> impl IntoView {
         .into_any();
     };
     let overseer = session.overseer;
-    let usage = UsageUi::expect();
+    // The session's profile, as it publishes it: after every read, refresh and change of the
+    // account. A failed first read shows its error.
     let me = RwSignal::new(None::<Result<Arc<Profile>, String>>);
-    let reload = {
-        let overseer = overseer.clone();
-        move |fresh: bool| {
-            let overseer = overseer.clone();
-            spawn_scoped(async move {
-                let account = overseer.account();
-                let result = if fresh {
-                    account.refresh().await
-                } else {
-                    account.me().await
-                };
-                if let Ok(profile) = &result {
-                    usage.loaded(profile);
+    {
+        let account = overseer.account();
+        let mut profile = account.profile_watch();
+        spawn_scoped(async move {
+            loop {
+                let latest = profile.borrow_and_update().clone();
+                if let Some(latest) = latest {
+                    me.set(Some(Ok(latest)));
                 }
-                me.set(Some(result.map_err(|error| session::describe(&error))));
-            });
-        }
-    };
-    reload(false);
-    let reload = StoredValue::new_local(reload);
-    let refresh = Callback::new(move |()| reload.with_value(|reload| reload(true)));
+                if profile.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+        spawn_scoped(async move {
+            if let Err(error) = account.me().await {
+                me.set(Some(Err(session::describe(&error))));
+            }
+        });
+    }
     // Password changes through the API, where the server has password accounts (screeps.com
     // changes them on its website).
     let password_accounts = overseer.world().supports(Subsystem::PasswordAccounts);
@@ -122,9 +122,9 @@ pub fn Profile() -> impl IntoView {
             <Summary overseer=overseer.clone() me />
             <OwnRooms overseer=overseer.clone() />
             <div class="grid grid-cols-[repeat(auto-fit,minmax(17rem,1fr))] items-start gap-4">
-                <NotifyPrefs overseer=overseer.clone() me reload=refresh />
-                <Email overseer=overseer.clone() me reload=refresh />
-                <CpuShards overseer=overseer.clone() me reload=refresh />
+                <NotifyPrefs overseer=overseer.clone() me />
+                <Email overseer=overseer.clone() me />
+                <CpuShards overseer=overseer.clone() me />
                 {password_accounts.then(|| view! { <Password overseer me /> })}
             </div>
         </div>
@@ -295,7 +295,6 @@ const fn world_status_text(status: UserWorldStatus) -> &'static str {
 fn NotifyPrefs(
     overseer: Overseer,
     me: RwSignal<Option<Result<Arc<Profile>, String>>>,
-    reload: Callback<()>,
 ) -> impl IntoView {
     let enabled = RwSignal::new(true);
     let messages = RwSignal::new(true);
@@ -338,10 +337,7 @@ fn NotifyPrefs(
             let result = overseer.account().set_notify_prefs(prefs).await;
             busy.set(false);
             match result {
-                Ok(()) => {
-                    saved.set(Some("Notification preferences saved.".to_owned()));
-                    reload.run(());
-                }
+                Ok(()) => saved.set(Some("Notification preferences saved.".to_owned())),
                 Err(failure) => error.set(Some(session::describe(&failure))),
             }
         });
@@ -404,11 +400,7 @@ fn NotifyPrefs(
 
 /// The account e-mail.
 #[component]
-fn Email(
-    overseer: Overseer,
-    me: RwSignal<Option<Result<Arc<Profile>, String>>>,
-    reload: Callback<()>,
-) -> impl IntoView {
+fn Email(overseer: Overseer, me: RwSignal<Option<Result<Arc<Profile>, String>>>) -> impl IntoView {
     let email = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -446,10 +438,7 @@ fn Email(
             let result = overseer.account().set_email(&address).await;
             busy.set(false);
             match result {
-                Ok(()) => {
-                    saved.set(Some("E-mail address saved.".to_owned()));
-                    reload.run(());
-                }
+                Ok(()) => saved.set(Some("E-mail address saved.".to_owned())),
                 Err(failure) => error.set(Some(session::error_message(&failure))),
             }
         });

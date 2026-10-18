@@ -372,7 +372,7 @@ async fn a_server_wide_refusal_holds_the_budget_a_minute_and_lifted_limits_uncap
     // Lifted: no budget at all, every room at once.
     let until = SystemTime::now() + Duration::from_hours(1);
     let until = u64::try_from(until.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
-    world.set_rate_limit_exempt_until(Some(until));
+    overseer.rate_limits().set_exempt_until(Some(until));
     assert!(client.budget_ready_at(Priority::Background, 1000).is_none());
     let wanted = candidates(&world).len();
     drive(&mut world, &mut socket, |_, _| {

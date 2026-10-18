@@ -8,19 +8,17 @@
 //! (screepsmod-auth). Only the token's first 8 characters leave the app. It applies to API
 //! tokens only: password sign-ins hold session tokens, which match no API token.
 //!
-//! A lift lasts about two hours: the token's entry of `GET /api/user/auth-token` says until
-//! when (`noRatelimitUntil`, [`overseer::Account::rate_limit_exemption`]). The user may lift
-//! the limits on the website while the app is open, so [`CheckSchedule`] checks again when
-//! the app gets the user's attention back and, while loading waits on the limits, every
-//! minute. While lifted the app says so and how long is left, and [`EXEMPT_WARNING_MS`]
-//! before the end offers to lift them again. While not lifted, an endpoint running low
-//! ([`is_low`]) brings a prompt to lift them, at most once per endpoint and window
-//! ([`Warnings`]).
+//! A lift lasts about two hours. The session checks until when
+//! ([`overseer::RateLimits::follow`], `noRatelimitUntil`): the app follows it in the main
+//! window, tells it when the user's attention comes back, and gives it the world's loading
+//! state. While lifted the app says so and how long is left, and [`EXEMPT_WARNING_MS`] before
+//! the end offers to lift them again. While not lifted, an endpoint running low ([`is_low`])
+//! brings a prompt to lift them, at most once per endpoint and window ([`Warnings`]).
 
 use std::collections::HashSet;
 
 use overseer::core::api::RateLimit;
-use overseer::map::{STATS_FAR_SHARE, WorldProgress};
+use overseer::map::STATS_FAR_SHARE;
 
 /// The host of a lift page `url` for the texts naming it (`screeps.com`); `the website` when
 /// it has none.
@@ -74,129 +72,6 @@ pub const fn actions(lifts: bool, api_token: Option<bool>, paused: bool, lifted:
 
 /// How long before the end of a lift the app offers to lift the limits again (10 minutes).
 pub const EXEMPT_WARNING_MS: u64 = 10 * 60_000;
-
-/// How often the lift is checked again while it lasts (it may be extended elsewhere).
-pub const EXEMPT_RECHECK_MS: u64 = 15 * 60_000;
-
-/// Shortest time between two checks of the lift caused by HTTP 429 replies.
-pub const RATE_LIMITED_DEBOUNCE_MS: u64 = 30_000;
-
-/// Shortest time from the latest check to one caused by the app getting the user's attention
-/// back (window focus, page visible again).
-pub const ATTENTION_THROTTLE_MS: u64 = 15_000;
-
-/// How often the lift is checked while not lifted and loading waits on the limits
-/// ([`held_back`]).
-pub const HELD_BACK_RECHECK_MS: u64 = 60_000;
-
-/// Whether the world's background loading waits on the request budget: the world is not
-/// complete, portal destinations are pending, or owners are paused by the rate limit. `None`
-/// (no world open) waits on nothing.
-pub const fn held_back(progress: Option<&WorldProgress>) -> bool {
-    match progress {
-        Some(progress) => {
-            !progress.is_complete()
-                || progress.portals_pending > 0
-                || progress.stats_paused_until.is_some()
-        }
-        None => false,
-    }
-}
-
-/// When to check whether the token's limits are lifted (one `GET /api/user/auth-token`), for
-/// one session; one check at a time. A check is due:
-///
-/// - at once: when the session starts and when asked ([`Self::request`]: after a reset,
-///   `Check again`);
-/// - after new HTTP 429 replies, at most [`RATE_LIMITED_DEBOUNCE_MS`] after the latest check;
-/// - after the app got the user's attention back ([`Self::attention`]: window focus, page
-///   visible again; the user may come back from lifting them on the website), at most
-///   [`ATTENTION_THROTTLE_MS`] after the latest check;
-/// - while lifted, every [`EXEMPT_RECHECK_MS`] and when the lift ends;
-/// - while not lifted and loading waits on the limits ([`held_back`]), every
-///   [`HELD_BACK_RECHECK_MS`]. An idle app sends nothing.
-///
-/// Times are milliseconds since the Unix epoch.
-#[derive(Debug, Default)]
-pub struct CheckSchedule {
-    /// A check is in flight.
-    in_flight: bool,
-    /// Asked for since the latest check (at once, after HTTP 429 replies, after the user's
-    /// attention came back): the shortest time from the latest check the asks allow.
-    wanted: Option<u64>,
-    /// When the latest check started.
-    last_check: Option<u64>,
-    /// While lifted: when to check again.
-    next_check: Option<u64>,
-    /// The client's count of HTTP 429 replies already seen.
-    rate_limited: u64,
-}
-
-impl CheckSchedule {
-    /// A session whose client counted `rate_limited` HTTP 429 replies so far: a check is due
-    /// at once.
-    pub fn new(rate_limited: u64) -> Self {
-        Self {
-            wanted: Some(0),
-            rate_limited,
-            ..Self::default()
-        }
-    }
-
-    /// Asks for a check at least `throttle` after the latest one.
-    fn want(&mut self, throttle: u64) {
-        self.wanted = Some(self.wanted.map_or(throttle, |wanted| wanted.min(throttle)));
-    }
-
-    /// Checks at once (after a reset, `Check again`).
-    pub fn request(&mut self) {
-        self.want(0);
-    }
-
-    /// The app got the user's attention back (window focus, page visible again).
-    pub fn attention(&mut self) {
-        self.want(ATTENTION_THROTTLE_MS);
-    }
-
-    /// Whether a check has completed (none in flight since one started).
-    pub const fn settled(&self) -> bool {
-        self.last_check.is_some() && !self.in_flight
-    }
-
-    /// Whether a check is due at `now`, the client having counted `rate_limited` HTTP 429
-    /// replies so far, the token's limits `lifted` (as last checked) or not, and loading
-    /// `held_back` by the limits or not. A due check counts as started.
-    pub fn due(&mut self, now: u64, rate_limited: u64, lifted: bool, held_back: bool) -> bool {
-        if rate_limited > self.rate_limited {
-            self.rate_limited = rate_limited;
-            self.want(RATE_LIMITED_DEBOUNCE_MS);
-        }
-        if self.in_flight {
-            return false;
-        }
-        let since = self
-            .last_check
-            .map_or(u64::MAX, |last| now.saturating_sub(last));
-        let due = self.wanted.is_some_and(|wanted| since >= wanted)
-            || self.next_check.is_some_and(|at| now >= at)
-            || (!lifted && held_back && since >= HELD_BACK_RECHECK_MS);
-        if due {
-            *self = Self {
-                in_flight: true,
-                last_check: Some(now),
-                rate_limited: self.rate_limited,
-                ..Self::default()
-            };
-        }
-        due
-    }
-
-    /// The check finished at `now`: lifted until `until`, or not lifted or failed (`None`).
-    pub fn finished(&mut self, now: u64, until: Option<u64>) {
-        self.in_flight = false;
-        self.next_check = until.map(|until| until.min(now + EXEMPT_RECHECK_MS));
-    }
-}
 
 /// Percentage of an endpoint's window under which it runs low (map stats aside, see
 /// [`is_low`]).
@@ -356,11 +231,10 @@ pub fn ending_label(until: u64, now: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use overseer::core::api::RateLimit;
-    use overseer::map::WorldProgress;
 
     use super::{
-        Actions, CheckSchedule, Warning, Warnings, actions, ending_label, follows_lift, held_back,
-        is_low, lift_applies, lifted_label, page_host, time_until, waiting_label,
+        Actions, Warning, Warnings, actions, ending_label, follows_lift, is_low, lift_applies,
+        lifted_label, page_host, time_until, waiting_label,
     };
 
     #[test]
@@ -517,153 +391,6 @@ mod tests {
                 assert!(!follows_lift(lifts, api_token, popout));
             }
         }
-    }
-
-    #[test]
-    fn loading_is_held_back_while_anything_waits_on_the_budget() {
-        assert!(!held_back(None));
-        let complete = WorldProgress {
-            terrain_known: 4,
-            terrain_wanted: 4,
-            stats_known: 4,
-            stats_wanted: 4,
-            portals_scanned: 4,
-            portals_wanted: 4,
-            ..WorldProgress::default()
-        };
-        assert!(!held_back(Some(&complete)));
-        assert!(!held_back(Some(&WorldProgress::default())));
-        for waiting in [
-            WorldProgress {
-                terrain_known: 3,
-                ..complete
-            },
-            WorldProgress {
-                stats_known: 3,
-                ..complete
-            },
-            WorldProgress {
-                portals_scanned: 3,
-                ..complete
-            },
-            WorldProgress {
-                portals_pending: 1,
-                ..complete
-            },
-            WorldProgress {
-                stats_paused_until: Some(1),
-                ..complete
-            },
-        ] {
-            assert!(held_back(Some(&waiting)), "{waiting:?}");
-        }
-    }
-
-    /// The checks `schedule` starts each second from `from` to `to` (exclusive), each
-    /// finishing at once as not lifted, with loading `held_back` or not.
-    fn checks(schedule: &mut CheckSchedule, from: u64, to: u64, held_back: bool) -> Vec<u64> {
-        let mut started = Vec::new();
-        for now in (from..to).step_by(1000) {
-            if schedule.due(now, 0, false, held_back) {
-                started.push(now);
-                schedule.finished(now, None);
-            }
-        }
-        started
-    }
-
-    #[test]
-    fn the_lift_is_checked_at_start_then_every_minute_only_while_loading_waits() {
-        let start = 1_700_000_000_000;
-        let mut schedule = CheckSchedule::new(0);
-        assert!(!schedule.settled());
-        // Held back: at once, then every 60 s.
-        assert_eq!(
-            checks(&mut schedule, start, start + 150_000, true),
-            [start, start + 60_000, start + 120_000]
-        );
-        assert!(schedule.settled());
-        // Idle: nothing, however long.
-        let idle = checks(&mut schedule, start + 150_000, start + 3_600_000, false);
-        assert_eq!(idle, Vec::<u64>::new());
-        // Waiting again: at once (the latest check is long past), then every 60 s.
-        assert_eq!(
-            checks(&mut schedule, start + 3_600_000, start + 3_700_000, true),
-            [start + 3_600_000, start + 3_660_000]
-        );
-        // Lifted: no minute checks, only when the lift says (now and then, and at its end).
-        let mut schedule = CheckSchedule::new(0);
-        assert!(schedule.due(start, 0, false, true));
-        let until = start + 7_200_000;
-        schedule.finished(start, Some(until));
-        for now in (start..start + 900_000).step_by(1000) {
-            assert!(!schedule.due(now, 0, true, true), "{now}");
-        }
-        assert!(schedule.due(start + 900_000, 0, true, true));
-        schedule.finished(start + 900_000, Some(start + 960_000));
-        assert!(!schedule.due(start + 959_000, 0, true, true));
-        assert!(schedule.due(start + 960_000, 0, true, true));
-    }
-
-    #[test]
-    fn attention_checks_at_most_every_15_s() {
-        let start = 1_700_000_000_000;
-        let mut schedule = CheckSchedule::new(0);
-        assert!(schedule.due(start, 0, false, false));
-        schedule.finished(start + 300, None);
-        // Focus 5 s after the check: waits until 15 s after it.
-        schedule.attention();
-        assert_eq!(
-            checks(&mut schedule, start + 5_000, start + 30_000, false),
-            [start + 15_000]
-        );
-        // Once per attention: more focus within 15 s makes one check.
-        schedule.attention();
-        schedule.attention();
-        assert_eq!(
-            checks(&mut schedule, start + 30_000, start + 60_000, false),
-            [start + 30_000]
-        );
-        // Attention while a check is in flight: one more after the throttle.
-        schedule.request();
-        assert!(schedule.due(start + 100_000, 0, false, false));
-        schedule.attention();
-        assert!(!schedule.due(start + 101_000, 0, false, false));
-        schedule.finished(start + 101_000, None);
-        assert_eq!(
-            checks(&mut schedule, start + 101_000, start + 130_000, false),
-            [start + 115_000]
-        );
-        // While lifted too (the lift may have been extended).
-        schedule.finished(start + 130_000, Some(start + 7_200_000));
-        schedule.attention();
-        assert!(schedule.due(start + 145_000, 0, true, false));
-    }
-
-    #[test]
-    fn asks_and_refusals_check_once_at_a_time() {
-        let start = 1_700_000_000_000;
-        let mut schedule = CheckSchedule::new(3);
-        assert!(schedule.due(start, 3, false, false));
-        // One in flight: nothing else starts, whatever is asked.
-        schedule.request();
-        schedule.attention();
-        assert!(!schedule.due(start + 20_000, 4, false, true));
-        assert!(!schedule.due(start + 90_000, 5, false, true));
-        assert!(!schedule.settled());
-        // Asked at once: due as soon as the check in flight finished.
-        schedule.finished(start + 90_000, None);
-        assert!(schedule.settled());
-        assert!(schedule.due(start + 90_000, 5, false, false));
-        schedule.finished(start + 90_500, None);
-        // A new HTTP 429 reply: 30 s after the latest check; counts already seen do nothing.
-        assert!(!schedule.due(start + 100_000, 5, false, false));
-        assert!(!schedule.due(start + 100_000, 6, false, false));
-        assert!(!schedule.due(start + 119_000, 6, false, false));
-        assert!(schedule.due(start + 120_000, 6, false, false));
-        schedule.finished(start + 120_000, None);
-        let quiet = checks(&mut schedule, start + 121_000, start + 600_000, false);
-        assert_eq!(quiet, Vec::<u64>::new());
     }
 
     #[test]

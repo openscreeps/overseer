@@ -2,31 +2,27 @@
 //! ([`UsageUi`]), the status bar's usage button ([`StatusUsage`]) and the Usage panel
 //! ([`UsagePanel`]).
 //!
-//! [`UsageUi::follow`] subscribes once to the usage of each live session that is signed in
-//! and forgets the runs when the session changes. It also loads the account
-//! ([`overseer::Account::me`]: the CPU limit and its allocation to the shards) and, where the
-//! server allocates CPU to each shard, the CPU cap and the average tick of each shard
-//! ([`overseer::Overseer::shards_info`]). The library caches both for the session.
+//! The session keeps the usage for every consumer ([`overseer::Account::usage`]): the recent
+//! runs, the account's CPU and the CPU of each shard. [`UsageUi::follow`] shows the usage of
+//! the live session that is signed in. The server does not tell the shard of a run, so the
+//! CPU limit of a run is the one of the shard on the map.
 
 mod panel;
 
-use std::sync::Arc;
-
-use futures_util::future::{AbortHandle, abortable, join3};
+use futures_util::future::{AbortHandle, abortable};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::model::account::Profile;
-use overseer::model::platform::Subsystem;
-use overseer::model::socket::UserCpu;
-use overseer::model::world::ShardInfo;
-use overseer::{Overseer, Watch};
+use overseer::Overseer;
+use overseer::account::Usage;
+use overseer::account::usage::{RunCpu, Runs};
+use overseer::model::account::cpu::ShardCpu;
+use tokio::sync::watch;
 
 use crate::route::Shard;
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
-use crate::ui::rate_limits::epoch_millis;
 use crate::ui::world::MapState;
-use crate::usage::{self, Level, Run, RunCpu, Runs, ShardCpu};
+use crate::usage::{self, Level};
 
 pub use panel::UsagePanel;
 
@@ -44,36 +40,26 @@ pub enum Anchor {
 pub struct UsageUi {
     /// The Usage panel shows, and where.
     pub open: RwSignal<Option<Anchor>>,
-    /// The recent runs of the live session; empty without one.
-    pub runs: RwSignal<Runs>,
-    /// The live session follows its usage: it is signed in.
-    pub live: RwSignal<bool>,
-    /// The account of the live session, as last loaded.
-    pub profile: RwSignal<Option<Arc<Profile>>>,
-    /// The server of the live session allocates CPU to each shard
-    /// ([`Subsystem::CpuShards`]).
-    pub per_shard: RwSignal<bool>,
-    /// The shards' CPU caps and average ticks where the server allocates CPU to each shard;
-    /// `None` while unknown.
-    pub info: RwSignal<Option<Arc<[ShardInfo]>>>,
+    /// The usage of the live session as the session keeps it; empty without one.
+    pub usage: RwSignal<Usage>,
+    /// The recent runs of [`Self::usage`].
+    pub runs: Memo<Runs>,
     /// Now, in milliseconds since the Unix epoch, updated every second.
     pub now: Signal<u64>,
     /// The session followed ([`crate::state::Session::epoch`]).
     epoch: StoredValue<Option<u64>>,
-    /// Stops the tasks of the session followed.
+    /// Stops copying the usage of the session followed.
     task: StoredValue<Option<AbortHandle>>,
 }
 
 impl UsageUi {
     /// No usage yet, with the clock `now` (milliseconds since the Unix epoch).
     pub fn new(now: Signal<u64>) -> Self {
+        let usage = RwSignal::new(Usage::default());
         Self {
             open: RwSignal::new(None),
-            runs: RwSignal::new(Runs::default()),
-            live: RwSignal::new(false),
-            profile: RwSignal::new(None),
-            per_shard: RwSignal::new(false),
-            info: RwSignal::new(None),
+            usage,
+            runs: Memo::new(move |_| usage.with(|usage| usage.runs.clone())),
             now,
             epoch: StoredValue::new(None),
             task: StoredValue::new(None),
@@ -107,25 +93,13 @@ impl UsageUi {
         if let Some(task) = self.task.try_update_value(Option::take).flatten() {
             task.abort();
         }
-        self.runs.set(Runs::default());
-        self.profile.set(None);
-        self.info.set(None);
-        let watch = session
-            .as_ref()
-            .and_then(|(_, overseer)| overseer.account().cpu().ok());
-        self.live.set(watch.is_some());
-        let (Some((_, overseer)), Some(watch)) = (session, watch) else {
-            self.per_shard.set(false);
+        self.usage.set(Usage::default());
+        let Some(receiver) = session.and_then(|(_, overseer)| overseer.account().usage().ok())
+        else {
             self.open.set(None);
             return;
         };
-        let per_shard = overseer.world().supports(Subsystem::CpuShards);
-        self.per_shard.set(per_shard);
-        let (future, handle) = abortable(join3(
-            self.watch(watch),
-            self.load_profile(overseer.clone()),
-            self.load_info(overseer, per_shard),
-        ));
+        let (future, handle) = abortable(self.mirror(receiver));
         self.task.set_value(Some(handle));
         spawn_local(async move {
             // `Err` only says it was aborted.
@@ -133,82 +107,38 @@ impl UsageUi {
         });
     }
 
-    /// Records every run of `watch` until the session ends.
-    async fn watch(self, mut watch: Watch<UserCpu>) {
-        let mut first = true;
-        if let Some(event) = watch.latest() {
-            self.record(&event, first);
-            first = false;
-        }
-        while let Ok(event) = watch.changed().await {
-            self.record(&event, first);
-            first = false;
+    /// Copies every value of `receiver` into [`Self::usage`] until the session ends.
+    async fn mirror(self, mut receiver: watch::Receiver<Usage>) {
+        loop {
+            let usage = receiver.borrow_and_update().clone();
+            self.usage.set(usage);
+            if receiver.changed().await.is_err() {
+                break;
+            }
         }
     }
 
-    /// Records the run of `event`, the `first` one after subscribing or not.
-    fn record(self, event: &UserCpu, first: bool) {
-        if let Some(run) = Run::of(event, epoch_millis(), first) {
-            self.runs.update(|runs| runs.push(run));
-        }
+    /// The CPU of each shard where the server allocates CPU to each shard; empty elsewhere
+    /// and while the account is unknown (reactive).
+    pub fn shards(self) -> Vec<ShardCpu> {
+        self.usage.with(|usage| usage.shards.clone())
     }
 
-    /// Loads the account. A failure leaves the CPU limit unknown: the profile page shows the
-    /// error.
-    async fn load_profile(self, overseer: Overseer) {
-        if let Ok(me) = overseer.account().me().await {
-            self.profile.set(Some(me));
-        }
+    /// Whether the caps and average ticks of the shards are known (reactive).
+    pub fn shards_known(self) -> bool {
+        self.usage.with(|usage| usage.shards_known)
     }
 
-    /// Loads the CPU caps and average ticks of the shards where the server allocates CPU to
-    /// each shard (`per_shard`). A failure leaves them unknown.
-    async fn load_info(self, overseer: Overseer, per_shard: bool) {
-        if !per_shard {
-            return;
-        }
-        if let Ok(shards) = overseer.shards_info().await {
-            self.info.set(Some(shards));
-        }
-    }
-
-    /// The profile page loaded the account `me` again (after a change).
-    pub fn loaded(self, me: &Arc<Profile>) {
-        self.profile.set(Some(Arc::clone(me)));
-    }
-
-    /// The CPU of each shard where the server allocates CPU to each shard, with the shard on
-    /// the map marked; empty elsewhere and while the account is unknown (reactive).
-    pub fn shards(self, map: MapState) -> Vec<ShardCpu> {
-        if !self.per_shard.get() {
-            return Vec::new();
-        }
-        let Some(profile) = self.profile.get() else {
-            return Vec::new();
-        };
-        let shown = map
-            .shard
-            .with(|shard| shard.as_ref().and_then(Shard::name).map(str::to_owned));
-        map.shards.with(|shards| {
-            self.info.with(|info| {
-                let info = info.as_deref().unwrap_or_default();
-                usage::shard_cpu(shards, &profile.cpu_shards, info, shown.as_deref())
-            })
-        })
-    }
-
-    /// The CPU limit of a run ([`usage::cpu_limit`]; reactive).
+    /// The CPU limit of a run: the one of the shard on the map (reactive).
     pub fn cpu_limit(self, map: MapState) -> Option<f64> {
-        let account = self
-            .profile
-            .with(|profile| profile.as_ref().and_then(|profile| profile.cpu));
-        usage::cpu_limit(account, &self.shards(map))
+        let shown = shown_shard(map);
+        self.usage.with(|usage| usage.cpu_limit(shown.as_deref()))
     }
 
-    /// Whether no run arrived lately ([`Runs::is_idle`]; reactive, follows the clock).
+    /// Whether no run arrived lately ([`Usage::is_idle`]; reactive, follows the clock).
     pub fn idle(self) -> bool {
         let now = self.now.get();
-        self.runs.with(|runs| runs.is_idle(now))
+        self.usage.with(|usage| usage.is_idle(now))
     }
 
     /// Shows the Usage panel at `anchor`, or hides it while it shows.
@@ -216,6 +146,12 @@ impl UsageUi {
         self.open
             .update(|open| *open = if open.is_some() { None } else { Some(anchor) });
     }
+}
+
+/// The name of the shard on the map; `None` on single-world servers (reactive).
+pub fn shown_shard(map: MapState) -> Option<String> {
+    map.shard
+        .with(|shard| shard.as_ref().and_then(Shard::name).map(str::to_owned))
 }
 
 /// The text colour of a usage at `level`, `idle` or not: around the parts of a usage (a
@@ -240,13 +176,13 @@ const fn fill(level: Level, idle: bool) -> &'static str {
     }
 }
 
-/// The usage slot of the status bar: it takes the space the items before it leave (a size
-/// container) and puts the button at its right end.
-const SLOT: &str = "@container flex flex-1 justify-end min-w-0 h-statusbar";
-/// The usage button: it shows as much as its slot has room for, and nothing in a slot
-/// narrower than 4rem.
+/// The usage slot of the status bar (an item of its [`crate::ui::style::FIT_ROW`]): at least
+/// 4rem, room for the CPU alone, else the bar drops it whole; with more space it grows into
+/// what the items of the bar leave (a size container) and puts the button at its right end.
+const SLOT: &str = "@container flex grow basis-16 justify-end min-w-0";
+/// The usage button: it shows as much as its slot has room for.
 const BUTTON: &str = "inline-flex flex-none items-center gap-3 @max-[16rem]:gap-2 h-full px-1.5 \
-    rounded-sm cursor-pointer hover:bg-hover aria-expanded:bg-hover @max-[4rem]:hidden";
+    rounded-sm cursor-pointer hover:bg-hover aria-expanded:bg-hover";
 /// The CPU part of the button.
 const CPU_PART: &str = "inline-flex items-center gap-1.5";
 /// The Memory part of the button: from a 6.5rem slot on.

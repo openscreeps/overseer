@@ -11,27 +11,31 @@
 //! paused by the limit.
 //!
 //! On API-token sessions of servers that lift rate limits (main window only,
-//! [`rate_limits::follows_lift`]), [`RateLimitsUi::follow`] checks whether the token's limits
-//! are lifted ([`overseer::Account::rate_limit_exemption`]) as [`CheckSchedule`] says: when
-//! the session starts, after a reset, after `Check again`, after HTTP 429 replies, when the
-//! window gets focus or the page becomes visible again (the user may have lifted them on the
-//! website), every minute while loading waits on the limits, and while lifted now and then and
-//! when the lift ends. The world map ignores its budget while lifted
-//! ([`crate::feed::Feed::set_rate_limit_exempt_until`]).
+//! [`rate_limits::follows_lift`]), [`RateLimitsUi::follow`] makes the session check whether
+//! the token's limits are lifted ([`overseer::RateLimits::follow`]): it tells the session
+//! when the window gets focus or the page becomes visible again (the user may have lifted
+//! them on the website), after a reset and after `Check again`, and whether the world's
+//! loading waits on the limits. It shows the session's exemption
+//! ([`overseer::RateLimits::exemption`]), which the world map and the request budget follow
+//! on their own.
 
 use std::time::Duration;
 
+use futures_util::future::{AbortHandle, abortable};
 use leptos::html::{Button, Section};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::Account;
+use overseer::map::WorldProgress;
 use overseer::model::platform::Subsystem;
 use overseer::net::api::{LiftPage, RateLimitLift};
+use overseer::rate_limits::{Exemption, Following};
+use overseer::{Overseer, RateLimits};
+use tokio::sync::watch;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{FocusEvent, HtmlElement, KeyboardEvent, Node};
 
-use crate::rate_limits::{self, Actions, CheckSchedule, Warning, Warnings};
+use crate::rate_limits::{self, Actions, Warning, Warnings};
 use crate::session;
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
@@ -59,8 +63,12 @@ const LIFT_PANEL: &str = concatcp!(
 struct Monitor {
     /// The session followed ([`crate::state::Session::epoch`]).
     epoch: Option<u64>,
-    /// When to check the lift.
-    schedule: CheckSchedule,
+    /// The session's exemption, while followed.
+    limits: Option<RateLimits>,
+    /// Keeps the session checking its exemption.
+    following: Option<Following>,
+    /// Stops copying the session's exemption into [`RateLimitsUi::exemption`].
+    mirror: Option<AbortHandle>,
     /// The lift (its end) whose ending toast is shown, and the toast.
     toasted: Option<(u64, u64)>,
     /// The prompts shown in this session.
@@ -75,9 +83,10 @@ pub struct RateLimitsUi {
     pub open: RwSignal<bool>,
     /// Now, in milliseconds since the Unix epoch, updated every second.
     pub now: RwSignal<u64>,
-    /// Until when the live session's token is exempt from rate limits (milliseconds since the
-    /// Unix epoch), as last checked; see [`Self::lifted_until`].
-    pub exempt_until: RwSignal<Option<u64>>,
+    /// The live session's exemption from rate limits as the session knows it
+    /// ([`overseer::RateLimits::exemption`]), while the window follows it; see
+    /// [`Self::lifted_until`].
+    pub exemption: RwSignal<Exemption>,
     /// The prompt to lift the limits, while shown.
     pub warning: RwSignal<Option<Warning>>,
     /// The shell opened the lift page in the system browser: recheck once the window
@@ -98,7 +107,7 @@ impl RateLimitsUi {
         Self {
             open: RwSignal::new(false),
             now,
-            exempt_until: RwSignal::new(None),
+            exemption: RwSignal::new(Exemption::default()),
             warning: RwSignal::new(None),
             awaiting_focus: StoredValue::new(false),
             page: StoredValue::new(None),
@@ -114,15 +123,16 @@ impl RateLimitsUi {
     /// Until when the token's limits are lifted, while they are (reactive; follows the clock
     /// only while a lift is known).
     pub fn lifted_until(self) -> Option<u64> {
-        self.exempt_until
+        self.exemption
             .get()
+            .until
             .filter(|until| *until > self.now.get())
     }
 
     /// Rechecks after a reset: on the lift page's success message (browser) or when the window
-    /// regains focus after the shell opened the page; and when the window gets focus or the
-    /// page becomes visible again ([`CheckSchedule::attention`]). For as long as the page
-    /// lives.
+    /// regains focus after the shell opened the page; and tells the session when the window
+    /// gets focus or the page becomes visible again ([`RateLimits::attention`]). For as long
+    /// as the page lives.
     pub fn listen(self, map: MapState) {
         let message = window_event_listener(leptos::ev::message, move |event| {
             let data = event.data().as_string();
@@ -155,34 +165,32 @@ impl RateLimitsUi {
     }
 
     /// The limits may have been lifted: resumes the world's overviews paused by the rate
-    /// limit and checks the lift.
+    /// limit and asks the session to check the lift at once.
     fn lifted(self, map: MapState) {
         recheck(map);
-        self.monitor
-            .update_value(|monitor| monitor.schedule.request());
+        self.monitor.with_value(|monitor| {
+            if let Some(limits) = &monitor.limits {
+                limits.request_check();
+            }
+        });
     }
 
-    /// The app got the user's attention back: check the lift (throttled).
+    /// The app got the user's attention back: the session checks the lift (throttled).
     fn attention(self) {
-        self.monitor
-            .update_value(|monitor| monitor.schedule.attention());
+        self.monitor.with_value(|monitor| {
+            if let Some(limits) = &monitor.limits {
+                limits.attention();
+            }
+        });
     }
 
     /// Follows the lift of the live session's token on API-token sessions of servers that
-    /// lift rate limits, in the main window ([`rate_limits::follows_lift`]): checks it (see
-    /// the module docs), tells the world map, toasts before it ends and prompts to lift the
-    /// limits when an endpoint runs low. As long as the page lives.
+    /// lift rate limits, in the main window ([`rate_limits::follows_lift`]): keeps the
+    /// session checking it (see the module docs), toasts before it ends and prompts to lift
+    /// the limits when an endpoint runs low. As long as the page lives.
     pub fn follow(self, state: AppState, map: MapState) {
         let toasts = Toasts::expect();
         let lift_again = Callback::new(move |()| start_reset(state, self, map));
-        Effect::new(move |_| {
-            let until = self.exempt_until.get();
-            map.feed.with(|feed| {
-                if let Some(feed) = feed {
-                    feed.set_rate_limit_exempt_until(until);
-                }
-            });
-        });
         let popout = state.is_popout();
         Effect::new(move |_| {
             let now = self.now.get();
@@ -197,9 +205,11 @@ impl RateLimitsUi {
                 .filter(|_| rate_limits::follows_lift(lifts, api_token, popout));
             match session {
                 Some((epoch, overseer)) => {
-                    let held_back = map
-                        .progress
-                        .with_untracked(|progress| rate_limits::held_back(progress.as_ref()));
+                    let held_back = map.progress.with_untracked(|progress| {
+                        progress
+                            .as_ref()
+                            .is_some_and(WorldProgress::waits_on_budget)
+                    });
                     self.tick(now, epoch, held_back, &overseer, toasts, lift_again);
                 }
                 None => self.stop(toasts),
@@ -211,13 +221,22 @@ impl RateLimitsUi {
     fn stop(self, toasts: Toasts) {
         let stale = self
             .monitor
-            .try_update_value(|monitor| std::mem::take(monitor).toasted)
+            .try_update_value(|monitor| {
+                let monitor = std::mem::take(monitor);
+                if let Some(mirror) = monitor.mirror {
+                    mirror.abort();
+                }
+                monitor.toasted
+            })
             .flatten();
         if let Some((_, toast)) = stale {
             toasts.dismiss(toast);
         }
-        if self.exempt_until.with_untracked(Option::is_some) {
-            self.exempt_until.set(None);
+        if self
+            .exemption
+            .with_untracked(|exemption| *exemption != Exemption::default())
+        {
+            self.exemption.set(Exemption::default());
         }
         if self.warning.with_untracked(Option::is_some) {
             self.warning.set(None);
@@ -235,52 +254,78 @@ impl RateLimitsUi {
         }
     }
 
+    /// Starts following session `epoch` of `overseer` unless it does already: the session
+    /// checks the lift, and [`Self::exemption`] copies what it knows.
+    fn start(self, epoch: u64, overseer: &Overseer) {
+        let fresh = self
+            .monitor
+            .with_value(|monitor| monitor.epoch != Some(epoch));
+        if !fresh {
+            return;
+        }
+        let limits = overseer.rate_limits();
+        // Fails only on a server that does not lift rate limits, which `follows_lift` excludes.
+        let following = limits.follow().ok();
+        let mirror = self.mirror(limits.exemption());
+        self.monitor.update_value(|monitor| {
+            if let Some(mirror) = monitor.mirror.take() {
+                mirror.abort();
+            }
+            *monitor = Monitor {
+                epoch: Some(epoch),
+                limits: Some(limits),
+                following,
+                mirror: Some(mirror),
+                toasted: monitor.toasted,
+                warnings: Warnings::default(),
+            };
+        });
+        self.warning.set(None);
+    }
+
+    /// Copies every value of `exemption` into [`Self::exemption`] until aborted.
+    fn mirror(self, mut exemption: watch::Receiver<Exemption>) -> AbortHandle {
+        let (future, handle) = abortable(async move {
+            loop {
+                let value = *exemption.borrow_and_update();
+                self.exemption.set(value);
+                if exemption.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+        spawn_local(async move {
+            // `Err` only says it was aborted.
+            let _ = future.await;
+        });
+        handle
+    }
+
     /// One second of following session `epoch` at `now`, with loading `held_back` by the
-    /// limits or not ([`rate_limits::held_back`]).
+    /// limits or not ([`WorldProgress::waits_on_budget`]).
     fn tick(
         self,
         now: u64,
         epoch: u64,
         held_back: bool,
-        overseer: &overseer::Overseer,
+        overseer: &Overseer,
         toasts: Toasts,
         lift_again: Callback<()>,
     ) {
-        let client = overseer.client();
-        let rate_limited = client.rate_limited_count();
-        let lifted = self
-            .exempt_until
-            .get_untracked()
-            .filter(|until| *until > now);
-        let mut fresh = false;
-        let due = self
-            .monitor
-            .try_update_value(|monitor| {
-                if monitor.epoch != Some(epoch) {
-                    *monitor = Monitor {
-                        epoch: Some(epoch),
-                        schedule: CheckSchedule::new(rate_limited),
-                        toasted: monitor.toasted,
-                        ..Monitor::default()
-                    };
-                    fresh = true;
-                }
-                monitor
-                    .schedule
-                    .due(now, rate_limited, !fresh && lifted.is_some(), held_back)
-            })
-            .unwrap_or(false);
-        if fresh {
-            self.exempt_until.set(None);
-            self.warning.set(None);
-        }
-        if due {
-            self.check(epoch, overseer.account());
-        }
-        let lifted = lifted.filter(|_| !fresh);
+        self.start(epoch, overseer);
+        self.monitor.with_value(|monitor| {
+            if let Some(following) = &monitor.following {
+                following.set_held_back(held_back);
+            }
+        });
+        let exemption = self.exemption.get_untracked();
+        let lifted = exemption.until_after(now);
         // The ending toast belongs to one lift: gone once it ended or another replaced it.
         self.dismiss_toast(toasts, lifted);
         if let Some(until) = lifted {
+            if self.warning.with_untracked(Option::is_some) {
+                self.warning.set(None);
+            }
             if let Some(text) = rate_limits::ending_label(until, now)
                 && self.monitor.with_value(|monitor| monitor.toasted.is_none())
             {
@@ -292,13 +337,10 @@ impl RateLimitsUi {
         }
         // Not lifted (as far as known once a check completed): prompt when an endpoint runs
         // low.
-        let ready = self
-            .monitor
-            .with_value(|monitor| monitor.schedule.settled());
-        if !ready || self.warning.with_untracked(Option::is_some) {
+        if !exemption.settled || self.warning.with_untracked(Option::is_some) {
             return;
         }
-        let limits = client.rate_limits();
+        let limits = overseer.client().rate_limits();
         let warning = self
             .monitor
             .try_update_value(|monitor| {
@@ -313,34 +355,6 @@ impl RateLimitsUi {
         if warning.is_some() {
             self.warning.set(warning);
         }
-    }
-
-    /// Checks the lift of session `epoch`'s token; a failure keeps what is known.
-    fn check(self, epoch: u64, account: Account) {
-        spawn_local(async move {
-            let result = account.rate_limit_exemption().await;
-            let now = epoch_millis();
-            let until = match &result {
-                Ok(until) => *until,
-                Err(_) => self.exempt_until.get_untracked(),
-            };
-            let live = self
-                .monitor
-                .try_update_value(|monitor| {
-                    if monitor.epoch != Some(epoch) {
-                        return false;
-                    }
-                    monitor.schedule.finished(now, until);
-                    true
-                })
-                .unwrap_or(false);
-            if let (true, Ok(until)) = (live, result) {
-                self.exempt_until.set(until);
-                if until.is_some() {
-                    self.warning.set(None);
-                }
-            }
-        });
     }
 
     /// `Not now` on the prompt for `endpoint`: no prompt for it again in this session.
@@ -510,8 +524,9 @@ pub fn StatusReset() -> impl IntoView {
 pub fn StatusLifted() -> impl IntoView {
     let ui = RateLimitsUi::expect();
     let label = Memo::new(move |_| {
-        ui.exempt_until
+        ui.exemption
             .get()
+            .until
             .and_then(|until| Some((until, rate_limits::lifted_label(until, ui.now.get())?)))
     });
     move || {

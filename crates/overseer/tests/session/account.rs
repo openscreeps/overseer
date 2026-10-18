@@ -117,6 +117,11 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
     let (overseer, _websocket) = connect(&mut server).await;
     // Connecting read the profile once (money 0): the first `me` with no request.
     let account = overseer.account();
+    let mut published = account.profile_watch();
+    assert_eq!(
+        published.borrow_and_update().as_ref().map(|me| me.money),
+        Some(0.0)
+    );
 
     let first = account.me().await.unwrap();
     assert_eq!(first.money, 0.0);
@@ -127,10 +132,18 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
     assert!(Arc::ptr_eq(&first, &again.unwrap()));
     assert!(Arc::ptr_eq(&first, &other.unwrap()));
     assert_eq!(sent(&server, "/api/auth/me").len(), 1);
+    // A cached read publishes nothing.
+    assert!(!published.has_changed().unwrap());
 
     let refreshed = account.refresh().await.unwrap();
     assert_eq!(refreshed.money, 1.0);
     assert!(Arc::ptr_eq(&refreshed, &account.me().await.unwrap()));
+    // The refresh is published to every receiver.
+    assert!(published.has_changed().unwrap());
+    assert!(Arc::ptr_eq(
+        &refreshed,
+        published.borrow_and_update().as_ref().unwrap()
+    ));
     assert_eq!(
         account.notify_prefs().await.unwrap(),
         UserNotifyPrefs {
@@ -140,7 +153,7 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
     );
     assert_eq!(sent(&server, "/api/auth/me").len(), 2);
 
-    // The account's own changes clear the cache.
+    // Each of the account's own changes reads the profile again and publishes it.
     let badge = UserBadgeInput {
         color1: "#ff0000".to_owned(),
         color2: "#00ff00".to_owned(),
@@ -150,7 +163,13 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         r#type: UserBadgeInputType::Integer(7),
     };
     account.set_badge(badge).await.unwrap();
+    assert!(published.has_changed().unwrap());
+    assert_eq!(
+        published.borrow_and_update().as_ref().map(|me| me.money),
+        Some(2.0)
+    );
     assert_eq!(account.me().await.unwrap().money, 2.0);
+    assert_eq!(sent(&server, "/api/auth/me").len(), 3);
     account
         .set_badge(UserBadgeInput {
             color1: "#000000".to_owned(),
@@ -179,8 +198,12 @@ async fn the_profile_is_cached_until_refreshed_or_changed() {
         .start_experimentation()
         .await
         .unwrap();
-    assert_eq!(account.me().await.unwrap().money, 3.0);
-    assert_eq!(sent(&server, "/api/auth/me").len(), 4);
+    assert_eq!(account.me().await.unwrap().money, 6.0);
+    assert_eq!(
+        published.borrow_and_update().as_ref().map(|me| me.money),
+        Some(6.0)
+    );
+    assert_eq!(sent(&server, "/api/auth/me").len(), 7);
     assert_eq!(
         sent(&server, "/api/user/badge"),
         [
@@ -297,6 +320,11 @@ async fn account_requests_have_the_documented_shape() {
         .unwrap();
     // screepsmod-auth changes the password once Overseer has signed in with the current one.
     account.set_password(Some("old"), "new").await.unwrap();
+    // A password change may end the session: the profile is only marked out of date, and the
+    // next `me` reads it.
+    let profiles = sent(&server, "/api/auth/me").len();
+    account.me().await.unwrap();
+    assert_eq!(sent(&server, "/api/auth/me").len(), profiles + 1);
     assert_eq!(
         sent(&server, "/api/user/email"),
         [request("POST", "", r#"{"email":"alice@example.com"}"#)]

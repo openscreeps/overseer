@@ -235,7 +235,9 @@ async fn an_exempt_token_ignores_the_budget_but_not_a_429() {
 
     // Lifted for two hours: the pause ends and the rest goes out at once, three at a time,
     // without a gap.
-    world.set_rate_limit_exempt_until(Some(epoch_millis() + 7_200_000));
+    overseer
+        .rate_limits()
+        .set_exempt_until(Some(epoch_millis() + 7_200_000));
     assert_eq!(paused(&mut world).await, None);
     // Two requests go through; the 429 holds every request until its reset.
     drive_until(&mut world, |world| {
@@ -270,7 +272,9 @@ async fn the_budget_applies_again_when_the_exemption_ends() {
     tokio::time::pause();
 
     // Exempt for 3 s: both requests go out at once despite the budget.
-    world.set_rate_limit_exempt_until(Some(epoch_millis() + 3_000));
+    overseer
+        .rate_limits()
+        .set_exempt_until(Some(epoch_millis() + 3_000));
     world.set_interest(&Interest {
         stats: Some(world.bounds()),
         ..Interest::default()
@@ -283,7 +287,9 @@ async fn the_budget_applies_again_when_the_exemption_ends() {
 
     // A past exemption changes nothing; once the exemption ended the budget applies again:
     // the exhausted window holds the far rooms when they go stale.
-    world.set_rate_limit_exempt_until(Some(epoch_millis() - 1));
+    overseer
+        .rate_limits()
+        .set_exempt_until(Some(epoch_millis() - 1));
     advance(&mut world, Duration::from_secs(4)).await;
     quiet(&mut world).await;
     assert_eq!(map_stats(&server).len(), 2);

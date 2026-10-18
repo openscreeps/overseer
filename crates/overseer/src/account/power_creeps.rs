@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use overseer_net::api::PowerCreepsApi as _;
 use overseer_net::model::power_creeps::{PowerCreep, PowerCreepClassName};
 
-use super::forget_me;
+use super::changed;
 use crate::{Error, Overseer};
 
 /// The signed-in user's power creeps: the account records behind the power creep page.
@@ -103,8 +103,9 @@ impl PowerCreeps {
 
     /// Spends one power experimentation (`powerExperimentations` of
     /// [`Account::me`](crate::Account::me)) to start a 24-hour period in which deleting power
-    /// creeps is immediate (`POST /api/game/power-creeps/experimentation`). Clears the cached
-    /// profile.
+    /// creeps is immediate (`POST /api/game/power-creeps/experimentation`). Then fetches the
+    /// profile again and publishes it
+    /// ([`Account::profile_watch`](crate::Account::profile_watch)).
     ///
     /// # Errors
     ///
@@ -114,7 +115,7 @@ impl PowerCreeps {
             .user_api()?
             .start_power_experimentation()
             .await?;
-        forget_me(&self.overseer).await;
+        changed(&self.overseer).await;
         Ok(())
     }
 }
