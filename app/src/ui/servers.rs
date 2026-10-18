@@ -84,6 +84,8 @@ fn ServerItem(server: Server) -> impl IntoView {
     );
     let signed_in = server.user.is_some();
     let open_label = if signed_in { "Open" } else { "Sign in" };
+    // The kind and address, whole: a narrow window cuts the line.
+    let address = format!("{kind} · {}", server.url);
     let url = server.url.clone();
     let open = move |_| state.open_server(&url);
     let removable = server.kind != ServerKind::Official;
@@ -144,7 +146,7 @@ fn ServerItem(server: Server) -> impl IntoView {
                     {server.name}
                     <span class=dot aria-hidden="true"></span>
                 </strong>
-                <span class="text-sm text-muted truncate">
+                <span class="text-sm text-muted truncate" title=address>
                     {kind} " · " <span class="font-mono text-[0.95em]">{server.url}</span>
                 </span>
                 <span class=account_class>

@@ -4,30 +4,35 @@
 //!
 //! An item shows only once its value is known (no "—" placeholders). While a map is shown its
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
-//! fixed minimum width with tabular digits (the tick's sized for the server's shard names, a
-//! 9-digit tick and the longest tick duration), so values arriving or changing never shift
-//! their neighbours. The tick item's tooltip says where the tick duration comes from
-//! ([`TickUi`]).
+//! fixed width or minimum width with tabular digits (the tick's sized for the server's shard
+//! names, a 9-digit tick and the longest tick duration), so values arriving or changing never
+//! shift their neighbours. The tick item's tooltip gives its full text and says where the tick
+//! duration comes from ([`TickUi`]).
 //!
-//! A narrow window drops whole items, lowest priority first: the platform and the frame time,
-//! then (on phones) the hovered room, the graphics backend and the fixed widths. The
-//! connection, the tick and the zoom level always stay. The hovered room never shows for a
-//! finger (no hover). The usage of a signed-in account ([`StatusUsage`]) takes the space left
-//! before the items at the right: it shows less as the space shrinks (bars and values, then
-//! percentages, then the CPU alone) and goes last, before the items that always stay. The bar
-//! keeps the bottom safe-area inset under its items.
+//! The bar fits its items to its width ([`style::FIT_ROW`]): it shows them in priority order
+//! and drops whole items, never part of one. The connection, the tick and the zoom level always
+//! stay: they come first, and on a window too narrow for them the tick cuts its text with an
+//! ellipsis. On phones the fixed widths go and the tick leaves out its shard (the top bar names
+//! it). Then come the hovered room (never for a finger, which does not hover, nor on phones),
+//! the loading progress (it cuts its text before it goes), the reset of the rate limits, the
+//! lifted rate limits and the usage of a signed-in account ([`StatusUsage`]). The usage takes
+//! the space left: it shows less as the space shrinks (bars and values, then percentages, then
+//! the CPU alone). The frame time, the graphics backend and the platform go at the right end;
+//! a narrower window drops them first, from the right, and then the items before them, from the
+//! usage back to the hovered room. The bar keeps the bottom safe-area inset under its items.
 
 use leptos::prelude::*;
 use overseer::ConnectionStatus;
+use overseer::map::TickSpeed;
 use overseer_view::Lod;
 
 use crate::platform::Platform;
 use crate::route::Shard;
 use crate::state::AppState;
-use crate::tick::{COMPACT_CHARS, TickDuration};
+use crate::tick::{self, COMPACT_CHARS};
 use crate::ui::hover::{MapRooms, place_text};
 use crate::ui::rate_limits::{RateLimitsUi, StatusLifted, StatusReset};
-use crate::ui::style;
+use crate::ui::style::{self, concatcp};
 use crate::ui::tick::TickUi;
 use crate::ui::topbar::status_class;
 use crate::ui::usage::StatusUsage;
@@ -96,7 +101,7 @@ struct Facts {
     /// Game tick of the latest live room.
     game_time: Option<u64>,
     /// The tick duration of the shard shown.
-    tick: Option<TickDuration>,
+    tick: Option<TickSpeed>,
     /// Zoom level of the world map.
     lod: Option<Lod>,
     /// CPU time of the map's last frame, in milliseconds.
@@ -124,7 +129,7 @@ impl MapItems {
             .game_time
             .map(|time| format!("tick {time}"))
             .into_iter()
-            .chain(facts.tick.as_ref().map(TickDuration::compact))
+            .chain(facts.tick.map(|speed| tick::compact(speed.ms)))
             .collect();
         let place = (!values.is_empty()).then(|| {
             let shard = facts.shard.iter().cloned();
@@ -170,30 +175,59 @@ fn place_width(shards: &[String], shown: Option<&str>) -> usize {
 }
 
 /// The tooltip of the tick slot: what it shows, and where the tick duration comes from.
-fn place_title(tick: Option<&TickDuration>) -> String {
-    match tick {
-        Some(tick) => format!("Game tick and tick duration: {}", tick.sentence()),
+fn place_title(speed: Option<&TickSpeed>) -> String {
+    match speed {
+        Some(speed) => format!("Game tick and tick duration: {}", tick::sentence(speed)),
         None => "Game tick".to_owned(),
     }
 }
 
-/// The status item of `slot` with `class` and `title`, at least `min_width` `ch` wide when
-/// given. The element stays while the slot is not hidden and only its text follows the value:
-/// no re-render per value, and observers of the element (the end-to-end tests) keep seeing it.
+/// The bar: a [`style::FIT_ROW`] one status line high, over the bottom safe-area inset.
+const BAR: &str = concatcp!(
+    style::FIT_ROW,
+    " flex-none h-statusbar-safe px-3 pb-safe-b whitespace-nowrap text-sm tabular-nums \
+    text-muted bg-panel border-t border-edge"
+);
+/// The items that always stay (connection, tick, zoom level): the bar's first item, which
+/// shrinks on a window too narrow for it.
+const CORE: &str = "inline-flex items-center gap-5 max-md:gap-3 min-w-0";
+/// The tick item: as wide as its `--item-width` (constant for a server), narrower when the
+/// window is too narrow for the items that always stay (it cuts its text with an ellipsis). On
+/// phones only as wide as its text. A width, not a flex basis: the width of the bar's first
+/// item comes from the widths of its items.
+const PLACE: &str = "w-(--item-width) max-sm:w-auto min-w-0 truncate";
+/// The loading progress: whole up to 12rem, else gone; with more space it grows to its full
+/// text.
+const PROGRESS: &str = "inline-flex items-center gap-2 grow basis-48 max-w-max min-w-0";
+
+/// The status item of `slot` with `class` and `title`. The element stays while the slot is not
+/// hidden and only its text follows the value: no re-render per value, and observers of the
+/// element (the end-to-end tests) keep seeing it. `width`, when given, sets `--item-width` to
+/// that many `ch` (for a class of the item to use). `lead`, when given and the text starts
+/// with it, goes into a span of its own that phones do not show.
 fn item(
     slot: Memo<Slot>,
     class: &'static str,
     title: impl Into<Signal<String>>,
-    min_width: Option<Memo<usize>>,
+    width: Option<Memo<usize>>,
+    lead: Option<Memo<String>>,
 ) -> impl IntoView {
     let title = title.into();
     let shown = Memo::new(move |_| slot.with(|slot| *slot != Slot::Hidden));
     let reserved = Memo::new(move |_| slot.with(|slot| *slot == Slot::Reserved));
     let style = move || {
-        min_width
-            .map(|width| format!("min-width: {}ch", width.get()))
+        width
+            .map(|width| format!("--item-width: {}ch", width.get()))
             .unwrap_or_default()
     };
+    let parts = move || {
+        let text = slot.with(Slot::text);
+        let lead = lead.map(|lead| lead.get()).unwrap_or_default();
+        let (start, rest) = split_lead(&text, &lead);
+        (start.to_owned(), rest.to_owned())
+    };
+    let lead_text = move || parts().0;
+    let rest_text = move || parts().1;
     move || {
         shown.get().then(|| {
             view! {
@@ -203,11 +237,18 @@ fn item(
                     title=title
                     aria-hidden=move || reserved.get().then_some("true")
                 >
-                    {move || slot.with(Slot::text)}
+                    {lead.map(|_| view! { <span class="max-sm:hidden">{lead_text}</span> })}
+                    {rest_text}
                 </span>
             }
         })
     }
+}
+
+/// `text` as its `lead` and the rest when it starts with `lead`, else as nothing and all of it.
+fn split_lead<'a>(text: &'a str, lead: &str) -> (&'a str, &'a str) {
+    text.strip_prefix(lead)
+        .map_or(("", text), |rest| (&text[..lead.len()], rest))
 }
 
 /// The status bar.
@@ -236,7 +277,24 @@ pub fn StatusBar() -> impl IntoView {
         })
     });
     let place = Memo::new(move |_| items.with(|items| items.place.clone()));
-    let place_title = Memo::new(move |_| tick.duration.with(|tick| place_title(tick.as_ref())));
+    // The full text first: the item cuts it on a narrow window.
+    let place_title = Memo::new(move |_| {
+        let about = tick.duration.with(|tick| place_title(tick.as_ref()));
+        place.with(|place| match place {
+            Slot::Shown(text) => format!("{text}\n{about}"),
+            Slot::Hidden | Slot::Reserved => about,
+        })
+    });
+    // The shard that starts the tick item's text: phones leave it out.
+    let shard_lead = Memo::new(move |_| {
+        map.shard.with(|shard| {
+            shard
+                .as_ref()
+                .and_then(Shard::name)
+                .map(|name| format!("{name}{SEPARATOR}"))
+                .unwrap_or_default()
+        })
+    });
     // Known with the session (the server's shards) and the route (the shard shown), before
     // the first tick.
     let place_width = Memo::new(move |_| {
@@ -267,18 +325,20 @@ pub fn StatusBar() -> impl IntoView {
         })
     });
     let loading = Memo::new(move |_| progress.with(Option::is_some));
+    // The full progress after what it is: the item cuts it on a narrow window.
     let title = Memo::new(move |_| {
-        map.progress
-            .with(|progress| crate::feed::progress_title(progress.as_ref()))
+        let about = map
+            .progress
+            .with(|progress| crate::feed::progress_title(progress.as_ref()));
+        progress.with(|label| match label {
+            Some(label) => format!("{about}\n{label}"),
+            None => about,
+        })
     });
     let progress = move || {
         loading.get().then(|| {
             view! {
-                <span
-                    class="inline-flex flex-initial items-center gap-2 min-w-0"
-                    role="status"
-                    title=move || title.get()
-                >
+                <span class=PROGRESS role="status" title=move || title.get()>
                     <span class=style::SPINNER_SMALL aria-hidden="true"></span>
                     <span class="truncate">{move || progress.get().unwrap_or_default()}</span>
                 </span>
@@ -287,59 +347,48 @@ pub fn StatusBar() -> impl IntoView {
         })
     };
     view! {
-        <footer
-            class="flex flex-none items-center gap-5 max-md:gap-3 h-statusbar-safe px-3 \
-                pb-safe-b overflow-hidden whitespace-nowrap text-sm tabular-nums text-muted \
-                bg-panel border-t border-edge"
-            aria-label="Status"
-        >
-            <span
-                class="inline-flex flex-none items-center gap-2 min-w-[9.5em] max-sm:min-w-0"
-                title=connection_title
-            >
-                <span class=move || status_class(state.status.get()) aria-hidden="true"></span>
-                {move || connection_text(state.status.get())}
+        <footer class=BAR aria-label="Status">
+            <span class=CORE>
+                <span
+                    class="inline-flex flex-none items-center gap-2 min-w-[9.5em] max-sm:min-w-0"
+                    title=connection_title
+                >
+                    <span class=move || status_class(state.status.get()) aria-hidden="true"></span>
+                    {move || connection_text(state.status.get())}
+                </span>
+                {item(place, PLACE, place_title, Some(place_width), Some(shard_lead))}
+                {item(
+                    level,
+                    "flex-none min-w-[4.5em] max-sm:min-w-0 text-fg",
+                    "Zoom level",
+                    None,
+                    None,
+                )}
             </span>
             {item(
-                place,
-                "inline-flex flex-none items-center gap-2 max-sm:min-w-0!",
-                place_title,
-                Some(place_width),
-            )}
-            {item(
-                level,
-                "inline-flex flex-none items-center gap-2 min-w-[4.5em] text-fg",
-                "Zoom level",
-                None,
-            )}
-            {item(
                 hover,
-                "inline-flex flex-none items-center gap-2 min-w-[6.5em] text-fg max-sm:hidden \
+                "inline-flex flex-none items-center min-w-[6.5em] text-fg max-sm:hidden \
                     pointer-coarse:hidden",
                 "Room under the pointer",
+                None,
                 None,
             )}
             {progress}
             <StatusLifted />
             <StatusUsage />
-            <span class="inline-flex items-center gap-5 max-md:gap-3 ml-auto">
-                {item(
-                    frame,
-                    "inline-flex flex-none items-center gap-2 min-w-[7.5em] max-md:hidden",
-                    "CPU time of the last frame",
-                    None,
-                )}
-                {item(
-                    backend,
-                    "inline-flex flex-none items-center gap-2 max-sm:hidden",
-                    "Graphics backend",
-                    None,
-                )}
-                <span class="inline-flex flex-none items-center gap-2 max-md:hidden">
-                    {move || {
-                        if state.platform.with_value(Platform::is_tauri) { "Desktop" } else { "Web" }
-                    }}
-                </span>
+            <span class=style::FIT_END aria-hidden="true"></span>
+            {item(
+                frame,
+                "inline-flex flex-none items-center min-w-[7.5em]",
+                "CPU time of the last frame",
+                None,
+                None,
+            )}
+            {item(backend, "inline-flex flex-none items-center", "Graphics backend", None, None)}
+            <span class="inline-flex flex-none items-center">
+                {move || {
+                    if state.platform.with_value(Platform::is_tauri) { "Desktop" } else { "Web" }
+                }}
             </span>
         </footer>
     }
@@ -352,12 +401,14 @@ mod tests {
     use overseer::ConnectionStatus;
     use overseer_view::Lod;
 
-    use super::{Facts, MapItems, Slot, connection_text, level_name, place_title, place_width};
-    use crate::tick::{Source, TickDuration};
+    use super::{
+        Facts, MapItems, Slot, connection_text, level_name, place_title, place_width, split_lead,
+    };
+    use overseer::map::{TickSource as Source, TickSpeed};
 
     /// A tick duration of `ms` from `source`.
-    const fn duration(ms: f64, source: Source) -> TickDuration {
-        TickDuration { ms, source }
+    const fn duration(ms: f64, source: Source) -> TickSpeed {
+        TickSpeed { ms, source }
     }
 
     #[test]
@@ -501,6 +552,17 @@ mod tests {
             place_width(&[], Some("shardSeason")),
             "shardSeason · tick 123456789 · 250 ms/tick".chars().count()
         );
+    }
+
+    #[test]
+    fn phones_leave_out_the_shard_that_leads_the_tick_slot() {
+        assert_eq!(
+            split_lead("shard3 · tick 1234", "shard3 · "),
+            ("shard3 · ", "tick 1234")
+        );
+        // No shard, or a text that does not start with it: all of it stays.
+        assert_eq!(split_lead("tick 1234", ""), ("", "tick 1234"));
+        assert_eq!(split_lead("tick 1234", "shard3 · "), ("", "tick 1234"));
     }
 
     #[test]

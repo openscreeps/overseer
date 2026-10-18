@@ -125,6 +125,20 @@ pub const NOTICE: &str = "mb-4 px-3 py-2 bg-warn-soft border-l-3 border-warn rou
 /// A row of buttons under a form or panel.
 pub const ACTIONS: &str = "flex flex-wrap gap-2 mt-4";
 
+/// A bar that fits its items to its width, without measuring: one line of items in priority
+/// order, the most important first, `gap-x-5` apart (`gap-x-3` from the `md` breakpoint down).
+/// The first item always shows: it shrinks when the bar is narrower than it (give it `min-w-0`
+/// and let its text cut with an ellipsis). Each later item shows whole or not at all: an item
+/// that does not fit goes to a second line with all the items after it, and the bar clips that
+/// line (each item is as tall as the bar). So a narrower bar drops whole items, the last first.
+/// Add the bar's height; put [`FIT_END`] before the items that go at the right end. Use it for
+/// every bar whose items can be too wide for it (the status bar).
+pub const FIT_ROW: &str =
+    "flex flex-wrap items-center gap-x-5 max-md:gap-x-3 overflow-hidden *:h-full";
+/// An empty item of a [`FIT_ROW`]: the items after it go to the bar's right end. Its negative
+/// margin takes back the gap that it adds, so the items keep their spacing.
+pub const FIT_END: &str = "ml-auto -mr-5 max-md:-mr-3";
+
 /// A section's title.
 pub const H2: &str = "mb-3 text-lg font-semibold leading-tight";
 /// A keyboard key.

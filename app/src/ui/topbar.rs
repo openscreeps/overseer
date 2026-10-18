@@ -1,10 +1,12 @@
 //! The top bar: server switcher, shard switcher, breadcrumb, room search, 2D/3D, drawer
 //! toggle and account menu. Its height never changes; world controls show on the world
-//! route only. On narrow windows the labels collapse to their icons. On phones the brand and
-//! the breadcrumb go (the server menu leads to the server list, the drawer names the room),
-//! the server name and the shard switcher shrink to the space left, and the room search shows
-//! as its magnifier: focused, it opens over the whole bar until Enter, Escape or a tap
-//! elsewhere closes it.
+//! route only. On narrow windows the labels collapse to their icons (the breadcrumb's world
+//! below the `lg` breakpoint: the shard switcher names it too); the breadcrumb never cuts its
+//! items. On phones the brand and the breadcrumb go (the server menu leads to the server list,
+//! the drawer names the room), the server name and the shard switcher shrink to the space left,
+//! a menu opens across the window under the bar, and the room search shows as its magnifier:
+//! focused, it opens over the whole bar until Enter, Escape or a tap elsewhere closes it. A
+//! long name is cut with an ellipsis and its tooltip or accessible name gives it whole.
 
 use leptos::html::{Button, Div};
 use leptos::prelude::*;
@@ -12,7 +14,7 @@ use leptos::task::spawn_local;
 use overseer::ConnectionStatus;
 use overseer_view::ViewMode;
 use wasm_bindgen::JsCast;
-use web_sys::KeyboardEvent;
+use web_sys::{HtmlElement, KeyboardEvent};
 
 use crate::profiles::Profiles;
 use crate::route::{Route, Shard, parse_room};
@@ -31,12 +33,14 @@ const BRAND: &str = concatcp!(
     max-xs:hidden ",
     style::TIP
 );
-/// A 2D/3D button: a segment, narrower than a form's.
+/// A 2D/3D button: a segment, narrower than a form's. On phones only the mode that is not on
+/// shows, as one button that switches to it.
 const MODE_SEGMENT: &str = concatcp!(
     style::BTN,
     " ",
     style::BTN_DEFAULT,
-    " min-h-control min-w-control px-2 relative ",
+    " min-h-control min-w-control px-2 relative max-xs:aria-pressed:hidden max-xs:rounded-md! \
+    max-xs:ml-0! ",
     style::SEGMENT_SHAPE,
     " ",
     style::TIP
@@ -53,10 +57,15 @@ const MENU_BUTTON: &str = concatcp!(
 /// A menu's caret.
 const MENU_CARET: &str = "inline-flex text-muted transition-transform duration-(--duration) \
     ease-standard group-aria-expanded:rotate-180 max-xs:hidden";
-/// What the lists of all menus share: under the button, never wider or taller than the window
-/// (it scrolls). Use [`MENU_LIST`] or [`MENU_LIST_END`].
+/// What the lists of all menus share: under the button, never wider than 30rem nor taller than
+/// the window (it scrolls). On phones a list spans the window under the top bar: a list under a
+/// button away from the window's edge would stick out of it. Use [`MENU_LIST`] or
+/// [`MENU_LIST_END`].
 const MENU_LIST_BASE: &str = "absolute top-[calc(100%+0.25rem)] z-30 min-w-60 \
-    max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-var(--spacing-topbar-safe)-1rem)] \
+    max-w-[min(30rem,calc(100vw-1rem))] max-h-[calc(100dvh-var(--spacing-topbar-safe)-1rem)] \
+    max-sm:fixed max-sm:top-[calc(var(--spacing-topbar-safe)+0.25rem)] \
+    max-sm:left-[calc(0.5rem+var(--spacing-safe-l))] \
+    max-sm:right-[calc(0.5rem+var(--spacing-safe-r))] max-sm:max-w-none \
     overflow-y-auto overscroll-contain p-1 list-none bg-panel-2 border border-edge rounded-lg \
     shadow-lg animate-pop-in";
 /// The list of a menu, aligned to its button's left edge.
@@ -76,8 +85,8 @@ const ITEM_NOTE: &str = "flex-none text-sm text-muted";
 /// A line between groups of menu items.
 const MENU_SEPARATOR: &str = "h-px my-1 bg-edge";
 /// An item of the breadcrumb: a "›" before every item but the first; on narrow windows only
-/// the last item shows.
-const CRUMB_ITEM: &str = "flex items-center min-w-0 not-first:before:content-['›'] \
+/// the last item shows. Items keep their width: the breadcrumb never cuts them.
+const CRUMB_ITEM: &str = "flex flex-none items-center not-first:before:content-['›'] \
     not-first:before:mx-2 not-first:before:text-faint max-md:not-first:before:hidden \
     max-md:first:not-last:hidden";
 /// The breadcrumb's "World" button.
@@ -123,7 +132,10 @@ const DRAWER_TOGGLE: &str = concatcp!(style::ICON_BUTTON, " relative ", style::T
 /// The 2D/3D switch.
 const MODE_SWITCH: &str = concatcp!(style::SEGMENTED, " flex-none");
 /// The shard switcher: shrinks (cutting the name) when the bar is short of space.
-const SHARD_SELECT: &str = concatcp!(style::INPUT, " flex-initial min-w-[4.5rem] max-w-40");
+const SHARD_SELECT: &str = concatcp!(
+    style::INPUT,
+    " flex-initial min-w-[4.5rem] max-xs:min-w-16 max-w-40"
+);
 
 /// The top bar.
 #[component]
@@ -175,7 +187,10 @@ pub fn ModeSwitch() -> impl IntoView {
                 aria-pressed=move || (map.mode.get() == mode).to_string()
                 aria-label=name
                 data-tip=name
-                on:click=move |_| set(mode)
+                on:click=move |event| {
+                    set(mode);
+                    focus_shown_mode(&event);
+                }
             >
                 <Icon kind=icon />
                 <span class="max-lg:hidden">{text}</span>
@@ -188,6 +203,29 @@ pub fn ModeSwitch() -> impl IntoView {
             {button(ViewMode::Perspective, IconKind::Perspective, "3D", "Perspective view")}
         </div>
     }
+}
+
+/// After a click on a 2D/3D button: on phones the button of the mode that is on hides (only the
+/// other mode shows), so the focus goes on to the button that shows, not to the page.
+fn focus_shown_mode(event: &leptos::ev::MouseEvent) {
+    let Some(clicked) = event
+        .current_target()
+        .and_then(|target| target.dyn_into::<HtmlElement>().ok())
+    else {
+        return;
+    };
+    request_animation_frame(move || {
+        if clicked.offset_parent().is_some() {
+            return;
+        }
+        let other = clicked
+            .next_element_sibling()
+            .or_else(|| clicked.previous_element_sibling())
+            .and_then(|other| other.dyn_into::<HtmlElement>().ok());
+        if let Some(other) = other {
+            let _ = other.focus();
+        }
+    });
 }
 
 /// A menu button and its menu: arrow keys move between items, Escape closes it and returns
@@ -401,6 +439,8 @@ fn ServerSwitcher() -> impl IntoView {
                 };
                 let checked = (current_url.as_deref() == Some(server.url.as_str())).to_string();
                 let url = server.url.clone();
+                // A long name is cut: the tooltip gives it whole.
+                let title = server.name.clone();
                 view! {
                     <li role="none">
                         <button
@@ -411,7 +451,7 @@ fn ServerSwitcher() -> impl IntoView {
                             on:click=move |_| state.open_server(&url)
                         >
                             <span class=dot aria-hidden="true"></span>
-                            <span class=ITEM_MAIN>{server.name}</span>
+                            <span class=ITEM_MAIN title=title>{server.name}</span>
                             <span class=ITEM_NOTE>{account}</span>
                         </button>
                     </li>
@@ -503,20 +543,29 @@ fn Breadcrumb() -> impl IntoView {
                 .get()
                 .and_then(|shard| shard.name().map(str::to_owned))
                 .unwrap_or_else(|| "World".to_owned());
+            // A long name is cut: the tooltip names it whole.
+            let tip = if world == "World" {
+                "Show the whole world".to_owned()
+            } else {
+                format!("Show the whole world: {world}")
+            };
             let room = map.room.get();
             view! {
-                <nav class="flex-initial min-w-0 overflow-hidden max-xs:hidden" aria-label="Breadcrumb">
-                    <ol class="flex items-center min-w-0">
+                <nav class="flex-none max-xs:hidden" aria-label="Breadcrumb">
+                    <ol class="flex items-center">
                         <li class=CRUMB_ITEM>
                             <button
                                 type="button"
                                 class=CRUMB_BUTTON
                                 aria-current=room.is_none().then_some("page")
-                                data-tip="Show the whole world"
+                                data-tip=tip
                                 on:click=move |_| map.show_world()
                             >
                                 <Icon kind=IconKind::Globe />
-                                <span class="max-md:hidden">{world}</span>
+                                // The shard switcher before it names the shard too: only the
+                                // globe shows on narrower windows (the name stays for assistive
+                                // technology).
+                                <span class="max-w-40 truncate max-lg:sr-only">{world}</span>
                             </button>
                         </li>
                         {room

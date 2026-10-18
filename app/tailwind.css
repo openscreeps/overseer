@@ -11,6 +11,14 @@
  * `pointer: coarse` block below), so every component that uses them follows. Do not set a control
  * size in pixels in a component: use the tokens.
  *
+ * Every width from 320 px up: no element may cut an item at its edge. A bar whose items can be
+ * too wide for it fits them with `FIT_ROW` (`app/src/ui/style.rs`): it drops whole items, the
+ * last first, and only its first item shrinks. A component in a container that changes width
+ * (the drawer, a panel) adapts to the container (`@container`, `@max-[…]:`), not to the window's
+ * breakpoints. Text that can be long (names, addresses, shard names) cuts with an ellipsis
+ * (`truncate`) and keeps its full text in a `title`, an `aria-label` or a `data-tip`.
+ * `e2e/tests/responsive.spec.ts` checks this over a sweep of window widths.
+ *
  * Safe areas (a notch, rounded corners, a home indicator; `viewport-fit=cover` in index.html):
  * `<body>` keeps the left and right insets, the top bar the top inset, the status bar the bottom
  * inset. Elements between them need no inset. A `fixed` element adds the insets of the edges it
