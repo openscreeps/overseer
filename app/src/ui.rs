@@ -111,7 +111,7 @@ pub fn App(
     limits.listen(map);
     let usage = usage::UsageUi::new(limits.now.into());
     provide_context(usage);
-    let tick = tick::TickUi::new(limits.now.into());
+    let tick = tick::TickUi::default();
     provide_context(tick);
     provide_context(Toasts::new());
     state.start();

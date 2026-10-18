@@ -8,16 +8,20 @@ use std::time::Duration;
 use overseer_net::api::WorldApi as _;
 use overseer_net::core::Token;
 use overseer_net::core::socket::{Channel, Payload};
-use overseer_net::model::account::Profile;
 use overseer_net::model::world::ShardInfo;
 use overseer_net::rt::JoinHandle;
 use overseer_net::{Api, Client, World};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::console::NamesCache;
 use crate::live::{self, Command, Feed, Registry, Watch};
+use crate::map::Ticks;
+use crate::memory::Snapshots;
+use crate::rate_limits::RateLimits;
+use crate::users::BadgeCache;
 use crate::{
     Account, Auth, Code, Console, Error, History, Map, Market, Memory, Messages, Rooms,
-    ServerProfile, Users, hub, refresh,
+    ServerProfile, Users, account, hub, rate_limits, refresh,
 };
 
 /// State of the socket connection.
@@ -93,12 +97,21 @@ struct Inner {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Console command recall, newest last.
     commands: Mutex<VecDeque<String>>,
-    /// The signed-in user's profile once fetched ([`Account::me`]); the async lock makes
-    /// concurrent first reads share one request.
-    me: tokio::sync::Mutex<Option<Arc<Profile>>>,
+    /// The signed-in user's profile and usage ([`Account::me`], [`Account::usage`]).
+    account: account::Shared,
+    /// The exemption from rate limits ([`Overseer::rate_limits`]).
+    rate_limits: rate_limits::Shared,
     /// The server's shards once fetched ([`Overseer::shards_info`]); the async lock makes
     /// concurrent first reads share one request.
     shards: tokio::sync::Mutex<Option<Arc<[ShardInfo]>>>,
+    /// The names of the signed-in user's game by shard ([`Console::names`]).
+    names: NamesCache,
+    /// Player badges as SVG ([`Users::badges`]).
+    badges: BadgeCache,
+    /// The shared reads of Memory paths ([`Memory::snapshot`]).
+    memory: Snapshots,
+    /// The tick speeds of the followed shards ([`Map::tick_speed`]), fed by the hub.
+    ticks: Arc<Ticks>,
 }
 
 impl Drop for Inner {
@@ -158,11 +171,13 @@ impl Overseer {
         let (commands, receiver) = mpsc::unbounded_channel();
         let registry = Arc::new(Registry::new(commands));
         let (status_sender, status) = watch::channel(ConnectionStatus::Connecting);
+        let ticks = Arc::new(Ticks::default());
         let mut tasks = vec![hub::spawn(
             socket,
             Arc::clone(&registry),
             receiver,
             status_sender,
+            Arc::clone(&ticks),
         )];
         if signed_in {
             tasks.push(refresh::spawn(
@@ -179,8 +194,13 @@ impl Overseer {
                 status,
                 tasks: Mutex::new(tasks),
                 commands: Mutex::new(VecDeque::new()),
-                me: tokio::sync::Mutex::new(me.map(Arc::new)),
+                account: account::Shared::new(me),
+                rate_limits: rate_limits::Shared::default(),
                 shards: tokio::sync::Mutex::new(None),
+                names: NamesCache::default(),
+                badges: BadgeCache::default(),
+                memory: Snapshots::default(),
+                ticks,
             }),
         })
     }
@@ -196,6 +216,14 @@ impl Overseer {
     #[must_use]
     pub fn api(&self) -> &Api {
         &self.inner.api
+    }
+
+    /// The operations of this session's server that need no account
+    /// ([`Guest`](crate::Guest)): for example whether a username is free, before an account
+    /// without a username chooses one ([`Account::set_username`]).
+    #[must_use]
+    pub fn guest(&self) -> crate::Guest {
+        crate::Guest::new(self.inner.api.clone())
     }
 
     /// The server's subsystems, shards and connection info and the signed-in user, as
@@ -277,6 +305,13 @@ impl Overseer {
     #[must_use]
     pub fn account(&self) -> Account {
         Account::new(self.clone())
+    }
+
+    /// The session's exemption from rate limits: as last checked, kept in the client's
+    /// request budget and followed by every world map.
+    #[must_use]
+    pub fn rate_limits(&self) -> RateLimits {
+        RateLimits::new(self.clone())
     }
 
     /// The live console and console commands.
@@ -396,9 +431,34 @@ impl Overseer {
         lock(&self.inner.commands)
     }
 
-    /// The cache of the signed-in user's profile.
-    pub(crate) fn me_cache(&self) -> &tokio::sync::Mutex<Option<Arc<Profile>>> {
-        &self.inner.me
+    /// The account state of the session ([`Account`]).
+    pub(crate) fn account_state(&self) -> &account::Shared {
+        &self.inner.account
+    }
+
+    /// The exemption state of the session ([`RateLimits`]).
+    pub(crate) fn rate_limit_state(&self) -> &rate_limits::Shared {
+        &self.inner.rate_limits
+    }
+
+    /// The cache of [`Console::names`].
+    pub(crate) fn names_cache(&self) -> &NamesCache {
+        &self.inner.names
+    }
+
+    /// The cache of [`Users::badges`].
+    pub(crate) fn badge_cache(&self) -> &BadgeCache {
+        &self.inner.badges
+    }
+
+    /// The shared reads of Memory paths ([`Memory::snapshot`]).
+    pub(crate) fn memory_snapshots(&self) -> &Snapshots {
+        &self.inner.memory
+    }
+
+    /// The tick speeds of the followed shards ([`Map::tick_speed`]).
+    pub(crate) fn ticks(&self) -> &Arc<Ticks> {
+        &self.inner.ticks
     }
 }
 

@@ -33,6 +33,7 @@ use tokio::sync::watch;
 
 use super::rect::Sides;
 use super::{Map, MapView, Portal, RoomCoord, RoomRect, RoomStat, WorldKnowledge};
+use crate::rate_limits::Exemption;
 use crate::refresh::closed;
 use crate::{Closed, ConnectionStatus, Error, Overseer, RoomSnapshot};
 
@@ -164,6 +165,15 @@ impl WorldProgress {
             && self.stats_known >= self.stats_wanted
             && self.portals_scanned >= self.portals_wanted
     }
+
+    /// Whether the world's background loading waits on the request budget: not everything
+    /// wanted is known, portal destinations are pending, or overviews wait for the rate limit
+    /// ([`Self::stats_paused_until`]). An app follows the session's exemption from rate
+    /// limits with it ([`Following::set_held_back`](crate::rate_limits::Following::set_held_back)).
+    #[must_use]
+    pub const fn waits_on_budget(&self) -> bool {
+        !self.is_complete() || self.portals_pending > 0 || self.stats_paused_until.is_some()
+    }
 }
 
 /// The world of one shard as one continuous map: the overview, terrain, portals, live minimap
@@ -209,7 +219,8 @@ impl WorldProgress {
 /// ([`net::Client::has_rate_limits`](crate::net::Client::has_rate_limits)). There every
 /// request of every kind first asks the session's request budget
 /// ([`net::Client::budget_ready_at`](crate::net::Client::budget_ready_at)), shared with the
-/// app's badge loader: every request of the client counts over a sliding minute, and
+/// session's badge service ([`Users::badges`](crate::Users::badges)) and console names: every
+/// request of the client counts over a sliding minute, and
 /// requests for viewed rooms may go out while fewer than
 /// [`REQUEST_BUDGET`](crate::net::REQUEST_BUDGET) (110) are in it, visible ones 105,
 /// background ones 100, so the user's own requests (which never wait) keep 10 of
@@ -217,7 +228,8 @@ impl WorldProgress {
 /// After HTTP 429 without the endpoint's limit every background request waits 60 s, and
 /// [`net::Client::rate_limited_count`](crate::net::Client::rate_limited_count) changes, which
 /// the app answers by offering to lift the limit. While the token is exempt from rate limits
-/// ([`Self::set_rate_limit_exempt_until`], screeps.com's `noRatelimitUntil`) nothing is paced:
+/// (screeps.com's `noRatelimitUntil`, as the session knows it:
+/// [`RateLimits::exemption`](crate::RateLimits::exemption)) nothing is paced:
 /// in-flight caps only, as on servers without rate limits. Every kind honours an endpoint's
 /// limit that reports no request left (until its reset) and HTTP 429 (until the endpoint's
 /// reset, 60 s after a server-wide refusal) on every server, exempt or not.
@@ -273,10 +285,10 @@ impl WorldProgress {
 ///   says until when ([`WorldEvent::StatsPaused`] reports each change). The user can lift
 ///   the limit early (screeps.com's reset page); [`Self::recheck_rate_limit`] then resumes
 ///   without waiting for the reset. It sends nothing of its own and does nothing while not
-///   paused. While the token is exempt from rate limits
-///   ([`Self::set_rate_limit_exempt_until`]), the budget does not apply: requests go out
-///   at once, far rooms included, and nothing pauses; HTTP 429 still waits for the reset. At
-///   the exemption's end the budget applies again.
+///   paused. While the token is exempt from rate limits (every world map follows the
+///   session's [`RateLimits::exemption`](crate::RateLimits::exemption)), the budget does not
+///   apply: requests go out at once, far rooms included, and nothing pauses; HTTP 429 still
+///   waits for the reset. At the exemption's end the budget applies again.
 /// - **Minimaps** (`roomMap2`): the first [`MINIMAP_CAP`] rooms of [`Interest::minimaps`]
 ///   are subscribed through a [`MapView`]; rooms that leave are released.
 /// - **Portals**: no endpoint lists a world's portals, and worlds differ in where they stand
@@ -384,6 +396,8 @@ pub struct WorldMap {
     bounds: RoomRect,
     interest: Interest,
     status: watch::Receiver<ConnectionStatus>,
+    /// The session's exemption from rate limits, applied to [`Stats`] on each change.
+    exemption: watch::Receiver<Exemption>,
     /// `None` without a signed-in user.
     minimaps: Option<MapView>,
     /// Rooms whose minimap was reported and not yet gone.
@@ -467,6 +481,12 @@ impl WorldMap {
         let work = Work::new(bounds);
         Self {
             status: overseer.status(),
+            exemption: {
+                // Applied at the first `next`, whatever the session knows by then.
+                let mut exemption = overseer.rate_limits().exemption();
+                exemption.mark_changed();
+                exemption
+            },
             overseer,
             map,
             shard,
@@ -660,18 +680,17 @@ impl WorldMap {
         paused
     }
 
-    /// Tells the world that the session's token is exempt from rate limits until `until`
-    /// (milliseconds since the Unix epoch; screeps.com's `noRatelimitUntil`, see
-    /// [`Account::rate_limit_exemption`](crate::Account::rate_limit_exemption)), or not
-    /// (`None`, or a time already past), and tells the session's client
-    /// ([`net::Client::set_rate_limit_exempt_until`](crate::net::Client::set_rate_limit_exempt_until)),
-    /// whose request budget then lets everything go (badges included). While exempt, nothing
-    /// is paced (see [`WorldMap`]): no request budget, overviews ignore their hourly budget
-    /// (no pause, no share kept for near rooms), each kind only within its in-flight cap;
-    /// HTTP 429 still waits. A pause ends at once. From `until` on, the pacing applies again.
-    /// The same `until` again changes nothing.
-    pub fn set_rate_limit_exempt_until(&mut self, until: Option<u64>) {
-        self.overseer.client().set_rate_limit_exempt_until(until);
+    /// Applies a change of the session's exemption from rate limits
+    /// ([`RateLimits::exemption`](crate::RateLimits::exemption)). While exempt, nothing is
+    /// paced (see [`WorldMap`]): no request budget, overviews ignore their hourly budget (no
+    /// pause, no share kept for near rooms), each kind only within its in-flight cap; HTTP 429
+    /// still waits. A pause ends at once. From the exemption's end on, the pacing applies
+    /// again.
+    fn follow_exemption(&mut self) {
+        if !self.exemption.has_changed().unwrap_or(false) {
+            return;
+        }
+        let until = self.exemption.borrow_and_update().until;
         if self.work.stats.set_exempt_until(until, Instant::now()) {
             self.work.dirty = true;
         }
@@ -710,6 +729,7 @@ impl WorldMap {
             if *self.status.borrow() == ConnectionStatus::Closed {
                 return Err(Closed);
             }
+            self.follow_exemption();
             self.plan();
             // Planning reports pauses of its own.
             if !self.work.events.is_empty() {
@@ -718,6 +738,7 @@ impl WorldMap {
             let Self {
                 overseer,
                 status,
+                exemption,
                 minimaps,
                 shown,
                 work,
@@ -733,6 +754,8 @@ impl WorldMap {
                 biased;
                 () = closed(status) => return Err(Closed),
                 result = poll_fn(|cx| work.poll(cx, overseer.client())) => result?,
+                // Applied at the top of the loop: `changed` marked it seen.
+                Ok(()) = exemption.changed() => exemption.mark_changed(),
                 changed = minimap => {
                     let (room, map) = changed?;
                     if let Ok(room) = room.parse() {

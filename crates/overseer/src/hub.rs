@@ -1,22 +1,25 @@
 //! The background task: owns the socket, applies subscription commands and delivers events.
 
-use overseer_net::core::socket::{Channel, Event, Payload};
+use overseer_net::core::socket::{Channel, Event, Payload, RoomState};
 use overseer_net::rt::{self, JoinHandle};
 use overseer_net::{Socket, SocketEvent};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 use crate::live::{Command, Registry};
+use crate::map::Ticks;
 use crate::rooms::{RoomSink, RoomSnapshot};
 use crate::{ConnectionStatus, Notice};
 
 /// Spawns the task driving `socket` until shutdown or until the socket gives up reconnecting:
-/// a tokio task natively, a task on the browser's event loop in WebAssembly.
+/// a tokio task natively, a task on the browser's event loop in WebAssembly. Each room update
+/// gives its game tick to `ticks`.
 pub(crate) fn spawn(
     socket: Socket,
     registry: Arc<Registry>,
     commands: mpsc::UnboundedReceiver<Command>,
     status: watch::Sender<ConnectionStatus>,
+    ticks: Arc<Ticks>,
 ) -> JoinHandle<()> {
     rt::spawn(
         Hub {
@@ -24,6 +27,7 @@ pub(crate) fn spawn(
             registry,
             commands,
             status,
+            ticks,
         }
         .run(),
     )
@@ -34,6 +38,8 @@ struct Hub {
     registry: Arc<Registry>,
     commands: mpsc::UnboundedReceiver<Command>,
     status: watch::Sender<ConnectionStatus>,
+    /// The tick speeds of the followed shards: measured from room updates as they arrive.
+    ticks: Arc<Ticks>,
 }
 
 impl Hub {
@@ -107,7 +113,10 @@ impl Hub {
             Event::Channel {
                 channel,
                 payload: Payload::Room,
-            } => self.publish_room(&channel),
+            } => {
+                self.observe_tick(&channel);
+                self.publish_room(&channel);
+            }
             Event::Channel { channel, payload } => {
                 if let Payload::ServerMessage(message) = &payload {
                     self.registry.notify(Notice::ServerMessage(message.clone()));
@@ -133,6 +142,22 @@ impl Hub {
             | Event::Package(_)
             | Event::Authenticated
             | Event::Unsolicited { .. } => {}
+        }
+    }
+
+    /// Gives the game tick of an updated room to the tick speed of its shard, at its arrival
+    /// (before its terrain is there too).
+    fn observe_tick(&self, channel: &Channel) {
+        let Channel::Room { shard, .. } = channel else {
+            return;
+        };
+        if let Some(tick) = self
+            .socket
+            .session()
+            .room(channel)
+            .and_then(RoomState::game_time)
+        {
+            self.ticks.observe_live(shard.as_deref(), tick);
         }
     }
 

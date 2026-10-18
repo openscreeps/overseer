@@ -56,9 +56,9 @@ To skip the discovery, force the contract with `ClientBuilder::server_kind` and 
 
 | Path | Contents |
 |---|---|
-| `crates/overseer-core` | Sans-I/O core: the generated HTTP and socket types and endpoints of each contract, the domain types (`model`), the socket session and the room state |
-| `crates/overseer-net` | Async client on `overseer-core`: HTTP, socket, rate limits, discovery and the area traits of `api` |
-| `crates/overseer` | Application layer: the session, live rooms, the console, code, Memory, the map, the market and the other features of the official client |
+| `crates/overseer-core` | Sans-I/O core: the generated HTTP and socket types and endpoints of each contract, the domain types (`model`) with the game's rules (levels, NPCs, the fields of a new account, the CPU allocation to the shards and the 12-hour cooldown, the 2 MiB Memory capacity, Memory paths, queued Memory changes and the segment limits, the tick duration measured from game ticks), the socket session and the room state |
+| `crates/overseer-net` | Async client on `overseer-core`: HTTP, socket, rate limits and the request budget (`Client::wait_for_budget`), discovery and the area traits of `api` |
+| `crates/overseer` | Application layer: the session, the account (one session-wide profile published after every read and change: `Account::profile_watch`; the usage of the code shared by every consumer: `Account::usage`), the exemption from rate limits (`Overseer::rate_limits`: checked on a schedule, given to the request budget and followed by every world map), live rooms, the console (and the session-cached names of the user's game for completion), code, Memory (session-shared path snapshots and writes observed until they apply), the map (and the session-shared tick speed of a shard: `Map::tick_speed`), player badges (one session-wide cache and pace for every viewer), the market and the other features of the official client, and a server without an account (`Guest`: discovery, registration) |
 | `crates/overseer-view` | World and room viewer: renders rooms with wgpu (WebGPU, else WebGL2) |
 | `crates/overseer-proxy` | Same-origin proxy for servers that send no CORS headers |
 | `app` | The Overseer app: a Leptos UI for browsers |

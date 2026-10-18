@@ -36,7 +36,6 @@
 mod badges;
 mod connect;
 mod feed;
-mod levels;
 mod platform;
 #[cfg_attr(
     not(any(target_arch = "wasm32", test)),

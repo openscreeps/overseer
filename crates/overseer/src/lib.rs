@@ -127,23 +127,29 @@
 //!
 //! | Handle | Covers |
 //! |---|---|
-//! | [`Overseer::account`] | the signed-in account: profile, statistics, world status, respawn, CPU and resources, badge, notification settings, power creeps, API tokens |
-//! | [`Overseer::console`] | live console output with history, console expressions, command recall |
+//! | [`Overseer::account`] | the signed-in account: profile (one session cache, published on [`Account::profile_watch`] after every read and change), statistics, world status, respawn, CPU and resources, the usage of the code shared by every consumer ([`Account::usage`]), the CPU allocation to the shards (checked with [`model::account::cpu`]), badge, notification settings, power creeps, API tokens |
+//! | [`Overseer::rate_limits`] | the exemption from rate limits as last checked, given to the client's request budget and followed by every world map; checks it while an app follows it ([`RateLimits::follow`]) |
+//! | [`Overseer::console`] | live console output with history, console expressions, command recall, the names of the user's game for completion (session-cached) |
 //! | [`Overseer::code`] | branches, JavaScript and WebAssembly modules, activation, live code changes, local directory sync |
-//! | [`Overseer::memory`] | Memory by path, segments, live path watches |
+//! | [`Overseer::memory`] | Memory by path ([`MemoryPath`](memory::MemoryPath)), session-shared path snapshots ([`Memory::snapshot`]), writes observed until they apply ([`Memory::write_and_observe`]), segments with their length limit, live path watches |
 //! | [`Overseer::rooms`] | live typed room snapshots, room information and actions: flags, construction sites, intents, spawn placement |
 //! | [`Overseer::history`] | room history playback |
-//! | [`Overseer::map`] | the continuous world map ([`Map::world`]: overviews with owner and reserver badges, terrain, portals, live minimaps and live rooms; viewed rooms first, then the visible ones, the rest of the world in the background, paced per server; live rooms update what is known of them at once, readable anywhere through [`WorldKnowledge`](map::WorldKnowledge)), map views, map statistics, batch terrain, portals of a room, player badges, room status, map visuals |
+//! | [`Overseer::map`] | the continuous world map ([`Map::world`]: overviews with owner and reserver badges, terrain, portals, live minimaps and live rooms; viewed rooms first, then the visible ones, the rest of the world in the background, paced per server; live rooms update what is known of them at once, readable anywhere through [`WorldKnowledge`](map::WorldKnowledge)), map views, map statistics, batch terrain, portals of a room, player badges, room status, map visuals, the tick speed of a shard (one session-wide state and pace for every viewer: [`Map::tick_speed`]) |
 //! | [`Overseer::messages`] | conversations, sending, read state, live new messages |
 //! | [`Overseer::market`] | orders, own orders, price statistics, money history |
-//! | [`Overseer::users`] | user lookup, rooms of a user, leaderboards, badges |
+//! | [`Overseer::users`] | user lookup, rooms of a user, leaderboards, badges (one session-wide cache and pace for every viewer: [`Users::badges`]) |
+//! | [`Overseer::guest`], [`Guest::discover`] | without an account: what the server offers before sign-in, whether a username or an e-mail address is free, registration (with the field rules of [`model::account::check_username`] and friends) |
 //!
-//! Every typed endpoint remains available through [`Overseer::client`].
+//! Every typed endpoint remains available through [`Overseer::client`]. Errors that refuse
+//! access (a rejected token or credentials, a missing or wrong server password) are typed:
+//! [`Error::refusal`].
 
 pub mod account;
+pub mod cache;
 pub mod code;
 pub mod console;
 mod error;
+mod guest;
 pub mod history;
 mod hub;
 pub mod live;
@@ -152,6 +158,7 @@ pub mod market;
 pub mod memory;
 pub mod messages;
 mod profile;
+pub mod rate_limits;
 mod refresh;
 pub mod rooms;
 mod session;
@@ -165,6 +172,7 @@ pub use account::{Account, PowerCreeps};
 pub use code::{Code, CodeTarget, Modules};
 pub use console::{Console, ConsoleEntry, ConsoleKind};
 pub use error::Error;
+pub use guest::Guest;
 pub use history::{History, HistoryPlayer, Seek};
 pub use live::{Closed, Feed, Watch};
 pub use map::{Map, MapStat, MapView, WorldMap};
@@ -172,6 +180,7 @@ pub use market::Market;
 pub use memory::Memory;
 pub use messages::Messages;
 pub use profile::{Auth, ServerProfile};
+pub use rate_limits::RateLimits;
 pub use rooms::{FlagColor, RoomSnapshot, Rooms, StatInterval};
 pub use session::{ConnectionStatus, Notice, Overseer};
 pub use users::Users;

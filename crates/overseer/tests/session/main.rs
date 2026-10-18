@@ -1,17 +1,24 @@
 //! Sessions against an in-process server: subscription reference counting, room snapshots, the
-//! console, connection status and token updates, token refresh, the account, messages, market,
-//! users, and the subsystems and connection info, discovered or forced.
+//! console and the names of the user's game, connection status and token updates, token
+//! refresh, the account (its published profile, its usage and CPU allocation), the exemption
+//! from rate limits, messages, market, users, the subsystems and connection info, discovered
+//! or forced, servers without an account (discovery and registration), and the tick speed of
+//! a shard.
 
 mod account;
 mod console;
+mod guest;
 mod live;
 mod market;
 mod messages;
+mod names;
+mod rate_limits;
 mod refresh;
-#[expect(dead_code, reason = "only the world harness holds responses")]
 mod server;
 mod status;
 mod subsystems;
+mod ticks;
+mod usage;
 mod users;
 
 use std::time::Duration;
