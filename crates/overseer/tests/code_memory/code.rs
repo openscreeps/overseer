@@ -62,9 +62,9 @@ async fn branch_changes_carry_the_documented_bodies() {
     modules.insert_js("main", "loop");
     modules.insert_wasm("engine", &WASM);
 
-    code.set_modules("default", modules.clone()).await.unwrap();
+    code.set_modules("default", &modules).await.unwrap();
     code.clone_branch("default", "next").await.unwrap();
-    code.create_branch("fresh", modules).await.unwrap();
+    code.create_branch("fresh", &modules).await.unwrap();
     code.set_active_branch(CodeTarget::World, "next")
         .await
         .unwrap();

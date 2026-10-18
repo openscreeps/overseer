@@ -7,9 +7,11 @@
 //! schemas are merged across documents; a type the base document (the official one; for plugins
 //! the community one, then the official one) defines identically, component or inline schema, is
 //! re-exported from the base module instead of generated again (see [`share`]). Socket schemas
-//! the contract's HTTP document defines identically are its HTTP types. Every file is formatted
-//! with rustfmt.
+//! the contract's HTTP document defines identically are its HTTP types. A request body that no
+//! other type holds borrows the values it sends (see [`borrow`]). Every file is formatted with
+//! rustfmt.
 
+mod borrow;
 mod docs;
 mod emit;
 mod model;
@@ -129,9 +131,34 @@ fn contracts(reference: &Path, files: &mut Files) -> Result<Vec<String>, Error> 
     let official = read_json(&reference.join(OFFICIAL.http))?;
     let openscreeps = read_json(&reference.join(OPENSCREEPS.http))?;
     let community = read_json(&reference.join(COMMUNITY.http))?;
-    let official_lowered = lower(&official, false)?;
-    let openscreeps_lowered = lower(&openscreeps, false)?;
-    let community_lowered = lower(&community, false)?;
+    let mut official_lowered = lower(&official, false)?;
+    let mut openscreeps_lowered = lower(&openscreeps, false)?;
+    let mut community_lowered = lower(&community, false)?;
+    let mut plugin_documents = plugins(reference)?
+        .into_iter()
+        .map(|plugin| {
+            let document = read_json(&reference.join(plugin_file(&plugin)))?;
+            let lowered = lower(&document, true)?;
+            Ok((plugin, document, lowered))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    // Every document takes part: a module re-exports the types of another module.
+    let borrowed = borrow::bodies(
+        [&official_lowered, &openscreeps_lowered, &community_lowered]
+            .into_iter()
+            .chain(plugin_documents.iter().map(|(_, _, lowered)| lowered))
+            .map(|lowered| (&lowered.model, lowered.operations.as_slice())),
+    );
+    for lowered in [
+        &mut official_lowered,
+        &mut openscreeps_lowered,
+        &mut community_lowered,
+    ]
+    .into_iter()
+    .chain(plugin_documents.iter_mut().map(|(_, _, lowered)| lowered))
+    {
+        lowered.model.borrow(&borrowed);
+    }
     let official_paths = Paths::new(types_path("api", OFFICIAL.module));
     let mut openscreeps_paths = Paths::new(types_path("api", OPENSCREEPS.module));
     openscreeps_paths.share(
@@ -195,29 +222,26 @@ fn contracts(reference: &Path, files: &mut Files) -> Result<Vec<String>, Error> 
         };
         report.push(http_module(files, &module, document, lowered, paths)?);
     }
-    let plugins = plugins(reference)?;
     let mut root = module_doc(&[
         "HTTP APIs of community server plugins: one module per plugin, generated from \
          `reference/plugins/<plugin>.openapi.json` (the plugin's contract composed on the \
          community contract) with only the operations the plugin provides, adapts or adds.",
     ]);
     root.push('\n');
-    for plugin in &plugins {
+    for (plugin, document, lowered) in &plugin_documents {
         let file = plugin_file(plugin);
-        let document = read_json(&reference.join(&file))?;
-        let lowered = lower(&document, true)?;
         let name = names::snake(plugin);
         let mut paths = Paths::new(types_path("api", &format!("{PLUGINS}::{name}")));
         // The plugin's contract is composed on the community one; what the community contract
         // lacks may still be the official type (API tokens, for example).
         paths.share(
-            components(&document)?,
+            components(document)?,
             components(&community)?,
             &community_paths,
         );
         paths.share_inline(&lowered.model, &community_lowered.model, &community_paths);
         paths.share(
-            components(&document)?,
+            components(document)?,
             components(&official)?,
             &official_paths,
         );
@@ -247,7 +271,7 @@ fn contracts(reference: &Path, files: &mut Files) -> Result<Vec<String>, Error> 
             )]),
             plugin: true,
         };
-        report.push(http_module(files, &module, &document, &lowered, &paths)?);
+        report.push(http_module(files, &module, document, lowered, &paths)?);
         let _ = writeln!(root, "pub mod {name};");
     }
     files.push((format!("api/{PLUGINS}.rs"), root));
@@ -256,16 +280,18 @@ fn contracts(reference: &Path, files: &mut Files) -> Result<Vec<String>, Error> 
         (&OPENSCREEPS, &openscreeps, &openscreeps_paths),
         (&COMMUNITY, &community, &community_paths),
     ];
-    report.extend(sockets(reference, files, contracts)?);
+    report.extend(sockets(reference, files, contracts, &borrowed)?);
     Ok(report)
 }
 
 /// The socket modules of `contracts` (the official one first), each with its HTTP document
-/// and the paths of its HTTP types. Returns one report line per module.
+/// and the paths of its HTTP types. Returns one report line per module. A socket type cannot
+/// be one of the `borrowed` request bodies: an event payload has no lifetime.
 fn sockets(
     reference: &Path,
     files: &mut Files,
     contracts: [(&Contract, &Value, &Paths); 3],
+    borrowed: &BTreeSet<String>,
 ) -> Result<Vec<String>, Error> {
     let official_document = read_json(&reference.join(OFFICIAL.socket))?;
     let official_components = components(&official_document)?;
@@ -297,6 +323,14 @@ fn sockets(
             } else {
                 reexported.insert(name.clone(), path.clone());
             }
+        }
+        if let Some(body) = external
+            .values()
+            .filter_map(|path| path.rsplit("::").next())
+            .find(|name| borrowed.contains(*name))
+        {
+            let module = contract.module;
+            return Err(format!("socket {module}: a schema is the request body `{body}`").into());
         }
         let roots: Vec<Ty> = socket_components
             .keys()

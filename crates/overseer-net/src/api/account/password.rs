@@ -138,8 +138,8 @@ macro_rules! password_sign_in {
             async fn sign_in(&self, email: &str, password: &str) -> Result<Token, Error> {
                 let sign_in = $contract::endpoints::AuthSignin {
                     body: $contract::types::AuthSigninRequest {
-                        email: email.to_owned(),
-                        password: password.to_owned(),
+                        email: email.into(),
+                        password: password.into(),
                         recaptcha: None,
                         steam_ticket: None,
                     },
@@ -187,8 +187,8 @@ impl PasswordAccount for OpenScreeps {
     async fn set_password(&self, old_password: Option<&str>, password: &str) -> Result<(), Error> {
         let set = openscreeps::endpoints::UserPasswordSet {
             body: openscreeps::types::UserPasswordSetRequest {
-                old_password: old_password.unwrap_or_default().to_owned(),
-                password: password.to_owned(),
+                old_password: old_password.unwrap_or_default().into(),
+                password: password.into(),
             },
         };
         match self.client.send(&set).await {
@@ -239,8 +239,8 @@ impl PasswordAccount for ScreepsmodAuth<'_> {
         }
         let set = screepsmod_auth::endpoints::UserPasswordSet {
             body: screepsmod_auth::types::UserPasswordSetRequest {
-                old_password: old_password.map(str::to_owned),
-                password: password.to_owned(),
+                old_password: old_password.map(Into::into),
+                password: password.into(),
             },
         };
         self.client.send(&set).await?;

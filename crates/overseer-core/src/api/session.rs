@@ -817,7 +817,7 @@ mod tests {
     fn post_bodies_are_json() {
         let console = UserConsole {
             body: UserConsoleRequest {
-                expression: "Game.time".to_owned(),
+                expression: "Game.time".into(),
                 shard: None,
             },
         };
@@ -829,8 +829,8 @@ mod tests {
 
         let console = UserConsole {
             body: UserConsoleRequest {
-                expression: "1".to_owned(),
-                shard: Some("shard3".to_owned()),
+                expression: "1".into(),
+                shard: Some("shard3".into()),
             },
         };
         let request = session(Some("test-token")).request(&console).unwrap();
@@ -841,8 +841,8 @@ mod tests {
 
         let sign_in = AuthSignin {
             body: AuthSigninRequest {
-                email: "a@example.com".to_owned(),
-                password: "hunter2".to_owned(),
+                email: "a@example.com".into(),
+                password: "hunter2".into(),
                 recaptcha: None,
                 steam_ticket: None,
             },

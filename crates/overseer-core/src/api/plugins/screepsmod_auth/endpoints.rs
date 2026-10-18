@@ -5,6 +5,9 @@
 //! Fields are the operation's query and path parameters (`Option` when not required) and its
 //! JSON request body (`body`); [`Endpoint::Response`] is the success body. The session sends
 //! the `X-Token`, `X-Username` and `X-Server-Password` headers itself.
+//!
+//! A request body that no other type holds keeps its strings, lists and objects as `Cow`, so
+//! that it can borrow the values of the caller. The endpoint then has the lifetime of its body.
 
 #[cfg(test)]
 mod tests;
@@ -72,12 +75,12 @@ impl Endpoint for AuthQueryToken {
 ///
 /// screepsmod-auth: `email` is matched exactly against stored usernames and e-mail addresses (case-sensitive), so a username signs in too; `recaptcha` and `steamTicket` are ignored. Passwords are verified as PBKDF2-SHA256 hashes; accounts without a password (Steam or GitHub sign-ups) cannot sign in. Success is `{ok: 1, token}` with a 40-hex backend-local session token valid for 60 s.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct AuthSignin {
+pub struct AuthSignin<'a> {
     /// The JSON request body.
-    pub body: types::AuthSigninRequest,
+    pub body: types::AuthSigninRequest<'a>,
 }
 
-impl Endpoint for AuthSignin {
+impl Endpoint for AuthSignin<'_> {
     type Response = types::AuthSigninResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/auth/signin";
@@ -184,12 +187,12 @@ impl Endpoint for RegisterCheckUsername {
 ///
 /// screepsmod-auth: Stores the account as submitted: no username, e-mail or password rules, no `reCAPTCHA`, no e-mail confirmation and no token (sign in afterwards). The account gets the configured `registerCpu` (100 by default), is blocked when `preventSpawning` is set, and gets a `default` branch from `modules` (default `{main: ""}`) and empty Memory. Existing username (exact match) or e-mail: `{error}` holding the whole error stack, beginning `Error: User already exists`; a ban-marked e-mail: `banned: <fields>`; while `SERVER_PASSWORD` is set: `Registration is automatically disabled. A server password has been set.` `recaptcha`, `tutorialDone` and `branches` are ignored.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RegisterSubmit {
+pub struct RegisterSubmit<'a> {
     /// The JSON request body.
-    pub body: types::RegisterSubmitRequest,
+    pub body: types::RegisterSubmitRequest<'a>,
 }
 
-impl Endpoint for RegisterSubmit {
+impl Endpoint for RegisterSubmit<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/register/submit";
@@ -223,12 +226,12 @@ impl Endpoint for UserAuthTokenList {
 ///
 /// screepsmod-auth: `type: "selected"` creates a restricted token, any other value a full one. Restricted tokens keep only the endpoints the mod supports (`GET /api/user/name`, `GET /api/user/money-history`, `GET`/`POST /api/user/memory`, `GET`/`POST /api/user/memory-segment`, `GET /api/game/market/orders-index`, `orders`, `my-orders`, `stats`; the official client's `/api/market/...` keys are accepted), `websockets.console`/`rooms`, and `memorySegments` as ids 0-99 separated by commas or spaces (blank = all). The reply's `token` is a UUID.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserAuthTokenCreate {
+pub struct UserAuthTokenCreate<'a> {
     /// The JSON request body.
-    pub body: types::UserAuthTokenCreateRequest,
+    pub body: types::UserAuthTokenCreateRequest<'a>,
 }
 
-impl Endpoint for UserAuthTokenCreate {
+impl Endpoint for UserAuthTokenCreate<'_> {
     type Response = types::UserAuthTokenCreateResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/auth-token";
@@ -248,12 +251,12 @@ impl Endpoint for UserAuthTokenCreate {
 ///
 /// screepsmod-auth: With an `Authorization: Basic` header (username or e-mail and password) and no `X-Token`, the mod authenticates the upload itself and passes it to backend-local with a fresh session token.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserCodeSet {
+pub struct UserCodeSet<'a> {
     /// The JSON request body.
-    pub body: types::UserCodeSetRequest,
+    pub body: types::UserCodeSetRequest<'a>,
 }
 
-impl Endpoint for UserCodeSet {
+impl Endpoint for UserCodeSet<'_> {
     type Response = types::UserTimestampResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/code";
@@ -271,12 +274,12 @@ impl Endpoint for UserCodeSet {
 ///
 /// screepsmod-auth: Deletes the caller's token whose `_id` is `tokenId`; succeeds with `{ok: 1}` even when no token matched.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserAuthTokenDelete {
+pub struct UserAuthTokenDelete<'a> {
     /// The JSON request body.
-    pub body: types::UserAuthTokenDeleteRequest,
+    pub body: types::UserAuthTokenDeleteRequest<'a>,
 }
 
-impl Endpoint for UserAuthTokenDelete {
+impl Endpoint for UserAuthTokenDelete<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/delete-auth-token";
@@ -310,12 +313,12 @@ impl Endpoint for UserName {
 ///
 /// screepsmod-auth: `token` is a prefix of one of the caller's tokens; the matching token is meant to be exempt from rate limits for two hours. Observed on screeps 4.3.0 with the default storage: a matching prefix answered HTTP 400 `{ok: 0}` and the exemption was not applied.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserNoRateLimit {
+pub struct UserNoRateLimit<'a> {
     /// The JSON request body.
-    pub body: types::UserNoRateLimitRequest,
+    pub body: types::UserNoRateLimitRequest<'a>,
 }
 
-impl Endpoint for UserNoRateLimit {
+impl Endpoint for UserNoRateLimit<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/noratelimit";
@@ -333,12 +336,12 @@ impl Endpoint for UserNoRateLimit {
 ///
 /// screepsmod-auth: A missing \`password\` answers \`{ok: 0, error: "Password required"}\`; the new password is stored as a PBKDF2-SHA256 hash without length or strength rules. Defect of the mod: when the account has a password and \``oldPassword`\` is wrong, it answers HTTP 401 \`{error: "Unauthorized"}\` but then still overwrites the stored password and salt with undefined values (the account can no longer sign in with a password) and replies a second time, which throws \``ERR_HTTP_HEADERS_SENT`\` and crashes the backend process. Never send a wrong \``oldPassword`\` to a screepsmod-auth server.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserPasswordSet {
+pub struct UserPasswordSet<'a> {
     /// The JSON request body.
-    pub body: types::UserPasswordSetRequest,
+    pub body: types::UserPasswordSetRequest<'a>,
 }
 
-impl Endpoint for UserPasswordSet {
+impl Endpoint for UserPasswordSet<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/password";

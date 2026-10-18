@@ -98,7 +98,7 @@ async fn branches_round_trip() {
     created.insert_js("util", "module.exports.run = function () {};");
     ok(
         "the branch is created",
-        code.create_branch(&branch, created.clone()),
+        code.create_branch(&branch, &created),
     )
     .await;
     let change: CodeChange = next("the new branch", &mut changes, |change: &CodeChange| {
@@ -118,7 +118,7 @@ async fn branches_round_trip() {
     let mut uploaded = Modules::new();
     uploaded.insert_js("main", "module.exports.loop = function () {};");
     uploaded.insert_wasm("engine", WASM);
-    ok("the upload", code.set_modules(&branch, uploaded.clone())).await;
+    ok("the upload", code.set_modules(&branch, &uploaded)).await;
     let change = next("the upload", &mut changes, |change: &CodeChange| {
         change.branch == branch && change.modules.kind("util").is_none()
     })
@@ -179,7 +179,7 @@ async fn unknown_branches_are_refused() {
     let error = code.modules(&missing).await.expect_err("no code to read");
     assert_eq!(server_error(&error), "no code");
     let error = code
-        .set_modules(&missing, Modules::new())
+        .set_modules(&missing, &Modules::new())
         .await
         .expect_err("no branch to upload to");
     assert_eq!(server_error(&error), "branch does not exist");

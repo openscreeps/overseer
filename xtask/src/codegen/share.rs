@@ -195,7 +195,7 @@ impl Selection {
 }
 
 /// Appends the generated type names `ty` mentions.
-fn named<'t>(ty: &'t Ty, out: &mut Vec<&'t str>) {
+pub fn named<'t>(ty: &'t Ty, out: &mut Vec<&'t str>) {
     match ty {
         Ty::Named(name) => out.push(name),
         Ty::Vec(inner)

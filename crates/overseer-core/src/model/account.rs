@@ -7,6 +7,7 @@
 pub mod cpu;
 mod registration;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -169,18 +170,18 @@ pub struct AuthTokenWebsockets {
 }
 
 /// `From` an [`AuthTokenRequest`] into the request body screeps.com and screepsmod-auth share.
-impl From<AuthTokenRequest> for official::UserAuthTokenCreateRequest {
+impl From<AuthTokenRequest> for official::UserAuthTokenCreateRequest<'_> {
     fn from(request: AuthTokenRequest) -> Self {
         Self {
-            r#type: request.kind,
-            endpoints: request.endpoints,
+            r#type: request.kind.map(Into::into),
+            endpoints: request.endpoints.map(Cow::Owned),
             websockets: request.websockets.map(|websockets| {
-                official::UserAuthTokenCreateRequestWebsockets {
+                Cow::Owned(official::UserAuthTokenCreateRequestWebsockets {
                     console: websockets.console,
                     rooms: websockets.rooms,
-                }
+                })
             }),
-            memory_segments: request.memory_segments,
+            memory_segments: request.memory_segments.map(Into::into),
         }
     }
 }
@@ -216,13 +217,15 @@ impl fmt::Debug for Registration {
 /// `OpenScreeps`' and the official one, which screepsmod-auth shares.
 macro_rules! registration_into {
     ($($module:ident),+) => {$(
-        impl From<Registration> for $module::RegisterSubmitRequest {
+        impl From<Registration> for $module::RegisterSubmitRequest<'_> {
             fn from(registration: Registration) -> Self {
                 Self {
-                    username: registration.username,
-                    email: registration.email,
-                    password: registration.password,
-                    modules: registration.modules.map(Into::into),
+                    username: registration.username.into(),
+                    email: registration.email.into(),
+                    password: registration.password.into(),
+                    modules: registration
+                        .modules
+                        .map(|modules| Cow::Owned(modules.into())),
                     ..Self::default()
                 }
             }

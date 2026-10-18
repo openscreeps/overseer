@@ -9,6 +9,7 @@
 //! community type, and those only the official document defines identically from
 //! [`crate::api::official::types`]. Unknown fields are ignored.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -40,20 +41,20 @@ pub use crate::api::official::types::{
 
 /// The `GamePlaceSpawnRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GamePlaceSpawnRequest {
+pub struct GamePlaceSpawnRequest<'a> {
     /// Spawn name (string, at most 50 characters). `auto` claims the room without placing a spawn; the first spawn construction site placed there becomes a complete spawn.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// Required unless `name` is `auto` (then ignored); missing coordinates are not rejected.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub x: Option<GameCoordinateInput>,
+    pub x: Option<Cow<'a, GameCoordinateInput>>,
     /// Required unless `name` is `auto` (then ignored); missing coordinates are not rejected.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub y: Option<GameCoordinateInput>,
+    pub y: Option<Cow<'a, GameCoordinateInput>>,
 }
 
 /// Every room object of the room plus the public profiles of the referenced users, the Invader and the Source Keeper; no `ok` marker.

@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use super::{doc, variant_doc};
 use crate::codegen::model::{
-    AccessedField, Accessor, Literal, Model, Tagged, Ty, UnionVariant, unwrapped,
+    AccessedField, Accessor, Literal, Model, Tagged, Ty, UnionVariant, is_copy_literal, unwrapped,
 };
 
 /// Discriminator values listed in a variant's documentation; longer lists are summarised.
@@ -217,7 +217,7 @@ pub fn literal(out: &mut String, name: &str, variants: &[Literal]) {
         .collect();
     let has = |ty: Ty| scalars.iter().any(|scalar| scalar.ty == ty);
     let mut derives = vec!["Clone"];
-    if !has(Ty::String) {
+    if is_copy_literal(variants) {
         derives.push("Copy");
     }
     derives.extend(["Debug", "PartialEq"]);

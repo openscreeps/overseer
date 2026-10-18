@@ -64,7 +64,7 @@ mod tests {
     fn creation_requests_name_the_class() {
         let request = official::PowerCreepCreateRequest {
             class_name: PowerCreepClassName::Operator.into(),
-            name: "Op".to_owned(),
+            name: "Op".into(),
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),

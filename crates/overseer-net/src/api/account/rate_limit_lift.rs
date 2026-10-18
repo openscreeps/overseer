@@ -89,7 +89,7 @@ impl LiftRequest {
     pub async fn send(&self) -> Result<(), Error> {
         let lift = screepsmod_auth::endpoints::UserNoRateLimit {
             body: screepsmod_auth::types::UserNoRateLimitRequest {
-                token: self.prefix.clone(),
+                token: self.prefix.as_str().into(),
             },
         };
         self.client.send(&lift).await?;

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use super::borrow;
 use super::docs;
 use super::model::{Body, Def, Field, Model, Ty};
 use super::names;
@@ -61,9 +62,13 @@ pub fn types(model: &Model, module: &Module<'_>, selection: &Selection) -> Strin
     let uses_present = defs.iter().any(
         |def| matches!(&def.body, Body::Struct(fields) if fields.iter().any(|field| field.present)),
     );
+    let uses_cow = defs.iter().any(|def| model.borrows(&def.name));
     let mut out = String::from(HEADER);
     out.push_str(module.doc);
     out.push('\n');
+    if uses_cow {
+        out.push_str("use std::borrow::Cow;\n");
+    }
     if uses_map {
         out.push_str("use std::collections::BTreeMap;\n");
     }
@@ -174,6 +179,7 @@ fn variant_doc(ty: &Ty) -> String {
 fn emit_struct(out: &mut String, model: &Model, name: &str, fields: &[Field]) {
     let sensitive = fields.iter().any(Field::sensitive);
     let default = fields.iter().all(|field| model.is_default(&field.ty));
+    let borrows = model.borrows(name);
     let mut derives = vec!["Clone"];
     if !sensitive {
         derives.push("Debug");
@@ -193,7 +199,8 @@ fn emit_struct(out: &mut String, model: &Model, name: &str, fields: &[Field]) {
         w!(out, "pub struct {name} {{}}\n");
         return;
     }
-    w!(out, "pub struct {name} {{\n");
+    let lifetime = if borrows { "<'a>" } else { "" };
+    w!(out, "pub struct {name}{lifetime} {{\n");
     for field in fields {
         let fallback = format!("The `{}` property.", field.json);
         doc(out, field.doc.as_deref().unwrap_or(&fallback));
@@ -212,13 +219,19 @@ fn emit_struct(out: &mut String, model: &Model, name: &str, fields: &[Field]) {
         if !serde.is_empty() {
             w!(out, "#[serde({})]\n", serde.join(", "));
         }
-        w!(out, "pub {}: {},\n", field.ident, field.ty.render(""));
+        let ty = if borrows {
+            borrow::field_type(model, &field.ty)
+        } else {
+            field.ty.render("")
+        };
+        w!(out, "pub {}: {ty},\n", field.ident);
     }
     out.push_str("}\n");
     if sensitive {
+        let lifetime = if borrows { "<'_>" } else { "" };
         w!(
             out,
-            "\nimpl fmt::Debug for {name} {{\nfn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{\nf.debug_struct({name:?})\n"
+            "\nimpl fmt::Debug for {name}{lifetime} {{\nfn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{\nf.debug_struct({name:?})\n"
         );
         for field in fields {
             let label = field.ident.trim_start_matches("r#");
@@ -271,7 +284,21 @@ pub fn endpoints(model: &Model, operations: &[Operation], module: &Endpoints<'_>
 //! Fields are the operation's query and path parameters (`Option` when not required) and its
 //! JSON request body (`body`); [`Endpoint::Response`] is the success body. The session sends
 //! the `X-Token`, `X-Username` and `X-Server-Password` headers itself.
-
+",
+    );
+    if operations
+        .iter()
+        .any(|operation| borrows_body(model, operation))
+    {
+        out.push_str(
+            "//!
+//! A request body that no other type holds keeps its strings, lists and objects as `Cow`, so
+//! that it can borrow the values of the caller. The endpoint then has the lifetime of its body.
+",
+        );
+    }
+    out.push_str(
+        "
 #[cfg(test)]
 mod tests;
 
@@ -299,8 +326,18 @@ mod tests;
     out
 }
 
+/// Whether the request body of `operation` borrows (see [`borrow`]).
+fn borrows_body(model: &Model, operation: &Operation) -> bool {
+    matches!(&operation.body, Some((Ty::Named(name), _)) if model.borrows(name))
+}
+
 fn emit_endpoint(out: &mut String, model: &Model, operation: &Operation) {
     let name = &operation.name;
+    let (generics, lifetime) = if borrows_body(model, operation) {
+        ("<'a>", "<'_>")
+    } else {
+        ("", "")
+    };
     let mut text = format!("`{} /{}`", operation.method, operation.path);
     if let Some(summary) = &operation.summary {
         let summary = summary.trim();
@@ -325,7 +362,7 @@ fn emit_endpoint(out: &mut String, model: &Model, operation: &Operation) {
         let default = if default { "Default, " } else { "" };
         w!(
             out,
-            "#[derive(Clone, Debug, {default}PartialEq)]\npub struct {name} {{\n"
+            "#[derive(Clone, Debug, {default}PartialEq)]\npub struct {name}{generics} {{\n"
         );
         for param in &operation.params {
             let fallback = format!("The `{}` parameter.", param.name);
@@ -340,7 +377,7 @@ fn emit_endpoint(out: &mut String, model: &Model, operation: &Operation) {
         if let Some((ty, _)) = &operation.body {
             w!(
                 out,
-                "/// The JSON request body.\npub body: {},\n",
+                "/// The JSON request body.\npub body: {}{generics},\n",
                 ty.render("types::")
             );
         }
@@ -364,7 +401,7 @@ fn emit_endpoint(out: &mut String, model: &Model, operation: &Operation) {
     };
     w!(
         out,
-        "impl Endpoint for {name} {{\ntype Response = {};\nconst METHOD: Method = Method::{};\nconst PATH: &'static str = {:?};\nconst AUTH: Auth = Auth::{auth};\nconst FORMAT: Format = Format::{format};\n",
+        "impl Endpoint for {name}{lifetime} {{\ntype Response = {};\nconst METHOD: Method = Method::{};\nconst PATH: &'static str = {:?};\nconst AUTH: Auth = Auth::{auth};\nconst FORMAT: Format = Format::{format};\n",
         operation.response.render("types::"),
         operation.method,
         operation.path,

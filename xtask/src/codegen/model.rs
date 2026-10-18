@@ -315,6 +315,8 @@ pub struct Model {
     /// The schema each definition was lowered from, by definition name (definitions the
     /// lowering creates; not those [`Self::finish`] adds).
     sources: BTreeMap<String, Value>,
+    /// The structs that borrow, see [`Self::borrow`].
+    borrowing: BTreeSet<String>,
 }
 
 impl Model {
@@ -340,6 +342,7 @@ impl Model {
             options,
             keep_unknown,
             sources: BTreeMap::new(),
+            borrowing: BTreeSet::new(),
         };
         let components = model.components.clone();
         for (name, schema) in &components {
@@ -761,6 +764,44 @@ impl Model {
             _ => true,
         }
     }
+
+    /// Makes the structs among `names` borrow if they hold a field of a type that is not
+    /// `Copy`. Such a struct takes the lifetime `'a` and holds each of these fields as `Cow`
+    /// (see [`super::borrow`]).
+    pub fn borrow(&mut self, names: &BTreeSet<String>) {
+        let borrowing = names
+            .iter()
+            .filter(|name| {
+                matches!(
+                    self.defs.get(name.as_str()).map(|def| &def.body),
+                    Some(Body::Struct(fields)) if fields.iter().any(|field| !self.is_copy(&field.ty))
+                )
+            })
+            .cloned()
+            .collect();
+        self.borrowing = borrowing;
+    }
+
+    /// Whether the definition `name` borrows (see [`Self::borrow`]).
+    pub fn borrows(&self, name: &str) -> bool {
+        self.borrowing.contains(name)
+    }
+
+    /// Whether the Rust type of `ty` is `Copy`.
+    pub fn is_copy(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Bool | Ty::I64 | Ty::U64 | Ty::F64 | Ty::Unit => true,
+            Ty::Option(inner) | Ty::Array(inner, _) => self.is_copy(inner),
+            Ty::Tuple(items) => items.iter().all(|item| self.is_copy(item)),
+            Ty::Named(name) => match self.defs.get(name).map(|def| &def.body) {
+                Some(Body::StrEnum(_)) => true,
+                Some(Body::Literal(variants)) => is_copy_literal(variants),
+                Some(Body::Alias(inner)) => self.is_copy(inner),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
 }
 
 /// Appends the generated types `ty` holds by value.
@@ -775,6 +816,13 @@ fn by_value_names<'t>(ty: &'t Ty, out: &mut Vec<&'t str>) {
         }
         _ => {}
     }
+}
+
+/// Whether a literal enum of `variants` is `Copy`: no variant holds a string.
+pub fn is_copy_literal(variants: &[Literal]) -> bool {
+    !variants
+        .iter()
+        .any(|variant| matches!(variant, Literal::Scalar(scalar) if scalar.ty == Ty::String))
 }
 
 /// `ty` without `Option` and `Box` layers.

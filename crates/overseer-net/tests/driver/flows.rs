@@ -396,10 +396,9 @@ async fn user_requests(official: bool) -> Vec<Request> {
     );
     let mut modules = Modules::new();
     modules.insert_js("main", "loop");
-    let sent = api.set_code("default", modules.clone()).await.unwrap();
-    assert_eq!(sent, modules);
+    api.set_code("default", &modules).await.unwrap();
     api.clone_branch("default", "next").await.unwrap();
-    api.create_branch("fresh", modules).await.unwrap();
+    api.create_branch("fresh", &modules).await.unwrap();
     api.delete_branch("old").await.unwrap();
     api.set_active_branch(CodeTarget::Simulation, "next")
         .await

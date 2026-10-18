@@ -5,6 +5,8 @@
 //! the [`World`](crate::World)'s default shard when `shard` is `None` (official servers need
 //! one; single-world servers never send one).
 
+use std::borrow::Cow;
+
 use overseer_core::api::{community, official, openscreeps};
 use overseer_core::model::memory::{MemoryValue, segment_data};
 
@@ -159,13 +161,13 @@ macro_rules! memory_api {
                 shard: Option<&str>,
             ) -> Result<(), Error> {
                 let body = $contract::types::UserMemorySegmentSetRequest {
-                    data: $contract::types::UserMemorySegmentSetRequestData::String(
+                    data: Cow::Owned($contract::types::UserMemorySegmentSetRequestData::String(
                         data.to_owned(),
+                    )),
+                    segment: Cow::Owned(
+                        $contract::types::UserMemorySegmentSetRequestSegment::Integer(id.into()),
                     ),
-                    segment: $contract::types::UserMemorySegmentSetRequestSegment::Integer(
-                        id.into(),
-                    ),
-                    shard: self.client.resolve_shard(shard).await?,
+                    shard: self.client.resolve_shard(shard).await?.map(Into::into),
                 };
                 self.client
                     .send(&$contract::endpoints::UserMemorySegmentSet { body })
@@ -182,9 +184,9 @@ macro_rules! write_memory {
     ($self:ident, $contract:ident, $path:expr, $value:expr, $shard:expr) => {{
         let body = $contract::types::UserMemorySetRequest {
             memory: None,
-            path: Some($path.to_owned()),
-            shard: $self.client.resolve_shard($shard).await?,
-            value: $value,
+            path: Some($path.into()),
+            shard: $self.client.resolve_shard($shard).await?.map(Into::into),
+            value: $value.map(Cow::Owned),
         };
         $self
             .client

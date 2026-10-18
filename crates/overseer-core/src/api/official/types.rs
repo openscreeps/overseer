@@ -4,6 +4,7 @@
 //! One type per component schema, plus types for inline schemas named after their location. Unknown
 //! fields are ignored.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -32,9 +33,9 @@ pub struct AdminEarlyAccessListResponseListItem {
 
 /// Request body of `endpoints::AdminEarlyAccessSend`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct AdminEarlyAccessSendRequest {
+pub struct AdminEarlyAccessSendRequest<'a> {
     /// Selected applicant e-mail addresses.
-    pub emails: Vec<String>,
+    pub emails: Cow<'a, [String]>,
 }
 
 /// The `AdminTimelineStatsResponse` schema.
@@ -53,9 +54,9 @@ pub struct ApiError {
 
 /// The `ArenaActivateRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ArenaActivateRequest {
+pub struct ArenaActivateRequest<'a> {
     /// Arena activation code entered by the player.
-    pub code: String,
+    pub code: Cow<'a, str>,
 }
 
 /// The `ArenaFindInitRoomResponse` schema.
@@ -83,13 +84,13 @@ pub struct ArenaStatusResponse {
 
 /// The `ArenaStatusUpdateRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ArenaStatusUpdateRequest {
+pub struct ArenaStatusUpdateRequest<'a> {
     /// Respawn preference from the Arena respawn toggle (`true` after the Arena tip dialog).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respawn: Option<bool>,
     /// Current Arena room name from the route.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub room: Option<String>,
+    pub room: Option<Cow<'a, str>>,
 }
 
 /// The `repoScope` parameter.
@@ -310,20 +311,20 @@ impl fmt::Debug for AuthQueryTokenResult {
 
 /// The `AuthSigninRequest` schema.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct AuthSigninRequest {
+pub struct AuthSigninRequest<'a> {
     /// Account e-mail address.
-    pub email: String,
+    pub email: Cow<'a, str>,
     /// Account password.
-    pub password: String,
+    pub password: Cow<'a, str>,
     /// `reCAPTCHA` response sent by the official web client.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recaptcha: Option<String>,
+    pub recaptcha: Option<Cow<'a, str>>,
     /// Hex-encoded Steam session ticket sent by the official web client's Steam desktop build.
     #[serde(rename = "steamTicket", skip_serializing_if = "Option::is_none")]
-    pub steam_ticket: Option<String>,
+    pub steam_ticket: Option<Cow<'a, str>>,
 }
 
-impl fmt::Debug for AuthSigninRequest {
+impl fmt::Debug for AuthSigninRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthSigninRequest")
             .field("email", &self.email)
@@ -371,15 +372,15 @@ pub struct AuthSteamAccount {
 
 /// The `AuthSteamTicketRequest` schema.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct AuthSteamTicketRequest {
+pub struct AuthSteamTicketRequest<'a> {
     /// Hex-encoded Steam session ticket (`GetAuthSessionTicket`), or the encrypted app ticket when `useNativeAuth` is true.
-    pub ticket: String,
+    pub ticket: Cow<'a, str>,
     /// Request Greenworks encrypted app-ticket verification instead of session-ticket verification.
     #[serde(rename = "useNativeAuth", skip_serializing_if = "Option::is_none")]
     pub use_native_auth: Option<bool>,
 }
 
-impl fmt::Debug for AuthSteamTicketRequest {
+impl fmt::Debug for AuthSteamTicketRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthSteamTicketRequest")
             .field("ticket", &Redacted)
@@ -421,33 +422,33 @@ pub struct EmptySuccess {}
 
 /// One account-level (global) intent. The server wraps `intent` in a one-element list and sanitizes it with the engine intent table: known names keep only their schema fields, unknown names store nothing. The global processor acts on market (`createOrder`, `changeOrderPrice`, `extendOrder`, `cancelOrder`, `deal`) and power-creep (`spawnPowerCreep`, `suicidePowerCreep`, `deletePowerCreep`, `upgradePowerCreep`, `createPowerCreep`, `renamePowerCreep`) intents; other known names are sanitized and queued but have no global effect. `generatePixel`, `unlockCpu` and `activateAccess` are official account intents that the pinned backend-local intent table does not know.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameAddGlobalIntentRequest {
+pub struct GameAddGlobalIntentRequest<'a> {
     /// Single payload object for the named intent (queued as one list element). Names with a `GameIntent*` schema are typed by the conditions below; for any other name the payload is arbitrary JSON, which the server discards. Extra fields are allowed and discarded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub intent: Option<BTreeMap<String, serde_json::Value>>,
+    pub intent: Option<Cow<'a, BTreeMap<String, serde_json::Value>>>,
     /// The `name` property.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// Manual intent for one room object (or the room itself). The engine sanitizer keeps only the fields of the named intent; the `if`/`then` branches bind `intent` to that payload schema. Unknown intent names are accepted but store an empty intent record (no effect).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameAddObjectIntentRequest {
+pub struct GameAddObjectIntentRequest<'a> {
     /// Target room object id, or the literal `room` for room-level intents (`createFlag`, `removeFlag`, `createConstructionSite`, `removeConstructionSite`, `destroyStructure`, which the room processor iterates as lists).
     #[serde(rename = "_id")]
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// Intent payload. `null`/absent stores nothing. The official client sends a JSON object (e.g. `{id}` for `suicide`); the community client types this parameter as a JSON string, but its documented examples send objects and arrays. Names with a `GameIntent*` schema are typed by the conditions below; for any other name the payload is arbitrary JSON, which the server discards.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub intent: Option<GameAddObjectIntentRequestIntent>,
+    pub intent: Option<Cow<'a, GameAddObjectIntentRequestIntent>>,
     /// Intent name from the engine intent table.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// Intent payload. `null`/absent stores nothing. The official client sends a JSON object (e.g. `{id}` for `suicide`); the community client types this parameter as a JSON string, but its documented examples send objects and arrays. Names with a `GameIntent*` schema are typed by the conditions below; for any other name the payload is arbitrary JSON, which the server discards.
@@ -540,40 +541,40 @@ impl GameBuildableStructureType {
 
 /// The `GameChangeFlagColorRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameChangeFlagColorRequest {
+pub struct GameChangeFlagColorRequest<'a> {
     /// The `color` property.
     pub color: GameFlagColor,
     /// The `name` property.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// Room holding the flag. The official client always sends the current room.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub room: Option<RoomName>,
+    pub room: Option<Cow<'a, str>>,
     /// The `secondaryColor` property.
     #[serde(rename = "secondaryColor")]
     pub secondary_color: GameFlagColor,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// The `GameCheckUniqueFlagNameRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameCheckUniqueFlagNameRequest {
+pub struct GameCheckUniqueFlagNameRequest<'a> {
     /// The `name` property.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// The `GameCheckUniqueObjectNameRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GameCheckUniqueObjectNameRequest {
+pub struct GameCheckUniqueObjectNameRequest<'a> {
     /// The `name` property.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// The `type` property.
     pub r#type: GameCheckUniqueObjectNameRequestType,
 }
@@ -625,22 +626,22 @@ pub enum GameCoordinateInput {
 
 /// The `GameCreateConstructionRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GameCreateConstructionRequest {
+pub struct GameCreateConstructionRequest<'a> {
     /// Required (non-empty) when `structureType` is `spawn`; otherwise optional. A non-string truthy value yields `invalid params`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: Option<Cow<'a, str>>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// The `structureType` property.
     #[serde(rename = "structureType")]
     pub structure_type: GameBuildableStructureType,
     /// The `x` property.
-    pub x: GameCoordinateInput,
+    pub x: Cow<'a, GameCoordinateInput>,
     /// The `y` property.
-    pub y: GameCoordinateInput,
+    pub y: Cow<'a, GameCoordinateInput>,
 }
 
 /// Creation acknowledgement with the new site's `_id`, which the official client reads. The community client additionally types a `MongoDB` insert result (`result`, `ops`, `insertedCount`, `insertedIds`).
@@ -676,19 +677,19 @@ pub struct GameCreateConstructionResponseResult {
 
 /// The `GameCreateFlagRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameCreateFlagRequest {
+pub struct GameCreateFlagRequest<'a> {
     /// The `color` property.
     pub color: GameFlagColor,
     /// The `name` property.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// The `secondaryColor` property.
     #[serde(rename = "secondaryColor")]
     pub secondary_color: GameFlagColor,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// JSON number (strings are rejected); fractional values are accepted and stored as given.
     pub x: f64,
     /// JSON number (strings are rejected); fractional values are accepted and stored as given.
@@ -697,23 +698,23 @@ pub struct GameCreateFlagRequest {
 
 /// The `GameCreateInvaderRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GameCreateInvaderRequest {
+pub struct GameCreateInvaderRequest<'a> {
     /// Truthy boosts parts: heal LO, `ranged_attack` KO, work ZH, attack UH.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boosted: Option<bool>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// The `size` property.
     pub size: GameCreateInvaderRequestSize,
     /// The `type` property.
     pub r#type: GameCreateInvaderRequestType,
     /// The `x` property.
-    pub x: GameCoordinateInput,
+    pub x: Cow<'a, GameCoordinateInput>,
     /// The `y` property.
-    pub y: GameCoordinateInput,
+    pub y: Cow<'a, GameCoordinateInput>,
 }
 
 /// The `size` property.
@@ -818,10 +819,10 @@ pub struct GameFindObjectResponseObject {
 
 /// The official client sends the current room.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameFinishRequest {
+pub struct GameFinishRequest<'a> {
     /// The `room` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub room: Option<RoomName>,
+    pub room: Option<Cow<'a, str>>,
 }
 
 /// Flag color constant (`COLORS_ALL`): 1 red, 2 purple, 3 blue, 4 cyan, 5 green, 6 yellow, 7 orange, 8 brown, 9 grey, 10 white.
@@ -829,10 +830,10 @@ pub type GameFlagColor = u64;
 
 /// The `GameGenUniqueObjectNameRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GameGenUniqueObjectNameRequest {
+pub struct GameGenUniqueObjectNameRequest<'a> {
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// Object type; only `spawn` is accepted (anything else yields `invalid params`).
     pub r#type: GameGenUniqueObjectNameRequestType,
 }
@@ -864,13 +865,13 @@ pub struct GameGeneratedNameResponse {
 
 /// History moment to share, as sent by the official room history view.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameHistoryShareRequest {
+pub struct GameHistoryShareRequest<'a> {
     /// The `room` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub room: Option<RoomName>,
+    pub room: Option<Cow<'a, str>>,
     /// The `shard` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// Game tick of the shared history moment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<i64>,
@@ -1670,15 +1671,15 @@ pub struct GameMapStatsDecorationDefinition {
 
 /// The `GameMapStatsRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameMapStatsRequest {
+pub struct GameMapStatsRequest<'a> {
     /// Room names. The official world map sends the rooms of the visible sectors.
-    pub rooms: Vec<String>,
+    pub rooms: Cow<'a, [String]>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// Statistic name suffixed with an interval, matched by `/^(.*?)(\d+)$/`. `owner0` and `claim0` request only ownership data; `<GameRoomStatName><8|180|1440>` (e.g. `energyHarvested8`) additionally requests the ranking of that statistic.
     #[serde(rename = "statName")]
-    pub stat_name: String,
+    pub stat_name: Cow<'a, str>,
 }
 
 /// The `GameMapStatsResponse` schema.
@@ -1763,19 +1764,19 @@ pub struct GameMapStatsRoomOwn {
 
 /// The `GamePlaceSpawnRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GamePlaceSpawnRequest {
+pub struct GamePlaceSpawnRequest<'a> {
     /// Optional spawn name; the spawn is unnamed when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: Option<Cow<'a, str>>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// The `x` property.
-    pub x: GameCoordinateInput,
+    pub x: Cow<'a, GameCoordinateInput>,
     /// The `y` property.
-    pub y: GameCoordinateInput,
+    pub y: Cow<'a, GameCoordinateInput>,
 }
 
 /// Placement acknowledgement. backend-local returns `{ok: 1, newbie: true}`; the official client does not read the body.
@@ -1816,25 +1817,25 @@ pub struct GameRandomNoviceRoomResponse {
 
 /// The `GameRemoveFlagRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameRemoveFlagRequest {
+pub struct GameRemoveFlagRequest<'a> {
     /// The `name` property.
-    pub name: String,
+    pub name: Cow<'a, str>,
     /// The `room` property.
-    pub room: RoomName,
+    pub room: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// The `GameRemoveInvaderRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameRemoveInvaderRequest {
+pub struct GameRemoveInvaderRequest<'a> {
     /// Id of an invader summoned by the caller.
     #[serde(rename = "_id")]
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// Active decoration instance in a room (screeps.com inventory system). The official client reads `user`, `active` and `decoration`; the community client types it as a `DecorationInstance`.
@@ -4011,9 +4012,9 @@ pub struct GameRoomTerrainTilesResponse {
 
 /// The `GameRoomsRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameRoomsRequest {
+pub struct GameRoomsRequest<'a> {
     /// Room names; unknown rooms are skipped.
-    pub rooms: Vec<String>,
+    pub rooms: Cow<'a, [String]>,
 }
 
 /// The `GameRoomsResponse` schema.
@@ -4025,16 +4026,16 @@ pub struct GameRoomsResponse {
 
 /// The `GameSetNotifyWhenAttackedRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameSetNotifyWhenAttackedRequest {
+pub struct GameSetNotifyWhenAttackedRequest<'a> {
     /// Room object id.
     #[serde(rename = "_id")]
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// Coerced with `!!`; omitted means `false`. The official client sends the selected object's current flag value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// The `GameShardInfo` schema.
@@ -4058,10 +4059,10 @@ pub struct GameShardInfo {
 
 /// The `GameShardOnlyRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct GameShardOnlyRequest {
+pub struct GameShardOnlyRequest<'a> {
     /// Shard routing. The official client sends `shard` inside the JSON body for POST operations.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// The `GameShardsInfoResponse` schema.
@@ -4537,15 +4538,15 @@ pub struct PlatformServer {
 
 /// The `PlatformServerLikeRequest` schema.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PlatformServerLikeRequest {
+pub struct PlatformServerLikeRequest<'a> {
     /// Community server `_id` from `POST /api/servers/list`.
-    pub server: String,
+    pub server: Cow<'a, str>,
     /// Steam auth session ticket of the desktop client.
     #[serde(rename = "steamTicket")]
-    pub steam_ticket: String,
+    pub steam_ticket: Cow<'a, str>,
 }
 
-impl fmt::Debug for PlatformServerLikeRequest {
+impl fmt::Debug for PlatformServerLikeRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlatformServerLikeRequest")
             .field("server", &self.server)
@@ -4567,13 +4568,13 @@ pub struct PlatformServerSettings {
 
 /// Request body of `endpoints::PlatformServersList`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PlatformServersListRequest {
+pub struct PlatformServersListRequest<'a> {
     /// Steam auth session ticket when the desktop client has one; omitted otherwise.
     #[serde(rename = "steamTicket", skip_serializing_if = "Option::is_none")]
-    pub steam_ticket: Option<String>,
+    pub steam_ticket: Option<Cow<'a, str>>,
 }
 
-impl fmt::Debug for PlatformServersListRequest {
+impl fmt::Debug for PlatformServersListRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlatformServersListRequest")
             .field("steam_ticket", &Redacted)
@@ -4827,12 +4828,12 @@ impl PowerCreepClassName {
 
 /// The `PowerCreepCreateRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PowerCreepCreateRequest {
+pub struct PowerCreepCreateRequest<'a> {
     /// Value of `POWER_CLASS`; anything else yields `invalid class`.
     #[serde(rename = "className")]
     pub class_name: PowerCreepCreateRequestClassName,
     /// Stored as `String(name).substring(0, 50)`: any JSON value is converted (an omitted name becomes the literal `undefined`).
-    pub name: String,
+    pub name: Cow<'a, str>,
 }
 
 /// Value of `POWER_CLASS`; anything else yields `invalid class`.
@@ -4858,9 +4859,9 @@ pub type PowerCreepCreateResponse = Ok;
 
 /// The `PowerCreepIdRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PowerCreepIdRequest {
+pub struct PowerCreepIdRequest<'a> {
     /// Power creep id owned by the caller.
-    pub id: String,
+    pub id: Cow<'a, str>,
 }
 
 /// The `PowerCreepListResponse` schema.
@@ -4882,33 +4883,33 @@ pub struct PowerCreepPowerLevel {
 
 /// The `PowerCreepRenameRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PowerCreepRenameRequest {
+pub struct PowerCreepRenameRequest<'a> {
     /// The `id` property.
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// Stored as `String(name).substring(0, 50)`; any JSON value is converted.
-    pub name: String,
+    pub name: Cow<'a, str>,
 }
 
 /// The `PowerCreepUpgradeRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PowerCreepUpgradeRequest {
+pub struct PowerCreepUpgradeRequest<'a> {
     /// The `id` property.
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// Complete requested level per power id (missing powers count as level 0, so omitting a learned power is a downgrade and is refused). Only powers of the creep's class, levels 0..5; the sum is the new creep level (max 25).
-    pub powers: BTreeMap<String, u64>,
+    pub powers: Cow<'a, BTreeMap<String, u64>>,
 }
 
 /// Request body of `endpoints::RegisterChangePassword`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RegisterChangePasswordRequest {
+pub struct RegisterChangePasswordRequest<'a> {
     /// New password; omitted by the link-validation call.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
+    pub password: Option<Cow<'a, str>>,
     /// Recovery token from the e-mailed link (`t` route parameter).
-    pub token: String,
+    pub token: Cow<'a, str>,
 }
 
-impl fmt::Debug for RegisterChangePasswordRequest {
+impl fmt::Debug for RegisterChangePasswordRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegisterChangePasswordRequest")
             .field("password", &Redacted)
@@ -4919,11 +4920,11 @@ impl fmt::Debug for RegisterChangePasswordRequest {
 
 /// Request body of `endpoints::RegisterConfirm`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct RegisterConfirmRequest {
+pub struct RegisterConfirmRequest<'a> {
     /// `id` route parameter of the confirmation link.
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// `s` route parameter (confirmation secret) of the confirmation link.
-    pub s: String,
+    pub s: Cow<'a, str>,
 }
 
 /// The `RegisterConfirmResponse` schema.
@@ -4936,51 +4937,51 @@ pub struct RegisterConfirmResponse {
 
 /// Request body of `endpoints::RegisterRecover`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct RegisterRecoverRequest {
+pub struct RegisterRecoverRequest<'a> {
     /// Account e-mail address.
-    pub email: String,
+    pub email: Cow<'a, str>,
 }
 
 /// The `RegisterSetUsernameRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct RegisterSetUsernameRequest {
+pub struct RegisterSetUsernameRequest<'a> {
     /// Optional e-mail stored lower-cased; must match the server e-mail rule.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub email: Option<Cow<'a, str>>,
     /// `reCAPTCHA` response sent by the official web client.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recaptcha: Option<String>,
+    pub recaptcha: Option<Cow<'a, str>>,
     /// Whether the tutorial was completed before registration (sent by the official web client).
     #[serde(rename = "tutorialDone", skip_serializing_if = "Option::is_none")]
     pub tutorial_done: Option<bool>,
     /// New unique (case-insensitive) username.
-    pub username: String,
+    pub username: Cow<'a, str>,
 }
 
 /// The `RegisterSubmitRequest` schema.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RegisterSubmitRequest {
+pub struct RegisterSubmitRequest<'a> {
     /// Code branches edited before registration, as kept by the official web client.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub branches: Option<Vec<RegisterSubmitRequestBranchesItem>>,
+    pub branches: Option<Cow<'a, [RegisterSubmitRequestBranchesItem]>>,
     /// The `email` property.
-    pub email: String,
+    pub email: Cow<'a, str>,
     /// The `modules` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modules: Option<UserCodeModules>,
+    pub modules: Option<Cow<'a, UserCodeModules>>,
     /// The `password` property.
-    pub password: String,
+    pub password: Cow<'a, str>,
     /// `reCAPTCHA` response.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recaptcha: Option<String>,
+    pub recaptcha: Option<Cow<'a, str>>,
     /// Whether the tutorial was completed before registration.
     #[serde(rename = "tutorialDone", skip_serializing_if = "Option::is_none")]
     pub tutorial_done: Option<bool>,
     /// The `username` property.
-    pub username: String,
+    pub username: Cow<'a, str>,
 }
 
-impl fmt::Debug for RegisterSubmitRequest {
+impl fmt::Debug for RegisterSubmitRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegisterSubmitRequest")
             .field("branches", &self.branches)
@@ -5007,19 +5008,19 @@ pub struct RegisterSubmitRequestBranchesItem {
 
 /// The `ReplaysAddRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ReplaysAddRequest {
+pub struct ReplaysAddRequest<'a> {
     /// Replay log: JSON serialized, gzip-compressed (pako level 9) and sent as a binary string.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub log: Option<String>,
+    pub log: Option<Cow<'a, str>>,
     /// Simulation map; the official client sends `survival`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub map: Option<String>,
+    pub map: Option<Cow<'a, str>>,
     /// Final Survival score.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f64>,
     /// Client build version (asset bust value).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub v: Option<String>,
+    pub v: Option<Cow<'a, str>>,
 }
 
 /// The `ReplaysAddResponse` schema.
@@ -5660,21 +5661,21 @@ pub struct StoreSteamPullResponse {
 
 /// The `StoreSteamPushResourcesRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct StoreSteamPushResourcesRequest {
+pub struct StoreSteamPushResourcesRequest<'a> {
     /// Number of units to transfer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<i64>,
     /// Account resource to transfer; the official client sends `accessKey`, `cpuUnlock` or `pixel`.
     #[serde(rename = "resourceType", skip_serializing_if = "Option::is_none")]
-    pub resource_type: Option<String>,
+    pub resource_type: Option<Cow<'a, str>>,
 }
 
 /// The `StoreXsollaCouponRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct StoreXsollaCouponRequest {
+pub struct StoreXsollaCouponRequest<'a> {
     /// Coupon code.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
+    pub code: Option<Cow<'a, str>>,
     /// `true` to convert a credits coupon into subscription time when the player already has an active subscription.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub convert: Option<bool>,
@@ -5704,10 +5705,10 @@ pub struct StoreXsollaTokenItem {
 
 /// The `StoreXsollaTokenRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct StoreXsollaTokenRequest {
+pub struct StoreXsollaTokenRequest<'a> {
     /// The `items` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<Vec<StoreXsollaTokenItem>>,
+    pub items: Option<Cow<'a, [StoreXsollaTokenItem]>>,
 }
 
 /// The `StoreXsollaTokenResponse` schema.
@@ -5735,22 +5736,22 @@ pub struct StoreXsollaUserResponse {
 
 /// Request body of `endpoints::SupportReportProblem`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct SupportReportProblemRequest {
+pub struct SupportReportProblemRequest<'a> {
     /// The `description` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<Cow<'a, str>>,
     /// Contact e-mail (pre-filled from the account when signed in).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub email: Option<Cow<'a, str>>,
     /// The `subject` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
+    pub subject: Option<Cow<'a, str>>,
     /// The `urgent` property.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub urgent: Option<bool>,
     /// Client/version details entered by the user.
     #[serde(rename = "versionDetails", skip_serializing_if = "Option::is_none")]
-    pub version_details: Option<String>,
+    pub version_details: Option<Cow<'a, str>>,
 }
 
 /// The `SupportSsoJwtResponse` schema.
@@ -5828,28 +5829,28 @@ pub struct UserActivateCpuUnlocksRequest {
 
 /// Request body of `endpoints::UserActivateShardAccess`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserActivateShardAccessRequest {
+pub struct UserActivateShardAccessRequest<'a> {
     /// Number of access keys to spend, chosen in the access-key dialog.
     pub count: i64,
     /// The `shard` property.
-    pub shard: ShardName,
+    pub shard: Cow<'a, str>,
 }
 
 /// Request body of `endpoints::UserAuthTokenCreate`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserAuthTokenCreateRequest {
+pub struct UserAuthTokenCreateRequest<'a> {
     /// Endpoint permissions keyed `METHOD /api/path`; the form offers `GET /api/user/name`, `GET /api/user/money-history`, `GET /api/market/my-orders`, `GET /api/user/memory`, `GET /api/user/memory-segment` and `POST /api/user/memory-segment` (all `false` by default).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoints: Option<BTreeMap<String, bool>>,
+    pub endpoints: Option<Cow<'a, BTreeMap<String, bool>>>,
     /// Memory segment selection entered as text (empty by default).
     #[serde(rename = "memorySegments", skip_serializing_if = "Option::is_none")]
-    pub memory_segments: Option<String>,
+    pub memory_segments: Option<Cow<'a, str>>,
     /// Token type; the form default is `full`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+    pub r#type: Option<Cow<'a, str>>,
     /// Websocket permissions (form defaults `console: false`, `rooms: false`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub websockets: Option<UserAuthTokenCreateRequestWebsockets>,
+    pub websockets: Option<Cow<'a, UserAuthTokenCreateRequestWebsockets>>,
 }
 
 /// Websocket permissions (form defaults `console: false`, `rooms: false`).
@@ -5880,13 +5881,13 @@ impl fmt::Debug for UserAuthTokenCreateResponse {
 
 /// Request body of `endpoints::UserAuthTokenDelete`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserAuthTokenDeleteRequest {
+pub struct UserAuthTokenDeleteRequest<'a> {
     /// Identifier of the token entry (from the template-bound token list).
     #[serde(rename = "tokenId")]
-    pub token_id: String,
+    pub token_id: Cow<'a, str>,
 }
 
-impl fmt::Debug for UserAuthTokenDeleteRequest {
+impl fmt::Debug for UserAuthTokenDeleteRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserAuthTokenDeleteRequest")
             .field("token_id", &Redacted)
@@ -6074,9 +6075,9 @@ pub enum UserBadgeInputType {
 
 /// The `UserBadgeSetRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UserBadgeSetRequest {
+pub struct UserBadgeSetRequest<'a> {
     /// The `badge` property.
-    pub badge: UserBadgeInput,
+    pub badge: Cow<'a, UserBadgeInput>,
 }
 
 /// The `border` parameter.
@@ -6116,16 +6117,16 @@ pub struct UserBranchesResponse {
 
 /// The `UserCloneBranchRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserCloneBranchRequest {
+pub struct UserCloneBranchRequest<'a> {
     /// Source branch name. Empty/omitted, or a name that does not exist, falls back to `defaultModules` or `{main: ""}`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
+    pub branch: Option<Cow<'a, str>>,
     /// The `defaultModules` property.
     #[serde(rename = "defaultModules", skip_serializing_if = "Option::is_none")]
-    pub default_modules: Option<UserCodeModules>,
+    pub default_modules: Option<Cow<'a, UserCodeModules>>,
     /// Target branch name. If the branch exists its modules are overwritten.
     #[serde(rename = "newName")]
-    pub new_name: String,
+    pub new_name: Cow<'a, str>,
 }
 
 /// Code branch document (`users.code`). node-screeps-api types only `_id`, `branch`, `activeWorld` and `activeSim`; complete documents also carry `user`, `modules` and `timestamp`.
@@ -6187,15 +6188,15 @@ pub enum UserCodeModulesValue {
 
 /// The `UserCodeSetRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserCodeSetRequest {
+pub struct UserCodeSetRequest<'a> {
     /// Opaque client hash echoed in the `user:<id>/code` realtime event; the official web client compares it to recognize its own uploads.
     #[serde(rename = "_hash", skip_serializing_if = "Option::is_none")]
-    pub hash: Option<UserCodeSetRequestHash>,
+    pub hash: Option<Cow<'a, UserCodeSetRequestHash>>,
     /// Branch name, or `$activeWorld` / `$activeSim` to select the branch active in the world / simulator. Empty or omitted selects `$activeWorld`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
+    pub branch: Option<Cow<'a, str>>,
     /// The `modules` property.
-    pub modules: UserCodeModules,
+    pub modules: Cow<'a, UserCodeModules>,
 }
 
 /// Opaque client hash echoed in the `user:<id>/code` realtime event; the official web client compares it to recognize its own uploads.
@@ -6257,12 +6258,12 @@ pub struct UserConsoleQueuedResponse {
 
 /// The `UserConsoleRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserConsoleRequest {
+pub struct UserConsoleRequest<'a> {
     /// JavaScript expression evaluated in the player runtime. JSON-encoded length must not exceed 1024 characters.
-    pub expression: String,
+    pub expression: Cow<'a, str>,
     /// Shard whose runtime evaluates the expression; the official web client sends the current shard and node-screeps-api refuses to call screeps.com without one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// Request body of `endpoints::UserCpuLimitSet`.
@@ -6274,9 +6275,9 @@ pub struct UserCpuLimitSetRequest {
 
 /// The `UserCpuShardsRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserCpuShardsRequest {
+pub struct UserCpuShardsRequest<'a> {
     /// CPU limit per shard name. Observed on screeps.com: the limits must total the account CPU; omitted shards count as 0.
-    pub cpu: BTreeMap<String, u64>,
+    pub cpu: Cow<'a, BTreeMap<String, u64>>,
 }
 
 /// Success; may include database driver `result` metadata (node-screeps-api `ScreepsDbUpdateResponse`).
@@ -6481,9 +6482,9 @@ pub enum UserDecorationActivationOther {
 
 /// The `UserDecorationIdsRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserDecorationIdsRequest {
+pub struct UserDecorationIdsRequest<'a> {
     /// Ids of owned decoration instances.
-    pub decorations: Vec<String>,
+    pub decorations: Cow<'a, [String]>,
 }
 
 /// Decoration item owned by a player (screeps.com).
@@ -6635,12 +6636,12 @@ pub struct UserDecorationTheme {
 
 /// The `UserDecorationsActivateRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserDecorationsActivateRequest {
+pub struct UserDecorationsActivateRequest<'a> {
     /// Owned decoration instance id.
     #[serde(rename = "_id")]
-    pub id: String,
+    pub id: Cow<'a, str>,
     /// Values for the decoration's configurable `props` and, for room decorations, `shard` and `room`.
-    pub active: UserDecorationActivation,
+    pub active: Cow<'a, UserDecorationActivation>,
 }
 
 /// The `UserDecorationsInventoryResponse` schema.
@@ -6652,12 +6653,12 @@ pub struct UserDecorationsInventoryResponse {
 
 /// The `UserDecorationsPixelizeRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserDecorationsPixelizeRequest {
+pub struct UserDecorationsPixelizeRequest<'a> {
     /// Number of decorations to generate.
     pub count: u64,
     /// Theme id to draw from (raises the cost); empty string draws from any theme.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
+    pub theme: Option<Cow<'a, str>>,
 }
 
 /// The `UserDecorationsThemesResponse` schema.
@@ -6669,30 +6670,30 @@ pub struct UserDecorationsThemesResponse {
 
 /// The `UserDeleteBranchRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserDeleteBranchRequest {
+pub struct UserDeleteBranchRequest<'a> {
     /// Branch to delete. Missing branches and branches active in world or simulator are silently kept.
-    pub branch: String,
+    pub branch: Cow<'a, str>,
 }
 
 /// Request body of `endpoints::UserEarlyPreviewActivate`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserEarlyPreviewActivateRequest {
+pub struct UserEarlyPreviewActivateRequest<'a> {
     /// Activation code.
-    pub code: String,
+    pub code: Cow<'a, str>,
 }
 
 /// Request body of `endpoints::UserEarlyPreviewRequest`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserEarlyPreviewRequestRequest {
+pub struct UserEarlyPreviewRequestRequest<'a> {
     /// Birth date entered in the form.
     #[serde(rename = "birthDate", skip_serializing_if = "Option::is_none")]
-    pub birth_date: Option<UserEarlyPreviewRequestRequestBirthDate>,
+    pub birth_date: Option<Cow<'a, UserEarlyPreviewRequestRequestBirthDate>>,
     /// The `email` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub email: Option<Cow<'a, str>>,
     /// The `name` property.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: Option<Cow<'a, str>>,
     /// Answer picked from the form drop-down: `student`, `geek` (tech geek), `pro` (tech professional) or `none` (none of the above). Absent until one is picked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qualify: Option<UserEarlyPreviewRequestRequestQualify>,
@@ -6744,9 +6745,9 @@ impl UserEarlyPreviewRequestRequestQualify {
 
 /// The `UserEmailRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserEmailRequest {
+pub struct UserEmailRequest<'a> {
     /// New e-mail address; stored lower-cased and must be unused.
-    pub email: String,
+    pub email: Cow<'a, str>,
 }
 
 /// The `UserFindResponse` schema.
@@ -6773,12 +6774,12 @@ pub struct UserFindSharedResponseUser {
 
 /// Request body of `endpoints::UserGithubRepoSet`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UserGithubRepoSetRequest {
+pub struct UserGithubRepoSetRequest<'a> {
     /// Folder inside the repository (empty string for the root).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub folder: Option<String>,
+    pub folder: Option<Cow<'a, str>>,
     /// Repository name to sync from, or `false` to disable synchronization.
-    pub repo: UserGithubRepoSetRequestRepo,
+    pub repo: Cow<'a, UserGithubRepoSetRequestRepo>,
 }
 
 /// Repository name to sync from, or `false` to disable synchronization.
@@ -6845,14 +6846,14 @@ pub enum UserMemorySegmentGetResponseData {
 
 /// The `UserMemorySegmentSetRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UserMemorySegmentSetRequest {
+pub struct UserMemorySegmentSetRequest<'a> {
     /// Segment contents; at most 100 `KiB` after string conversion.
-    pub data: UserMemorySegmentSetRequestData,
+    pub data: Cow<'a, UserMemorySegmentSetRequestData>,
     /// Single segment id 0-99 (parsed with `parseInt`).
-    pub segment: UserMemorySegmentSetRequestSegment,
+    pub segment: Cow<'a, UserMemorySegmentSetRequestSegment>,
     /// Shard whose segment is written; the official web client sends the current shard and node-screeps-api refuses to call screeps.com without one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
 }
 
 /// Segment contents; at most 100 `KiB` after string conversion.
@@ -6879,19 +6880,19 @@ pub enum UserMemorySegmentSetRequestSegment {
 
 /// The `UserMemorySetRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserMemorySetRequest {
+pub struct UserMemorySetRequest<'a> {
     /// Whole Memory sent by a legacy official web client code path: arbitrary JSON (the bot's Memory). Server handling unverified.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory: Option<JsonValue>,
+    pub memory: Option<Cow<'a, JsonValue>>,
     /// Dot-separated Memory path (e.g. `creeps.Harvester1`). Empty/omitted replaces the whole Memory object.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+    pub path: Option<Cow<'a, str>>,
     /// Shard whose Memory is edited; the official web client sends the current shard and node-screeps-api refuses to call screeps.com without one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<ShardName>,
+    pub shard: Option<Cow<'a, str>>,
     /// JSON value to assign. Omitted deletes the value at `path`; with no `path`, every Memory key is deleted and an object value is merged in. Serialized size limit 1 `MiB`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<JsonValue>,
+    pub value: Option<Cow<'a, JsonValue>>,
 }
 
 /// One copy of a private message. Each send creates an `out` copy owned by the sender and an `in` copy owned by the recipient.
@@ -6969,9 +6970,9 @@ pub struct UserMessagesListResponse {
 
 /// The `UserMessagesMarkReadRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserMessagesMarkReadRequest {
+pub struct UserMessagesMarkReadRequest<'a> {
     /// Id of an incoming (`in`) message owned by the caller.
-    pub id: String,
+    pub id: Cow<'a, str>,
 }
 
 /// Success. The array of internal publish/update results is merged into the body under keys `0`-`2`; not a stable contract, rely on `ok`.
@@ -6990,11 +6991,11 @@ pub struct UserMessagesMarkReadResponse {
 
 /// The `UserMessagesSendRequest` schema.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserMessagesSendRequest {
+pub struct UserMessagesSendRequest<'a> {
     /// Recipient user id (not username).
-    pub respondent: UserId,
+    pub respondent: Cow<'a, str>,
     /// Message body, at most 100 `KiB` characters.
-    pub text: String,
+    pub text: Cow<'a, str>,
 }
 
 /// The `UserMessagesUnreadCountResponse` schema.
@@ -7203,14 +7204,14 @@ pub struct UserNameResponse {
 
 /// Request body of `endpoints::UserNoRateLimit`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserNoRateLimitRequest {
+pub struct UserNoRateLimitRequest<'a> {
     /// `reCAPTCHA` response.
-    pub recaptcha: String,
+    pub recaptcha: Cow<'a, str>,
     /// First 8 characters of the API auth token.
-    pub token: String,
+    pub token: Cow<'a, str>,
 }
 
-impl fmt::Debug for UserNoRateLimitRequest {
+impl fmt::Debug for UserNoRateLimitRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserNoRateLimitRequest")
             .field("recaptcha", &self.recaptcha)
@@ -7383,15 +7384,15 @@ pub struct UserOverviewShardedResponseShardsValue {
 
 /// Request body of `endpoints::UserPasswordSet`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserPasswordSetRequest {
+pub struct UserPasswordSetRequest<'a> {
     /// Current password (the form initializes it to an empty string).
     #[serde(rename = "oldPassword")]
-    pub old_password: String,
+    pub old_password: Cow<'a, str>,
     /// New password.
-    pub password: String,
+    pub password: Cow<'a, str>,
 }
 
-impl fmt::Debug for UserPasswordSetRequest {
+impl fmt::Debug for UserPasswordSetRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserPasswordSetRequest")
             .field("old_password", &Redacted)
@@ -7508,12 +7509,12 @@ pub struct UserRoomsShardedResponse {
 
 /// The `UserSetActiveBranchRequest` schema.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UserSetActiveBranchRequest {
+pub struct UserSetActiveBranchRequest<'a> {
     /// Activate in the world or the simulator.
     #[serde(rename = "activeName")]
     pub active_name: UserSetActiveBranchRequestActiveName,
     /// Name of an existing branch.
-    pub branch: String,
+    pub branch: Cow<'a, str>,
 }
 
 /// Activate in the world or the simulator.

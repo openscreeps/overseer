@@ -81,16 +81,17 @@ impl Code {
         self.fetch(target.selector()).await
     }
 
-    /// Replaces every module of the existing `branch` (`POST /api/user/code`). Code of the
-    /// world branch runs from a later tick on, and a [`CodeChange`] is announced.
+    /// Replaces every module of the existing `branch` with `modules` (`POST /api/user/code`).
+    /// Code of the world branch runs from a later tick on, and a [`CodeChange`] is announced.
+    /// The request borrows `modules`: upload the same modules to other branches or sessions
+    /// without a copy.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Net`] when the request fails; the server rejects unknown branches
     /// (`branch does not exist`) and modules over 5 MiB in total.
-    pub async fn set_modules(&self, branch: &str, modules: Modules) -> Result<(), Error> {
-        self.overseer.user_api()?.set_code(branch, modules).await?;
-        Ok(())
+    pub async fn set_modules(&self, branch: &str, modules: &Modules) -> Result<(), Error> {
+        Ok(self.overseer.user_api()?.set_code(branch, modules).await?)
     }
 
     /// Copies the modules of `source` into the branch `new_name` (`POST /api/user/clone-branch`),
@@ -110,12 +111,13 @@ impl Code {
     }
 
     /// Creates the branch `name` with `modules` (`POST /api/user/clone-branch` with
-    /// `defaultModules`), inactive, or overwrites an existing branch of that name.
+    /// `defaultModules`), inactive, or overwrites an existing branch of that name. The request
+    /// borrows `modules`.
     ///
     /// # Errors
     ///
     /// As [`Self::clone_branch`].
-    pub async fn create_branch(&self, name: &str, modules: Modules) -> Result<(), Error> {
+    pub async fn create_branch(&self, name: &str, modules: &Modules) -> Result<(), Error> {
         Ok(self
             .overseer
             .user_api()?
@@ -211,7 +213,8 @@ impl Code {
     pub async fn push_dir(&self, branch: &str, dir: impl AsRef<Path>) -> Result<Modules, Error> {
         let api = self.overseer.user_api()?;
         let modules = read_dir(dir).await?;
-        Ok(api.set_code(branch, modules).await?)
+        api.set_code(branch, &modules).await?;
+        Ok(modules)
     }
 
     /// The signed-in user's id once the session is open.

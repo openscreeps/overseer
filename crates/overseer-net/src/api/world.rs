@@ -585,20 +585,20 @@ impl WorldOperation {
     #[must_use]
     pub fn rate_limit(self, client: &Client) -> Option<RateLimit> {
         match self {
-            Self::MapStats => client.rate_limit::<official::endpoints::GameMapStats>(),
+            Self::MapStats => client.rate_limit::<official::endpoints::GameMapStats<'_>>(),
             Self::RoomObjects => client.rate_limit::<official::endpoints::GameRoomObjects>(),
-            Self::Terrains => client.rate_limit::<official::endpoints::GameRooms>(),
+            Self::Terrains => client.rate_limit::<official::endpoints::GameRooms<'_>>(),
         }
     }
 
     /// Forgets the operation's latest rate limit ([`Client::forget_rate_limit`]).
     pub fn forget_rate_limit(self, client: &Client) {
         match self {
-            Self::MapStats => client.forget_rate_limit::<official::endpoints::GameMapStats>(),
+            Self::MapStats => client.forget_rate_limit::<official::endpoints::GameMapStats<'_>>(),
             Self::RoomObjects => {
                 client.forget_rate_limit::<official::endpoints::GameRoomObjects>();
             }
-            Self::Terrains => client.forget_rate_limit::<official::endpoints::GameRooms>(),
+            Self::Terrains => client.forget_rate_limit::<official::endpoints::GameRooms<'_>>(),
         }
     }
 }

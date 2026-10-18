@@ -3,6 +3,8 @@
 //! Every contract defines these operations identically (same paths, requests and replies), so
 //! the per-contract impls differ only in the generated module they send through.
 
+use std::borrow::Cow;
+
 use overseer_core::api::{community, official, openscreeps};
 use overseer_core::model::code::{BranchCode, CodeTarget, Modules, UserCodeBranch};
 
@@ -28,19 +30,15 @@ pub trait CodeApi {
     /// `no code` for an unknown branch.
     fn code(&self, branch: &str) -> impl Future<Output = Result<BranchCode, Error>>;
 
-    /// Replaces every module of the existing `branch` (`POST /api/user/code`) and hands
-    /// `modules` back. Code of the world branch runs from a later tick on, and a code change is
-    /// announced on the socket.
+    /// Replaces every module of the existing `branch` with `modules` (`POST /api/user/code`).
+    /// Code of the world branch runs from a later tick on, and a code change is announced on the
+    /// socket. The request borrows `modules`, so one set of modules can go to many branches.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send); the server rejects unknown
     /// branches (`branch does not exist`) and modules over 5 MiB in total.
-    fn set_code(
-        &self,
-        branch: &str,
-        modules: Modules,
-    ) -> impl Future<Output = Result<Modules, Error>>;
+    fn set_code(&self, branch: &str, modules: &Modules) -> impl Future<Output = Result<(), Error>>;
 
     /// Copies the modules of `source` into the branch `new_name` (`POST /api/user/clone-branch`),
     /// creating it inactive or overwriting an existing branch of that name. The server copies
@@ -54,7 +52,8 @@ pub trait CodeApi {
     -> impl Future<Output = Result<(), Error>>;
 
     /// Creates the branch `name` with `modules` (`POST /api/user/clone-branch` with
-    /// `defaultModules`), inactive, or overwrites an existing branch of that name.
+    /// `defaultModules`), inactive, or overwrites an existing branch of that name. The request
+    /// borrows `modules`.
     ///
     /// # Errors
     ///
@@ -62,7 +61,7 @@ pub trait CodeApi {
     fn create_branch(
         &self,
         name: &str,
-        modules: Modules,
+        modules: &Modules,
     ) -> impl Future<Output = Result<(), Error>>;
 
     /// Deletes `branch` (`POST /api/user/delete-branch`). The server silently keeps missing
@@ -97,7 +96,7 @@ impl CodeApi for Api {
         delegate!(self, api => api.code(branch).await)
     }
 
-    async fn set_code(&self, branch: &str, modules: Modules) -> Result<Modules, Error> {
+    async fn set_code(&self, branch: &str, modules: &Modules) -> Result<(), Error> {
         delegate!(self, api => api.set_code(branch, modules).await)
     }
 
@@ -105,7 +104,7 @@ impl CodeApi for Api {
         delegate!(self, api => api.clone_branch(source, new_name).await)
     }
 
-    async fn create_branch(&self, name: &str, modules: Modules) -> Result<(), Error> {
+    async fn create_branch(&self, name: &str, modules: &Modules) -> Result<(), Error> {
         delegate!(self, api => api.create_branch(name, modules).await)
     }
 
@@ -136,23 +135,23 @@ macro_rules! code_api {
                 Ok(self.client.send(&code).await?.body.into())
             }
 
-            async fn set_code(&self, branch: &str, modules: Modules) -> Result<Modules, Error> {
+            async fn set_code(&self, branch: &str, modules: &Modules) -> Result<(), Error> {
                 let upload = $contract::endpoints::UserCodeSet {
                     body: $contract::types::UserCodeSetRequest {
                         hash: None,
-                        branch: Some(branch.to_owned()),
-                        modules: modules.into(),
+                        branch: Some(branch.into()),
+                        modules: Cow::Borrowed(modules.as_map()),
                     },
                 };
                 self.client.send(&upload).await?;
-                Ok(upload.body.modules.into())
+                Ok(())
             }
 
             async fn clone_branch(&self, source: &str, new_name: &str) -> Result<(), Error> {
                 let body = $contract::types::UserCloneBranchRequest {
-                    branch: Some(source.to_owned()),
+                    branch: Some(source.into()),
                     default_modules: None,
-                    new_name: new_name.to_owned(),
+                    new_name: new_name.into(),
                 };
                 self.client
                     .send(&$contract::endpoints::UserCloneBranch { body })
@@ -160,11 +159,11 @@ macro_rules! code_api {
                 Ok(())
             }
 
-            async fn create_branch(&self, name: &str, modules: Modules) -> Result<(), Error> {
+            async fn create_branch(&self, name: &str, modules: &Modules) -> Result<(), Error> {
                 let body = $contract::types::UserCloneBranchRequest {
                     branch: None,
-                    default_modules: Some(modules.into()),
-                    new_name: name.to_owned(),
+                    default_modules: Some(Cow::Borrowed(modules.as_map())),
+                    new_name: name.into(),
                 };
                 self.client
                     .send(&$contract::endpoints::UserCloneBranch { body })
@@ -174,7 +173,7 @@ macro_rules! code_api {
 
             async fn delete_branch(&self, branch: &str) -> Result<(), Error> {
                 let body = $contract::types::UserDeleteBranchRequest {
-                    branch: branch.to_owned(),
+                    branch: branch.into(),
                 };
                 self.client
                     .send(&$contract::endpoints::UserDeleteBranch { body })
@@ -197,7 +196,7 @@ macro_rules! code_api {
                 };
                 let body = $contract::types::UserSetActiveBranchRequest {
                     active_name,
-                    branch: branch.to_owned(),
+                    branch: branch.into(),
                 };
                 self.client
                     .send(&$contract::endpoints::UserSetActiveBranch { body })

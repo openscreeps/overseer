@@ -9,6 +9,7 @@
 //! community type, and those only the official document defines identically from
 //! [`crate::api::official::types`]. Unknown fields are ignored.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -124,12 +125,12 @@ impl AuthQueryTokenResultWebsocketsItem {
 
 /// Request body of `endpoints::UserNoRateLimit`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserNoRateLimitRequest {
+pub struct UserNoRateLimitRequest<'a> {
     /// Prefix of one of the caller's API tokens (the account page sends its first 8 characters).
-    pub token: String,
+    pub token: Cow<'a, str>,
 }
 
-impl fmt::Debug for UserNoRateLimitRequest {
+impl fmt::Debug for UserNoRateLimitRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserNoRateLimitRequest")
             .field("token", &Redacted)
@@ -139,15 +140,15 @@ impl fmt::Debug for UserNoRateLimitRequest {
 
 /// Request body of `endpoints::UserPasswordSet`.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserPasswordSetRequest {
+pub struct UserPasswordSetRequest<'a> {
     /// Current password; checked only when the account already has a password.
     #[serde(rename = "oldPassword", skip_serializing_if = "Option::is_none")]
-    pub old_password: Option<String>,
+    pub old_password: Option<Cow<'a, str>>,
     /// New password.
-    pub password: String,
+    pub password: Cow<'a, str>,
 }
 
-impl fmt::Debug for UserPasswordSetRequest {
+impl fmt::Debug for UserPasswordSetRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserPasswordSetRequest")
             .field("old_password", &Redacted)

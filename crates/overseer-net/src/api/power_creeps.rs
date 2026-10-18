@@ -1,6 +1,7 @@
 //! Power creeps area: the signed-in user's power creep records, creation, renaming, upgrades,
 //! deletion and power experimentation.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use overseer_core::api::{community, official, openscreeps};
@@ -32,7 +33,7 @@ pub trait PowerCreepsApi {
     /// Returns the errors of [`Client::send`](crate::Client::send).
     fn create_power_creep(
         &self,
-        name: String,
+        name: &str,
         class: PowerCreepClassName,
     ) -> impl Future<Output = Result<Option<PowerCreep>, Error>>;
 
@@ -41,11 +42,7 @@ pub trait PowerCreepsApi {
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send).
-    fn rename_power_creep(
-        &self,
-        id: String,
-        name: String,
-    ) -> impl Future<Output = Result<(), Error>>;
+    fn rename_power_creep(&self, id: &str, name: &str) -> impl Future<Output = Result<(), Error>>;
 
     /// Deletes the unspawned power creep `id` (`POST /api/game/power-creeps/delete`): at once
     /// during power experimentation, otherwise after 24 hours (`deleteTime`).
@@ -53,7 +50,7 @@ pub trait PowerCreepsApi {
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send).
-    fn delete_power_creep(&self, id: String) -> impl Future<Output = Result<(), Error>>;
+    fn delete_power_creep(&self, id: &str) -> impl Future<Output = Result<(), Error>>;
 
     /// Cancels the scheduled deletion of power creep `id`
     /// (`POST /api/game/power-creeps/cancel-delete`).
@@ -61,7 +58,7 @@ pub trait PowerCreepsApi {
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send).
-    fn cancel_power_creep_delete(&self, id: String) -> impl Future<Output = Result<(), Error>>;
+    fn cancel_power_creep_delete(&self, id: &str) -> impl Future<Output = Result<(), Error>>;
 
     /// Sets the complete power levels of power creep `id`, keyed by power id (`"1"`–`"19"`,
     /// the `PWR_*` constants), via `POST /api/game/power-creeps/upgrade`.
@@ -71,7 +68,7 @@ pub trait PowerCreepsApi {
     /// Returns the errors of [`Client::send`](crate::Client::send).
     fn upgrade_power_creep(
         &self,
-        id: String,
+        id: &str,
         powers: BTreeMap<String, u64>,
     ) -> impl Future<Output = Result<(), Error>>;
 
@@ -91,27 +88,27 @@ impl PowerCreepsApi for Api {
 
     async fn create_power_creep(
         &self,
-        name: String,
+        name: &str,
         class: PowerCreepClassName,
     ) -> Result<Option<PowerCreep>, Error> {
         delegate!(self, api => api.create_power_creep(name, class).await)
     }
 
-    async fn rename_power_creep(&self, id: String, name: String) -> Result<(), Error> {
+    async fn rename_power_creep(&self, id: &str, name: &str) -> Result<(), Error> {
         delegate!(self, api => api.rename_power_creep(id, name).await)
     }
 
-    async fn delete_power_creep(&self, id: String) -> Result<(), Error> {
+    async fn delete_power_creep(&self, id: &str) -> Result<(), Error> {
         delegate!(self, api => api.delete_power_creep(id).await)
     }
 
-    async fn cancel_power_creep_delete(&self, id: String) -> Result<(), Error> {
+    async fn cancel_power_creep_delete(&self, id: &str) -> Result<(), Error> {
         delegate!(self, api => api.cancel_power_creep_delete(id).await)
     }
 
     async fn upgrade_power_creep(
         &self,
-        id: String,
+        id: &str,
         powers: BTreeMap<String, u64>,
     ) -> Result<(), Error> {
         delegate!(self, api => api.upgrade_power_creep(id, powers).await)
@@ -155,33 +152,36 @@ macro_rules! power_creeps_api {
 
             async fn create_power_creep(
                 &self,
-                name: String,
+                name: &str,
                 class: PowerCreepClassName,
             ) -> Result<Option<PowerCreep>, Error> {
                 let body = $contract::types::PowerCreepCreateRequest {
                     class_name: class.into(),
-                    name,
+                    name: name.into(),
                 };
                 let create = $contract::endpoints::PowerCreepsCreate { body };
                 Ok(self.client.send(&create).await?.body.record())
             }
 
-            async fn rename_power_creep(&self, id: String, name: String) -> Result<(), Error> {
-                let body = $contract::types::PowerCreepRenameRequest { id, name };
+            async fn rename_power_creep(&self, id: &str, name: &str) -> Result<(), Error> {
+                let body = $contract::types::PowerCreepRenameRequest {
+                    id: id.into(),
+                    name: name.into(),
+                };
                 let rename = $contract::endpoints::PowerCreepsRename { body };
                 self.client.send(&rename).await?;
                 Ok(())
             }
 
-            async fn delete_power_creep(&self, id: String) -> Result<(), Error> {
-                let body = $contract::types::PowerCreepIdRequest { id };
+            async fn delete_power_creep(&self, id: &str) -> Result<(), Error> {
+                let body = $contract::types::PowerCreepIdRequest { id: id.into() };
                 let delete = $contract::endpoints::PowerCreepsDelete { body };
                 self.client.send(&delete).await?;
                 Ok(())
             }
 
-            async fn cancel_power_creep_delete(&self, id: String) -> Result<(), Error> {
-                let body = $contract::types::PowerCreepIdRequest { id };
+            async fn cancel_power_creep_delete(&self, id: &str) -> Result<(), Error> {
+                let body = $contract::types::PowerCreepIdRequest { id: id.into() };
                 let cancel = $contract::endpoints::PowerCreepsCancelDelete { body };
                 self.client.send(&cancel).await?;
                 Ok(())
@@ -189,10 +189,13 @@ macro_rules! power_creeps_api {
 
             async fn upgrade_power_creep(
                 &self,
-                id: String,
+                id: &str,
                 powers: BTreeMap<String, u64>,
             ) -> Result<(), Error> {
-                let body = $contract::types::PowerCreepUpgradeRequest { id, powers };
+                let body = $contract::types::PowerCreepUpgradeRequest {
+                    id: id.into(),
+                    powers: Cow::Owned(powers),
+                };
                 let upgrade = $contract::endpoints::PowerCreepsUpgrade { body };
                 self.client.send(&upgrade).await?;
                 Ok(())

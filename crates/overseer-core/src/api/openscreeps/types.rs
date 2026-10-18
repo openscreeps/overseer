@@ -6,6 +6,7 @@
 //! the official document defines identically (components with every schema they reference, and
 //! inline schemas) are re-exports of [`crate::api::official::types`]. Unknown fields are ignored.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -706,28 +707,28 @@ impl PowerCreepCreateResponseClassName {
 
 /// The `RegisterSubmitRequest` schema.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RegisterSubmitRequest {
+pub struct RegisterSubmitRequest<'a> {
     /// Accepted and ignored; only `modules` is stored.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub branches: Option<Vec<RegisterSubmitRequestBranchesItem>>,
+    pub branches: Option<Cow<'a, [RegisterSubmitRequestBranchesItem]>>,
     /// E-mail address; must match the server e-mail rule, stored lower-cased and unique case-insensitively.
-    pub email: String,
+    pub email: Cow<'a, str>,
     /// Initial code of the `default` branch; defaults to `{main: ''}`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modules: Option<UserCodeModules>,
+    pub modules: Option<Cow<'a, UserCodeModules>>,
     /// Account password, used with `POST /api/auth/signin`.
-    pub password: String,
+    pub password: Cow<'a, str>,
     /// Accepted and ignored (no `reCAPTCHA` on a standalone server).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recaptcha: Option<String>,
+    pub recaptcha: Option<Cow<'a, str>>,
     /// Accepted and ignored.
     #[serde(rename = "tutorialDone", skip_serializing_if = "Option::is_none")]
     pub tutorial_done: Option<bool>,
     /// New unique (case-insensitive) username.
-    pub username: String,
+    pub username: Cow<'a, str>,
 }
 
-impl fmt::Debug for RegisterSubmitRequest {
+impl fmt::Debug for RegisterSubmitRequest<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegisterSubmitRequest")
             .field("branches", &self.branches)

@@ -4,6 +4,9 @@
 //! Fields are the operation's query and path parameters (`Option` when not required) and its
 //! JSON request body (`body`); [`Endpoint::Response`] is the success body. The session sends
 //! the `X-Token`, `X-Username` and `X-Server-Password` headers itself.
+//!
+//! A request body that no other type holds keeps its strings, lists and objects as `Cow`, so
+//! that it can borrow the values of the caller. The endpoint then has the lifetime of its body.
 
 #[cfg(test)]
 mod tests;
@@ -40,12 +43,12 @@ impl Endpoint for AdminTimelineStats {
 ///
 /// Redeems an Arena activation code for the signed-in player. The official client opens the activation dialog when `POST /api/arena/status` fails with `activation needed`, posts the entered `code`, closes the dialog on success and retries the status update. A logical failure `invalid code` is shown as "Activation code is invalid"; other errors as "Unknown error".
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ArenaActivate {
+pub struct ArenaActivate<'a> {
     /// The JSON request body.
-    pub body: types::ArenaActivateRequest,
+    pub body: types::ArenaActivateRequest<'a>,
 }
 
-impl Endpoint for ArenaActivate {
+impl Endpoint for ArenaActivate<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/arena/activate";
@@ -117,12 +120,12 @@ impl Endpoint for ArenaStatus {
 ///
 /// Sets the signed-in player's Arena participation for the current room with a `respawn` preference (`ArenaActivator.run`). The official client calls it after the Arena tip dialog (`respawn: true`) and whenever the Arena respawn toggle changes in the room view. A logical failure `activation needed` opens the activation-code dialog (`POST /api/arena/activate`) and retries afterwards.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ArenaStatusUpdate {
+pub struct ArenaStatusUpdate<'a> {
     /// The JSON request body.
-    pub body: types::ArenaStatusUpdateRequest,
+    pub body: types::ArenaStatusUpdateRequest<'a>,
 }
 
-impl Endpoint for ArenaStatusUpdate {
+impl Endpoint for ArenaStatusUpdate<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/arena/status";
@@ -214,12 +217,12 @@ impl Endpoint for AuthQueryToken {
 ///
 /// Exchanges an account e-mail address and password for a session token. The official web client posts `email`, `password`, its `reCAPTCHA` response (`recaptcha`) and, in the Steam desktop build, a hex-encoded Steam session ticket (`steamTicket`); it stores the returned `token` and then loads `GET /api/auth/me`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct AuthSignin {
+pub struct AuthSignin<'a> {
     /// The JSON request body.
-    pub body: types::AuthSigninRequest,
+    pub body: types::AuthSigninRequest<'a>,
 }
 
-impl Endpoint for AuthSignin {
+impl Endpoint for AuthSignin<'_> {
     type Response = types::AuthSigninResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/auth/signin";
@@ -256,12 +259,12 @@ impl Endpoint for AuthSteam {
 ///
 /// Verifies a Steam session ticket from the Steam desktop build and returns a session token plus the authenticated `SteamID`, creating an account without a username the first time a `SteamID` signs in (the official web client then routes the player to username selection). With `useNativeAuth`, the ticket is a Greenworks encrypted app ticket instead of a session ticket.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct AuthSteamTicket {
+pub struct AuthSteamTicket<'a> {
     /// The JSON request body.
-    pub body: types::AuthSteamTicketRequest,
+    pub body: types::AuthSteamTicketRequest<'a>,
 }
 
-impl Endpoint for AuthSteamTicket {
+impl Endpoint for AuthSteamTicket<'_> {
     type Response = types::AuthSteamTicketResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/auth/steam-ticket";
@@ -291,12 +294,12 @@ impl Endpoint for AdminEarlyAccessList {
 ///
 /// Internal screeps.com administration page (`/ea`): sends early-access e-mails to the selected applicant addresses. The client shows the whole JSON response in an alert.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct AdminEarlyAccessSend {
+pub struct AdminEarlyAccessSend<'a> {
     /// The JSON request body.
-    pub body: types::AdminEarlyAccessSendRequest,
+    pub body: types::AdminEarlyAccessSendRequest<'a>,
 }
 
-impl Endpoint for AdminEarlyAccessSend {
+impl Endpoint for AdminEarlyAccessSend<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/ea/send";
@@ -350,12 +353,12 @@ impl Endpoint for PlatformExperimentalPvp {
 ///
 /// Queues one account-level intent (market orders, deals, power creep management) for the next tick, as if issued by the caller's script. The official client uses it to issue `suicidePowerCreep` (`{id}`) from the power creep panel. The payload is wrapped in a one-element list and sanitized with the engine intent table; unknown names queue nothing but still succeed.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameAddGlobalIntent {
+pub struct GameAddGlobalIntent<'a> {
     /// The JSON request body.
-    pub body: types::GameAddGlobalIntentRequest,
+    pub body: types::GameAddGlobalIntentRequest<'a>,
 }
 
-impl Endpoint for GameAddGlobalIntent {
+impl Endpoint for GameAddGlobalIntent<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/add-global-intent";
@@ -371,12 +374,12 @@ impl Endpoint for GameAddGlobalIntent {
 ///
 /// Queues a manual intent for the next tick, executed as if issued by the caller's script (e.g. `suicide`, `unclaim`, `activateSafeMode`, `notifyWhenAttacked`, room-level `destroyStructure`/`removeConstructionSite`/`removeFlag`). The target room must exist, be a world room (`W…`/`E…`, otherwise `not supported`), and be inside the borders and open (`out of borders`). `activateSafeMode` is refused while any of the caller's controllers has active safe mode (`safe mode active already`). The payload is sanitized with the engine intent table (only schema fields kept; unknown names store `{}`), merged into the caller's queued manual intents for that target (`$merge`: objects deep-merge, arrays merge index by index), and the room is activated.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameAddObjectIntent {
+pub struct GameAddObjectIntent<'a> {
     /// The JSON request body.
-    pub body: types::GameAddObjectIntentRequest,
+    pub body: types::GameAddObjectIntentRequest<'a>,
 }
 
-impl Endpoint for GameAddObjectIntent {
+impl Endpoint for GameAddObjectIntent<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/add-object-intent";
@@ -392,12 +395,12 @@ impl Endpoint for GameAddObjectIntent {
 ///
 /// Recolors the caller's flag `name` in `room`. Both colors must be flag colors (`invalid params`). The official client sends the current `room` and `shard` with the flag name and both colors. The room's flag list is re-saved; an unknown name changes nothing but still succeeds.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameChangeFlagColor {
+pub struct GameChangeFlagColor<'a> {
     /// The JSON request body.
-    pub body: types::GameChangeFlagColorRequest,
+    pub body: types::GameChangeFlagColorRequest<'a>,
 }
 
-impl Endpoint for GameChangeFlagColor {
+impl Endpoint for GameChangeFlagColor<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/change-flag-color";
@@ -413,12 +416,12 @@ impl Endpoint for GameChangeFlagColor {
 ///
 /// Succeeds with `{ok: 1}` unless one of the caller's flags (in any room) has `name` (`name exists`). Read-only.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameCheckUniqueFlagName {
+pub struct GameCheckUniqueFlagName<'a> {
     /// The JSON request body.
-    pub body: types::GameCheckUniqueFlagNameRequest,
+    pub body: types::GameCheckUniqueFlagNameRequest<'a>,
 }
 
-impl Endpoint for GameCheckUniqueFlagName {
+impl Endpoint for GameCheckUniqueFlagName<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/check-unique-flag-name";
@@ -434,12 +437,12 @@ impl Endpoint for GameCheckUniqueFlagName {
 ///
 /// Succeeds with `{ok: 1}` when none of the caller's spawns or construction sites has `name`; otherwise `name exists`. Read-only. Only `type: spawn` with a string `name` is accepted (`invalid params`).
 #[derive(Clone, Debug, PartialEq)]
-pub struct GameCheckUniqueObjectName {
+pub struct GameCheckUniqueObjectName<'a> {
     /// The JSON request body.
-    pub body: types::GameCheckUniqueObjectNameRequest,
+    pub body: types::GameCheckUniqueObjectNameRequest<'a>,
 }
 
-impl Endpoint for GameCheckUniqueObjectName {
+impl Endpoint for GameCheckUniqueObjectName<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/check-unique-object-name";
@@ -455,12 +458,12 @@ impl Endpoint for GameCheckUniqueObjectName {
 ///
 /// Places a construction site for the caller without needing room visibility. Validation: coordinates 0..49, a `CONSTRUCTION_COST` structure type, name ≤ 50 characters and required for spawns (`invalid params`); The target room must exist, be a world room (`W…`/`E…`, otherwise `not supported`), and be inside the borders and open (`out of borders`). The spot must be valid (`invalid location`: not on the room edge, an extractor only on a mineral, not on a same-type structure/site or blocking structure (ramparts excepted), not on a wall (roads excepted), not next to an exit, and beside the edge only next to edge walls (roads/containers excepted)); the controller must not be owned/reserved by someone else (`not a controller owner`); the RCL must allow another structure of the type (`RCL not enough`); the caller must have fewer than 100 sites (`too many`). Mutation: inserts a `constructionSite` with progress 0 and `progressTotal` = construction cost (roads ×5 on swamp, ×150 on wall) and activates the room.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GameCreateConstruction {
+pub struct GameCreateConstruction<'a> {
     /// The JSON request body.
-    pub body: types::GameCreateConstructionRequest,
+    pub body: types::GameCreateConstructionRequest<'a>,
 }
 
-impl Endpoint for GameCreateConstruction {
+impl Endpoint for GameCreateConstruction<'_> {
     type Response = types::GameCreateConstructionResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/create-construction";
@@ -476,12 +479,12 @@ impl Endpoint for GameCreateConstruction {
 ///
 /// Creates a flag, or moves the caller's flag with the same name, without needing room visibility. Validation: numeric `x`/`y` within 0..49, string `name` ≤ 60 characters, valid colors (`invalid params`); The target room must exist, be a world room (`W…`/`E…`, otherwise `not supported`), and be inside the borders and open (`out of borders`). Mutation: a flag with the same name is first removed from whichever room holds it and saved; then, if the caller already has `FLAGS_LIMIT` (10000) flags, the request fails with `flags limit exceeded` (the old flag stays removed); otherwise the flag is appended to the room's flag list (`name~color~secondaryColor~x~y`, `|`/`~` in names escaped).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameCreateFlag {
+pub struct GameCreateFlag<'a> {
     /// The JSON request body.
-    pub body: types::GameCreateFlagRequest,
+    pub body: types::GameCreateFlagRequest<'a>,
 }
 
-impl Endpoint for GameCreateFlag {
+impl Endpoint for GameCreateFlag<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/create-flag";
@@ -497,12 +500,12 @@ impl Endpoint for GameCreateFlag {
 ///
 /// Summons an NPC invader creep (user `2`, 1500 ticks to live, no loot) to test defenses in a room the caller owns or reserves. Refused when 5 invaders already exist in the room (`too many invaders exist`), when another player's creeps are present (`hostiles present`), when the controller is not owned/reserved by the caller (`not owned`). Any tile is accepted, walls included; the room is not activated. Mutation: inserts the creep with `userSummoned` set to the caller; body parts by `size`+`type`, boosted when `boosted` is truthy.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GameCreateInvader {
+pub struct GameCreateInvader<'a> {
     /// The JSON request body.
-    pub body: types::GameCreateInvaderRequest,
+    pub body: types::GameCreateInvaderRequest<'a>,
 }
 
-impl Endpoint for GameCreateInvader {
+impl Endpoint for GameCreateInvader<'_> {
     type Response = types::GameCreateInvaderResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/create-invader";
@@ -539,12 +542,12 @@ impl Endpoint for GameFindObject {
 ///
 /// Ends the current game in a room. The official room view's `finishGame` posts the current `room` (its local simulation counterpart marks the game info status `finished`, the state used by the survival and custom training modes).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameFinish {
+pub struct GameFinish<'a> {
     /// The JSON request body.
-    pub body: types::GameFinishRequest,
+    pub body: types::GameFinishRequest<'a>,
 }
 
-impl Endpoint for GameFinish {
+impl Endpoint for GameFinish<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/finish";
@@ -560,12 +563,12 @@ impl Endpoint for GameFinish {
 ///
 /// Returns the first `Flag<N>` name not used by any of the caller's flags. Read-only.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameGenUniqueFlagName {
+pub struct GameGenUniqueFlagName<'a> {
     /// The JSON request body.
-    pub body: types::GameShardOnlyRequest,
+    pub body: types::GameShardOnlyRequest<'a>,
 }
 
-impl Endpoint for GameGenUniqueFlagName {
+impl Endpoint for GameGenUniqueFlagName<'_> {
     type Response = types::GameGeneratedNameResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/gen-unique-flag-name";
@@ -581,12 +584,12 @@ impl Endpoint for GameGenUniqueFlagName {
 ///
 /// Returns the first `Spawn<N>` name not used by the caller's spawns or spawn construction sites. Read-only. Only `type: spawn` is accepted (`invalid params`).
 #[derive(Clone, Debug, PartialEq)]
-pub struct GameGenUniqueObjectName {
+pub struct GameGenUniqueObjectName<'a> {
     /// The JSON request body.
-    pub body: types::GameGenUniqueObjectNameRequest,
+    pub body: types::GameGenUniqueObjectNameRequest<'a>,
 }
 
-impl Endpoint for GameGenUniqueObjectName {
+impl Endpoint for GameGenUniqueObjectName<'_> {
     type Response = types::GameGeneratedNameResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/gen-unique-object-name";
@@ -602,12 +605,12 @@ impl Endpoint for GameGenUniqueObjectName {
 ///
 /// Creates a shareable link to a room history moment. The official room history view posts the current `shard`, `room` and game `time`, then shows `screeps.com/s/<code>` together with the returned `room`, `time` and `shard`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameHistoryShare {
+pub struct GameHistoryShare<'a> {
     /// The JSON request body.
-    pub body: types::GameHistoryShareRequest,
+    pub body: types::GameHistoryShareRequest<'a>,
 }
 
-impl Endpoint for GameHistoryShare {
+impl Endpoint for GameHistoryShare<'_> {
     type Response = types::GameHistoryShareResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/history-share";
@@ -623,12 +626,12 @@ impl Endpoint for GameHistoryShare {
 ///
 /// Returns, for each requested room that exists, its status fields, controller ownership (`own`), sign, active safe mode, mineral (`minerals0`) and, for `<stat><interval>` stat names, the ranking of that statistic over the interval, plus the largest ranked value per stat (`statsMax`) and public profiles of every referenced user. screeps.com also returns, per room, `isPowerEnabled` for power-enabled controllers and the activated `decorations`, whose definitions come in the top-level `decorations`. Read-only. The official world map requests `owner0` below the closest zoom level and the selected layer stat (e.g. `energyHarvested8`) at the closest one, merges `stats` and `users` into its map state, sizes stat circles by `statsMax` and draws the room decorations.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameMapStats {
+pub struct GameMapStats<'a> {
     /// The JSON request body.
-    pub body: types::GameMapStatsRequest,
+    pub body: types::GameMapStatsRequest<'a>,
 }
 
-impl Endpoint for GameMapStats {
+impl Endpoint for GameMapStats<'_> {
     type Response = types::GameMapStatsResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/map-stats";
@@ -729,12 +732,12 @@ impl Endpoint for MarketStats {
 ///
 /// Placing the initial spawn of an account has been observed to reset the account's CPU allocation to the selected shard; callers must not assume a previously configured allocation (`userCpuShardsSet`, `POST /api/user/cpu-shards`) survives.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GamePlaceSpawn {
+pub struct GamePlaceSpawn<'a> {
     /// The JSON request body.
-    pub body: types::GamePlaceSpawnRequest,
+    pub body: types::GamePlaceSpawnRequest<'a>,
 }
 
-impl Endpoint for GamePlaceSpawn {
+impl Endpoint for GamePlaceSpawn<'_> {
     type Response = types::GamePlaceSpawnResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/place-spawn";
@@ -750,12 +753,12 @@ impl Endpoint for GamePlaceSpawn {
 ///
 /// Clears `deleteTime` on one of the caller's power creeps (`invalid id`; `not being deleted` when no deletion is scheduled). The official client sends `{id}` and reloads the list afterwards.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PowerCreepsCancelDelete {
+pub struct PowerCreepsCancelDelete<'a> {
     /// The JSON request body.
-    pub body: types::PowerCreepIdRequest,
+    pub body: types::PowerCreepIdRequest<'a>,
 }
 
-impl Endpoint for PowerCreepsCancelDelete {
+impl Endpoint for PowerCreepsCancelDelete<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/power-creeps/cancel-delete";
@@ -771,12 +774,12 @@ impl Endpoint for PowerCreepsCancelDelete {
 ///
 /// Creates an unspawned power creep. Requires a free power level (GPL `floor((power / 1000) ^ (1/2))` minus one per existing creep and their levels; `not enough power level`), a valid class (`invalid class`) and a name unique among the caller's creeps (`name already exists`). Mutation: inserts the record at level 0 with 1000 max hits and 100 store capacity. The official client sends `{name, className}` from the creep editor.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PowerCreepsCreate {
+pub struct PowerCreepsCreate<'a> {
     /// The JSON request body.
-    pub body: types::PowerCreepCreateRequest,
+    pub body: types::PowerCreepCreateRequest<'a>,
 }
 
-impl Endpoint for PowerCreepsCreate {
+impl Endpoint for PowerCreepsCreate<'_> {
     type Response = types::PowerCreepCreateResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/power-creeps/create";
@@ -792,12 +795,12 @@ impl Endpoint for PowerCreepsCreate {
 ///
 /// Deletes one of the caller's unspawned power creeps (`invalid id`, `spawned`, `already being deleted`). Mutation: during power experimentation the record is removed immediately; otherwise `deleteTime` is set to now + `POWER_CREEP_DELETE_COOLDOWN` (24 h) and the engine deletes it then. The official client sends `{id}` (refusing locally while the creep is spawned) and reloads the list afterwards.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PowerCreepsDelete {
+pub struct PowerCreepsDelete<'a> {
     /// The JSON request body.
-    pub body: types::PowerCreepIdRequest,
+    pub body: types::PowerCreepIdRequest<'a>,
 }
 
-impl Endpoint for PowerCreepsDelete {
+impl Endpoint for PowerCreepsDelete<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/power-creeps/delete";
@@ -869,12 +872,12 @@ impl Endpoint for PowerCreepsPromo {
 ///
 /// Renames one of the caller's unspawned power creeps (`invalid id`, `spawned`); the converted, truncated name must be unique among the caller's creeps (`name already exists`). The official client sends `{id, name}` and reloads the list afterwards.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PowerCreepsRename {
+pub struct PowerCreepsRename<'a> {
     /// The JSON request body.
-    pub body: types::PowerCreepRenameRequest,
+    pub body: types::PowerCreepRenameRequest<'a>,
 }
 
-impl Endpoint for PowerCreepsRename {
+impl Endpoint for PowerCreepsRename<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/power-creeps/rename";
@@ -890,12 +893,12 @@ impl Endpoint for PowerCreepsRename {
 ///
 /// Sets the complete power levels of one of the caller's power creeps; the new creep level is the sum of power levels. Refusals: `invalid id`, `invalid powers` (not an object), `invalid power <id>`, `invalid class for power <id>`, `invalid value for power <id>` (not a number), `cannot downgrade power <id>`, `invalid max value for power <id>` (\> 5), `max level` (\> 25), `not enough level for power <id>`, `powers set is not valid` (levels not reachable in requirement order), `not enough power level` (insufficient free GPL). Mutation: merges `{level}` into each non-zero power (keeping cooldowns) and sets `level`, `hitsMax = 1000 × (level + 1)` and `storeCapacity = 100 × (level + 1)` on the record and, when spawned, on its room object. The official client sends `{id, powers}` with the complete level per power id.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PowerCreepsUpgrade {
+pub struct PowerCreepsUpgrade<'a> {
     /// The JSON request body.
-    pub body: types::PowerCreepUpgradeRequest,
+    pub body: types::PowerCreepUpgradeRequest<'a>,
 }
 
-impl Endpoint for PowerCreepsUpgrade {
+impl Endpoint for PowerCreepsUpgrade<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/power-creeps/upgrade";
@@ -932,12 +935,12 @@ impl Endpoint for GameRandomNoviceRoom {
 ///
 /// Removes the caller's flag `name` from `room`. The official client sends the current `room` and `shard`. The room's flag list is re-saved without it; unknown names succeed without effect.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameRemoveFlag {
+pub struct GameRemoveFlag<'a> {
     /// The JSON request body.
-    pub body: types::GameRemoveFlagRequest,
+    pub body: types::GameRemoveFlagRequest<'a>,
 }
 
-impl Endpoint for GameRemoveFlag {
+impl Endpoint for GameRemoveFlag<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/remove-flag";
@@ -953,12 +956,12 @@ impl Endpoint for GameRemoveFlag {
 ///
 /// Deletes a room object that the caller summoned via `gameCreateInvader`; anything else yields `invalid object`. The room is not activated.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameRemoveInvader {
+pub struct GameRemoveInvader<'a> {
     /// The JSON request body.
-    pub body: types::GameRemoveInvaderRequest,
+    pub body: types::GameRemoveInvaderRequest<'a>,
 }
 
-impl Endpoint for GameRemoveInvader {
+impl Endpoint for GameRemoveInvader<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/remove-invader";
@@ -1103,14 +1106,14 @@ impl Endpoint for GameRoomTerrain {
 ///
 /// Returns the encoded terrain documents of the requested rooms (unknown rooms skipped). Public and read-only. The official decoration dialog posts the caller's owned and reserved rooms once per shard, with `shard` in the query string, and reads each entry's `room`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameRooms {
+pub struct GameRooms<'a> {
     /// Official shard routing for operations that accept it (for example `shard3`).
     pub shard: Option<String>,
     /// The JSON request body.
-    pub body: types::GameRoomsRequest,
+    pub body: types::GameRoomsRequest<'a>,
 }
 
-impl Endpoint for GameRooms {
+impl Endpoint for GameRooms<'_> {
     type Response = types::GameRoomsResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/rooms";
@@ -1130,12 +1133,12 @@ impl Endpoint for GameRooms {
 ///
 /// Sets `notifyWhenAttacked` on a room object to `!!enabled`. The object must be owned by the caller (`not owner`), or, if unowned, be in a room whose controller the caller owns (`not controller owner`). The official room view sends the selected object's `_id` and its current `notifyWhenAttacked` value.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GameSetNotifyWhenAttacked {
+pub struct GameSetNotifyWhenAttacked<'a> {
     /// The JSON request body.
-    pub body: types::GameSetNotifyWhenAttackedRequest,
+    pub body: types::GameSetNotifyWhenAttackedRequest<'a>,
 }
 
-impl Endpoint for GameSetNotifyWhenAttacked {
+impl Endpoint for GameSetNotifyWhenAttacked<'_> {
     type Response = types::GameDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/set-notify-when-attacked";
@@ -1312,12 +1315,12 @@ impl Endpoint for LeaderboardSeasons {
 ///
 /// Completes e-mail password recovery. The recovery page (\`/register/recover?t=\<token\>\`) first posts only \`{token}\` to validate the link: the logical error \`invalid password\` means the token is valid (the form is shown), any other error marks the link invalid. Submitting the form posts \`{token, password}\`; success shows a confirmation, any error a generic failure. The official client only submits passwords that consist of letters, digits and \`!@#$%^&\*(),./\\[\]{}'";=+\|_-?~\`:\<\>\` characters and contain at least one digit and one non-digit.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RegisterChangePassword {
+pub struct RegisterChangePassword<'a> {
     /// The JSON request body.
-    pub body: types::RegisterChangePasswordRequest,
+    pub body: types::RegisterChangePasswordRequest<'a>,
 }
 
-impl Endpoint for RegisterChangePassword {
+impl Endpoint for RegisterChangePassword<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/register/change-password";
@@ -1375,12 +1378,12 @@ impl Endpoint for RegisterCheckUsername {
 ///
 /// Confirms an e-mail address from the confirmation link (`/register/confirm?id=<id>&s=<secret>`). The official client skips the call when the signed-in account already has a clean e-mail, Steam or GitHub identity; on success it reads `email` for analytics, on error it shows a generic failure.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RegisterConfirm {
+pub struct RegisterConfirm<'a> {
     /// The JSON request body.
-    pub body: types::RegisterConfirmRequest,
+    pub body: types::RegisterConfirmRequest<'a>,
 }
 
-impl Endpoint for RegisterConfirm {
+impl Endpoint for RegisterConfirm<'_> {
     type Response = types::RegisterConfirmResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/register/confirm";
@@ -1396,12 +1399,12 @@ impl Endpoint for RegisterConfirm {
 ///
 /// Requests a password recovery e-mail for an account address. The official recovery form shows success when the call resolves and displays the logical error string otherwise.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RegisterRecover {
+pub struct RegisterRecover<'a> {
     /// The JSON request body.
-    pub body: types::RegisterRecoverRequest,
+    pub body: types::RegisterRecoverRequest<'a>,
 }
 
-impl Endpoint for RegisterRecover {
+impl Endpoint for RegisterRecover<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/register/recover";
@@ -1417,12 +1420,12 @@ impl Endpoint for RegisterRecover {
 ///
 /// Sets the username of an authenticated account that has none yet (e.g. created through Steam or GitHub sign-in), optionally storing an e-mail address. Usernames must match `^[a-zA-Z0-9_-]{3,}$` and be unique case-insensitively. Fails with `username already set` once a name exists. The official web client also sends its `reCAPTCHA` response (`recaptcha`) and whether the tutorial was completed (`tutorialDone`), then uploads the code edited before registration.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RegisterSetUsername {
+pub struct RegisterSetUsername<'a> {
     /// The JSON request body.
-    pub body: types::RegisterSetUsernameRequest,
+    pub body: types::RegisterSetUsernameRequest<'a>,
 }
 
-impl Endpoint for RegisterSetUsername {
+impl Endpoint for RegisterSetUsername<'_> {
     type Response = types::UserDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/register/set-username";
@@ -1438,12 +1441,12 @@ impl Endpoint for RegisterSetUsername {
 ///
 /// Creates an account with username, e-mail and password from the official web client's registration form, together with its `reCAPTCHA` response, tutorial completion flag and the code edited before registration (`modules`, `branches`). On success the client shows the e-mail confirmation page.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RegisterSubmit {
+pub struct RegisterSubmit<'a> {
     /// The JSON request body.
-    pub body: types::RegisterSubmitRequest,
+    pub body: types::RegisterSubmitRequest<'a>,
 }
 
-impl Endpoint for RegisterSubmit {
+impl Endpoint for RegisterSubmit<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/register/submit";
@@ -1459,12 +1462,12 @@ impl Endpoint for RegisterSubmit {
 ///
 /// Uploads the replay of a finished offline Survival simulation (training mode) together with its score. The client stores the response as the uploaded replay and links it as `/replay/<_id>?s=<secret>`; on failure it shows an upload error.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ReplaysAdd {
+pub struct ReplaysAdd<'a> {
     /// The JSON request body.
-    pub body: types::ReplaysAddRequest,
+    pub body: types::ReplaysAddRequest<'a>,
 }
 
-impl Endpoint for ReplaysAdd {
+impl Endpoint for ReplaysAdd<'_> {
     type Response = types::ReplaysAddResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/replays/add";
@@ -1668,12 +1671,12 @@ impl Endpoint for SeasonsUserRanks {
 ///
 /// Adds the Steam user's like for a community server from `POST /api/servers/list`. The desktop (NW.js) client posts it directly with `fetch` (not the Api wrapper, so no player token) with the server `_id` and its Steam auth session ticket, updates `isLiked`/`likeCount` optimistically and reverts only when the request throws. It refuses to send without a Steam ticket.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlatformServersLike {
+pub struct PlatformServersLike<'a> {
     /// The JSON request body.
-    pub body: types::PlatformServerLikeRequest,
+    pub body: types::PlatformServerLikeRequest<'a>,
 }
 
-impl Endpoint for PlatformServersLike {
+impl Endpoint for PlatformServersLike<'_> {
     type Response = ();
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/servers/like";
@@ -1689,12 +1692,12 @@ impl Endpoint for PlatformServersLike {
 ///
 /// Official curated list of community-run servers, fetched directly with `fetch` (not the Api wrapper). The client posts an optional Steam auth session `steamTicket` so the response can include the caller's `likes`; no player token is sent.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlatformServersList {
+pub struct PlatformServersList<'a> {
     /// The JSON request body.
-    pub body: types::PlatformServersListRequest,
+    pub body: types::PlatformServersListRequest<'a>,
 }
 
-impl Endpoint for PlatformServersList {
+impl Endpoint for PlatformServersList<'_> {
     type Response = types::PlatformServersListResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/servers/list";
@@ -1710,12 +1713,12 @@ impl Endpoint for PlatformServersList {
 ///
 /// Removes the Steam user's like for a community server from `POST /api/servers/list`. The desktop (NW.js) client posts it directly with `fetch` (not the Api wrapper, so no player token) with the server `_id` and its Steam auth session ticket, updates `isLiked`/`likeCount` optimistically and reverts only when the request throws. It refuses to send without a Steam ticket.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlatformServersUnlike {
+pub struct PlatformServersUnlike<'a> {
     /// The JSON request body.
-    pub body: types::PlatformServerLikeRequest,
+    pub body: types::PlatformServerLikeRequest<'a>,
 }
 
-impl Endpoint for PlatformServersUnlike {
+impl Endpoint for PlatformServersUnlike<'_> {
     type Response = ();
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/servers/unlike";
@@ -1863,12 +1866,12 @@ impl Endpoint for StoreSteamPushDecorations {
 ///
 /// Transfers `amount` units of an account resource (observed `accessKey`, `cpuUnlock`, `pixel`) to the player's Steam inventory from the store dialogs, then refreshes the signed-in account. Logical errors are shown as their string (or `data.error`).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct StoreSteamPushResources {
+pub struct StoreSteamPushResources<'a> {
     /// The JSON request body.
-    pub body: types::StoreSteamPushResourcesRequest,
+    pub body: types::StoreSteamPushResourcesRequest<'a>,
 }
 
-impl Endpoint for StoreSteamPushResources {
+impl Endpoint for StoreSteamPushResources<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/steam/push-resources";
@@ -2003,12 +2006,12 @@ impl Endpoint for UserActivatePtr {
 ///
 /// Spends `count` access keys (`Me.resources.accessKey`) to grant the signed-in account access to a restricted shard, from the shard selection item (`SCWShardsItemXComponent`). On success the client re-reads `GET /api/auth/me`; failures are only logged.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserActivateShardAccess {
+pub struct UserActivateShardAccess<'a> {
     /// The JSON request body.
-    pub body: types::UserActivateShardAccessRequest,
+    pub body: types::UserActivateShardAccessRequest<'a>,
 }
 
-impl Endpoint for UserActivateShardAccess {
+impl Endpoint for UserActivateShardAccess<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/activate-shard-access";
@@ -2038,12 +2041,12 @@ impl Endpoint for UserAuthTokenList {
 ///
 /// Generates a persistent API auth token for the signed-in account. The official form posts its whole model: `type` (`full` by default), per-endpoint permissions in `endpoints`, websocket permissions in `websockets` and a `memorySegments` string. The client shows the returned `token` once ("it will not be shown again") and reloads the token list.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserAuthTokenCreate {
+pub struct UserAuthTokenCreate<'a> {
     /// The JSON request body.
-    pub body: types::UserAuthTokenCreateRequest,
+    pub body: types::UserAuthTokenCreateRequest<'a>,
 }
 
-impl Endpoint for UserAuthTokenCreate {
+impl Endpoint for UserAuthTokenCreate<'_> {
     type Response = types::UserAuthTokenCreateResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/auth-token";
@@ -2059,12 +2062,12 @@ impl Endpoint for UserAuthTokenCreate {
 ///
 /// Validates and stores the player's badge: colors `#rrggbb`, `param` -100..100, `type` 1-24 or exactly the caller's assigned custom badge paths; `flip` is coerced to boolean. Any violation yields `invalid params`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UserBadgeSet {
+pub struct UserBadgeSet<'a> {
     /// The JSON request body.
-    pub body: types::UserBadgeSetRequest,
+    pub body: types::UserBadgeSetRequest<'a>,
 }
 
-impl Endpoint for UserBadgeSet {
+impl Endpoint for UserBadgeSet<'_> {
     type Response = types::UserDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/badge";
@@ -2128,12 +2131,12 @@ impl Endpoint for UserBranches {
 ///
 /// Copies a branch's modules (or `defaultModules`, or `{main: ""}`) into `newName`, creating it inactive or overwriting an existing branch of that name, and publishes `user:<id>/code`. Creating a new branch fails with `too many branches` once the player has 30 branches (names matching `tutorial-<digit>` are exempt). Names longer than 30 characters yield `invalid branch name`. Returns a timestamp, which the official web client reads.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserCloneBranch {
+pub struct UserCloneBranch<'a> {
     /// The JSON request body.
-    pub body: types::UserCloneBranchRequest,
+    pub body: types::UserCloneBranchRequest<'a>,
 }
 
-impl Endpoint for UserCloneBranch {
+impl Endpoint for UserCloneBranch<'_> {
     type Response = types::UserTimestampResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/clone-branch";
@@ -2170,12 +2173,12 @@ impl Endpoint for UserCodeGet {
 ///
 /// Replaces all modules of an existing branch (default: the branch active in the world) and marks the player active. When the target is the world branch, the new code is loaded by the runtime for subsequent ticks; a `user:<id>/code` realtime event (with the optional `_hash`) is published. Serialized `modules` over 5 `MiB` are rejected; module names starting with `$`, `.`, `/` or `\` are dropped; a `main` module is ensured. Missing branches yield `branch does not exist`. Returns the save timestamp.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserCodeSet {
+pub struct UserCodeSet<'a> {
     /// The JSON request body.
-    pub body: types::UserCodeSetRequest,
+    pub body: types::UserCodeSetRequest<'a>,
 }
 
-impl Endpoint for UserCodeSet {
+impl Endpoint for UserCodeSet<'_> {
     type Response = types::UserTimestampResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/code";
@@ -2191,12 +2194,12 @@ impl Endpoint for UserCodeSet {
 ///
 /// Queues a JavaScript expression for evaluation in the player's runtime on the given shard, with normal CPU accounting. Commands are queued and run only when the player's runtime reaches its console-processing step (after a main loop run); no ordering relative to other queued commands, ticks or code deployment is guaranteed by this API, and the response does not contain the evaluation result (results arrive on the console realtime channel). The JSON-encoded expression must not exceed 1024 characters (`expression size is too large`). The official web client sends `expression` and the current `shard`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserConsole {
+pub struct UserConsole<'a> {
     /// The JSON request body.
-    pub body: types::UserConsoleRequest,
+    pub body: types::UserConsoleRequest<'a>,
 }
 
-impl Endpoint for UserConsole {
+impl Endpoint for UserConsole<'_> {
     type Response = types::UserConsoleQueuedResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/console";
@@ -2247,12 +2250,12 @@ impl Endpoint for UserCpuLimitSet {
 ///
 /// Replaces the account's CPU allocation across shards (`Game.cpu.shardLimits`) with `cpu: {<shard>: limit}`. Observed: the limits must total the account CPU (omitted shards count as 0), and changes made too soon after the previous change are rejected; the official web client disables reassignment for 12 hours after `cpuShardUpdatedTime` (the server-side error text is not documented). The new allocation is reflected in `GET /api/auth/me` (`cpuShard`, `cpuShardUpdatedTime`). Placing an initial spawn (`gamePlaceSpawn`) resets the allocation to the shard where the spawn was placed. The success body carries `ok: 1` plus database-driver metadata; only `ok` is stable.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserCpuShardsSet {
+pub struct UserCpuShardsSet<'a> {
     /// The JSON request body.
-    pub body: types::UserCpuShardsRequest,
+    pub body: types::UserCpuShardsRequest<'a>,
 }
 
-impl Endpoint for UserCpuShardsSet {
+impl Endpoint for UserCpuShardsSet<'_> {
     type Response = types::UserDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/cpu-shards";
@@ -2268,12 +2271,12 @@ impl Endpoint for UserCpuShardsSet {
 ///
 /// Applies an owned decoration with the given property values (`active`). Success shape untyped by node-screeps-api.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserDecorationsActivate {
+pub struct UserDecorationsActivate<'a> {
     /// The JSON request body.
-    pub body: types::UserDecorationsActivateRequest,
+    pub body: types::UserDecorationsActivateRequest<'a>,
 }
 
-impl Endpoint for UserDecorationsActivate {
+impl Endpoint for UserDecorationsActivate<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/decorations/activate";
@@ -2289,12 +2292,12 @@ impl Endpoint for UserDecorationsActivate {
 ///
 /// Destroys the listed owned decorations, refunding part of their pixelization cost (`decorationConvertationCost` in `/api/version`). Irreversible. Success shape untyped by node-screeps-api.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserDecorationsConvert {
+pub struct UserDecorationsConvert<'a> {
     /// The JSON request body.
-    pub body: types::UserDecorationIdsRequest,
+    pub body: types::UserDecorationIdsRequest<'a>,
 }
 
-impl Endpoint for UserDecorationsConvert {
+impl Endpoint for UserDecorationsConvert<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/decorations/convert";
@@ -2310,12 +2313,12 @@ impl Endpoint for UserDecorationsConvert {
 ///
 /// Removes one or more active decorations from use. Success shape untyped by node-screeps-api.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserDecorationsDeactivate {
+pub struct UserDecorationsDeactivate<'a> {
     /// The JSON request body.
-    pub body: types::UserDecorationIdsRequest,
+    pub body: types::UserDecorationIdsRequest<'a>,
 }
 
-impl Endpoint for UserDecorationsDeactivate {
+impl Endpoint for UserDecorationsDeactivate<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/decorations/deactivate";
@@ -2345,12 +2348,12 @@ impl Endpoint for UserDecorationsInventory {
 ///
 /// Spends pixels (`decorationPixelizationCost` in `/api/version`) to generate `count` random decorations, optionally from one theme at a higher cost. Spends account resources. Success shape untyped by node-screeps-api.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserDecorationsPixelize {
+pub struct UserDecorationsPixelize<'a> {
     /// The JSON request body.
-    pub body: types::UserDecorationsPixelizeRequest,
+    pub body: types::UserDecorationsPixelizeRequest<'a>,
 }
 
-impl Endpoint for UserDecorationsPixelize {
+impl Endpoint for UserDecorationsPixelize<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/decorations/pixelize";
@@ -2380,12 +2383,12 @@ impl Endpoint for UserDecorationsThemes {
 ///
 /// Revokes one of the signed-in account's API auth tokens; the official account page reloads the token list on success.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserAuthTokenDelete {
+pub struct UserAuthTokenDelete<'a> {
     /// The JSON request body.
-    pub body: types::UserAuthTokenDeleteRequest,
+    pub body: types::UserAuthTokenDeleteRequest<'a>,
 }
 
-impl Endpoint for UserAuthTokenDelete {
+impl Endpoint for UserAuthTokenDelete<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/delete-auth-token";
@@ -2401,12 +2404,12 @@ impl Endpoint for UserAuthTokenDelete {
 ///
 /// Deletes the named branch unless it is active in the world or simulator. Unknown or active branches are silently kept; the call still succeeds and returns the current timestamp.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserDeleteBranch {
+pub struct UserDeleteBranch<'a> {
     /// The JSON request body.
-    pub body: types::UserDeleteBranchRequest,
+    pub body: types::UserDeleteBranchRequest<'a>,
 }
 
-impl Endpoint for UserDeleteBranch {
+impl Endpoint for UserDeleteBranch<'_> {
     type Response = types::UserTimestampResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/delete-branch";
@@ -2422,12 +2425,12 @@ impl Endpoint for UserDeleteBranch {
 ///
 /// Activates the persistent World with an early-preview activation code from the world activation dialog. On success the client shows the world welcome dialog; the logical error `invalid code` is shown as "Activation code is invalid".
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserEarlyPreviewActivate {
+pub struct UserEarlyPreviewActivate<'a> {
     /// The JSON request body.
-    pub body: types::UserEarlyPreviewActivateRequest,
+    pub body: types::UserEarlyPreviewActivateRequest<'a>,
 }
 
-impl Endpoint for UserEarlyPreviewActivate {
+impl Endpoint for UserEarlyPreviewActivate<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/early-preview";
@@ -2443,12 +2446,12 @@ impl Endpoint for UserEarlyPreviewActivate {
 ///
 /// Sets the account e-mail address (stored lower-cased). Invalid addresses yield `invalid email`; addresses used by any account (including the caller) yield `email already exists`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserEmailSet {
+pub struct UserEmailSet<'a> {
     /// The JSON request body.
-    pub body: types::UserEmailRequest,
+    pub body: types::UserEmailRequest<'a>,
 }
 
-impl Endpoint for UserEmailSet {
+impl Endpoint for UserEmailSet<'_> {
     type Response = types::UserDbWriteResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/email";
@@ -2509,12 +2512,12 @@ impl Endpoint for UserFindShared {
 ///
 /// Configures GitHub code synchronization. Submitting posts `{repo, folder}` after warning that all scripts in the Screeps account will be overwritten; the logical error `no default branch` means the repository has no `default` branch. Resetting posts `{repo: false}`. On success the client re-reads `GET /api/auth/me` (`github.repo.name`/`folder`) and returns to the account page.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UserGithubRepoSet {
+pub struct UserGithubRepoSet<'a> {
     /// The JSON request body.
-    pub body: types::UserGithubRepoSetRequest,
+    pub body: types::UserGithubRepoSetRequest<'a>,
 }
 
-impl Endpoint for UserGithubRepoSet {
+impl Endpoint for UserGithubRepoSet<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/github-repo";
@@ -2589,12 +2592,12 @@ impl Endpoint for UserMemoryGet {
 ///
 /// Assigns `value` at `path`, deletes the value at `path` when `value` is omitted, or (without `path`) clears Memory and merges an object `value` into it. The edit is not applied synchronously: it is queued as a hidden console command executed inside the player's runtime on the given shard. Commands are queued and run only when the player's runtime reaches its console-processing step (after a main loop run); no ordering relative to other queued commands, ticks or code deployment is guaranteed by this API, and the response does not contain the evaluation result (results arrive on the console realtime channel). JSON-serialized values over 1 `MiB` yield `memory size is too large`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserMemorySet {
+pub struct UserMemorySet<'a> {
     /// The JSON request body.
-    pub body: types::UserMemorySetRequest,
+    pub body: types::UserMemorySetRequest<'a>,
 }
 
-impl Endpoint for UserMemorySet {
+impl Endpoint for UserMemorySet<'_> {
     type Response = types::UserConsoleQueuedResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/memory";
@@ -2634,12 +2637,12 @@ impl Endpoint for UserMemorySegmentGet {
 ///
 /// Replaces the contents of one `RawMemory.segments` entry (0-99) immediately (not via the console queue). Contents longer than 100 `KiB` after string conversion yield `length limit exceeded`. Only one segment per request.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UserMemorySegmentSet {
+pub struct UserMemorySegmentSet<'a> {
     /// The JSON request body.
-    pub body: types::UserMemorySegmentSetRequest,
+    pub body: types::UserMemorySegmentSetRequest<'a>,
 }
 
-impl Endpoint for UserMemorySegmentSet {
+impl Endpoint for UserMemorySegmentSet<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/memory-segment";
@@ -2690,12 +2693,12 @@ impl Endpoint for UserMessagesList {
 ///
 /// Marks one of the caller's incoming messages and the sender's matching outgoing copy as read and publishes realtime updates to both participants. Ids that are unknown, not owned by the caller or not incoming yield `invalid id`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserMessagesMarkRead {
+pub struct UserMessagesMarkRead<'a> {
     /// The JSON request body.
-    pub body: types::UserMessagesMarkReadRequest,
+    pub body: types::UserMessagesMarkReadRequest<'a>,
 }
 
-impl Endpoint for UserMessagesMarkRead {
+impl Endpoint for UserMessagesMarkRead<'_> {
     type Response = types::UserMessagesMarkReadResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/messages/mark-read";
@@ -2711,12 +2714,12 @@ impl Endpoint for UserMessagesMarkRead {
 ///
 /// Sends a private message to another user by id: stores an `out` copy for the sender and an `in` copy for the recipient (both unread), publishes realtime `message:<respondent>` and `newMessage` events, and upserts a `msg` notification for the recipient unless their preferences disable message notifications or they were online in the last 10 minutes without `sendOnline`. Text must be a string of at most 102400 characters (`text too long`); unknown recipients yield `invalid respondent`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserMessagesSend {
+pub struct UserMessagesSend<'a> {
     /// The JSON request body.
-    pub body: types::UserMessagesSendRequest,
+    pub body: types::UserMessagesSendRequest<'a>,
 }
 
-impl Endpoint for UserMessagesSend {
+impl Endpoint for UserMessagesSend<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/messages/send";
@@ -2814,12 +2817,12 @@ impl Endpoint for UserName {
 ///
 /// Lifts the current rate limiting of an API auth token after a `reCAPTCHA` check. Posted by the official page `#!/account/auth-tokens/noratelimit?token=<token>` (opened in a popup from the token list, or by tools such as node-screeps-api's `rateLimitResetUrl`) with the first 8 characters of the token and the `reCAPTCHA` response. On success the page posts `screepsTokenSuccess` to its opener and closes; errors are shown as returned.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserNoRateLimit {
+pub struct UserNoRateLimit<'a> {
     /// The JSON request body.
-    pub body: types::UserNoRateLimitRequest,
+    pub body: types::UserNoRateLimitRequest<'a>,
 }
 
-impl Endpoint for UserNoRateLimit {
+impl Endpoint for UserNoRateLimit<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/noratelimit";
@@ -2886,12 +2889,12 @@ impl Endpoint for UserOverview {
 ///
 /// Changes the signed-in account's password. The official account page posts the current password as \``oldPassword`\` and the new one as \`password\`, then re-reads \`GET /api/auth/me\` and returns to the account page. The official client only submits passwords that consist of letters, digits and \`!@#$%^&\*(),./\\[\]{}'";=+\|_-?~\`:\<\>\` characters and contain at least one digit and one non-digit.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserPasswordSet {
+pub struct UserPasswordSet<'a> {
     /// The JSON request body.
-    pub body: types::UserPasswordSetRequest,
+    pub body: types::UserPasswordSetRequest<'a>,
 }
 
-impl Endpoint for UserPasswordSet {
+impl Endpoint for UserPasswordSet<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/password";
@@ -2907,12 +2910,12 @@ impl Endpoint for UserPasswordSet {
 ///
 /// Submits the official early-preview request form (`/early-preview-request`); on success the page shows a confirmation.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct UserEarlyPreviewRequest {
+pub struct UserEarlyPreviewRequest<'a> {
     /// The JSON request body.
-    pub body: types::UserEarlyPreviewRequestRequest,
+    pub body: types::UserEarlyPreviewRequestRequest<'a>,
 }
 
-impl Endpoint for UserEarlyPreviewRequest {
+impl Endpoint for UserEarlyPreviewRequest<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/request-early-preview";
@@ -2980,12 +2983,12 @@ impl Endpoint for UserRooms {
 ///
 /// Makes the named branch the one running in the world (`activeWorld`) or simulator (`activeSim`), clearing the flag from all other branches, and publishes `user:<id>/set-active-branch`. Activating for the world loads that branch's code into the runtime. Errors: `invalid params` for another `activeName`, `no branch` for an unknown branch.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UserSetActiveBranch {
+pub struct UserSetActiveBranch<'a> {
     /// The JSON request body.
-    pub body: types::UserSetActiveBranchRequest,
+    pub body: types::UserSetActiveBranchRequest<'a>,
 }
 
-impl Endpoint for UserSetActiveBranch {
+impl Endpoint for UserSetActiveBranch<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/user/set-active-branch";
@@ -3165,12 +3168,12 @@ impl Endpoint for StoreXsollaCancelSubscription {
 ///
 /// Redeems a coupon `code` for CPU subscription days or CPU Credits, then refreshes the signed-in account. Logical errors: `subscribed` (the player has an active subscription; the client asks and resubmits with `convert: true` to convert credits into subscription time), `credits` (unspent CPU Credits must be converted first) and `invalid coupon`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct StoreXsollaCoupon {
+pub struct StoreXsollaCoupon<'a> {
     /// The JSON request body.
-    pub body: types::StoreXsollaCouponRequest,
+    pub body: types::StoreXsollaCouponRequest<'a>,
 }
 
-impl Endpoint for StoreXsollaCoupon {
+impl Endpoint for StoreXsollaCoupon<'_> {
     type Response = types::StoreXsollaCouponResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/xsolla/coupon";
@@ -3200,12 +3203,12 @@ impl Endpoint for StoreXsollaCatalog {
 ///
 /// Creates an Xsolla Pay Station session for the browser purchase flow (`PurchaseService.buy` -\> `XsollaService.next`): the client maps cart items `{sku, quantity}` to `{sku, amount}`, posts them and opens the Pay Station widget with the returned `token`; on completion it refreshes the signed-in account.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct StoreXsollaToken {
+pub struct StoreXsollaToken<'a> {
     /// The JSON request body.
-    pub body: types::StoreXsollaTokenRequest,
+    pub body: types::StoreXsollaTokenRequest<'a>,
 }
 
-impl Endpoint for StoreXsollaToken {
+impl Endpoint for StoreXsollaToken<'_> {
     type Response = types::StoreXsollaTokenResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/xsolla/token";
@@ -3235,12 +3238,12 @@ impl Endpoint for StoreXsollaUser {
 ///
 /// Submits the official client's "report a problem" form to support (Zendesk). The form pre-fills `email` from the signed-in account when available; on success the form shows a submitted state, on failure it displays the error message or string.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SupportReportProblem {
+pub struct SupportReportProblem<'a> {
     /// The JSON request body.
-    pub body: types::SupportReportProblemRequest,
+    pub body: types::SupportReportProblemRequest<'a>,
 }
 
-impl Endpoint for SupportReportProblem {
+impl Endpoint for SupportReportProblem<'_> {
     type Response = types::Ok;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/zendesk/report-problem";

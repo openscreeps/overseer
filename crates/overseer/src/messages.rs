@@ -56,8 +56,7 @@ impl Messages {
     /// fails or the server refuses (`invalid respondent`, `text too long` over 100 KiB).
     pub async fn send(&self, respondent: &str, text: &str) -> Result<(), Error> {
         let api = self.overseer.user_api()?;
-        api.send_message(respondent.to_owned(), text.to_owned())
-            .await?;
+        api.send_message(respondent, text).await?;
         Ok(())
     }
 
@@ -69,7 +68,7 @@ impl Messages {
     /// Returns [`Error::Anonymous`], [`Error::Closed`] and [`Error::Net`] when the request
     /// fails.
     pub async fn mark_read(&self, id: &str) -> Result<(), Error> {
-        self.overseer.user_api()?.mark_read(id.to_owned()).await?;
+        self.overseer.user_api()?.mark_read(id).await?;
         Ok(())
     }
 

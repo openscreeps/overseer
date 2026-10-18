@@ -5,6 +5,7 @@
 //! other operations itself. A [`Community`] server uses screepsmod-admin-utils for the shard
 //! information and the first spawn when the plugin is present.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::{Ready, ready};
 
@@ -54,8 +55,8 @@ impl Community {
 }
 
 /// A room coordinate as requests take it.
-fn coordinate(value: u8) -> GameCoordinateInput {
-    GameCoordinateInput::Integer(value.into())
+fn coordinate(value: u8) -> Cow<'static, GameCoordinateInput> {
+    Cow::Owned(GameCoordinateInput::Integer(value.into()))
 }
 
 /// A name check's reply: `name exists` is a taken name, not a failure.
@@ -102,7 +103,9 @@ macro_rules! shared_operations {
         ) -> Result<Vec<(String, Terrain)>, Error> {
             let request = $contract::endpoints::GameRooms {
                 shard: self.world_shard(shard).await?,
-                body: $contract::types::GameRoomsRequest { rooms },
+                body: $contract::types::GameRoomsRequest {
+                    rooms: rooms.into(),
+                },
             };
             let documents = self.client.send(&request).await?.body.rooms;
             documents
@@ -147,9 +150,9 @@ macro_rules! shared_operations {
             stat_name: &str,
         ) -> Result<MapStats, Error> {
             let body = $contract::types::GameMapStatsRequest {
-                rooms,
-                shard: self.world_shard(shard).await?,
-                stat_name: stat_name.to_owned(),
+                rooms: rooms.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
+                stat_name: stat_name.into(),
             };
             let stats = $contract::endpoints::GameMapStats { body };
             Ok(self.client.send(&stats).await?.body.into())
@@ -180,10 +183,10 @@ macro_rules! shared_operations {
         ) -> Result<(), Error> {
             let body = $contract::types::GameCreateFlagRequest {
                 color: colors.0.code().into(),
-                name: name.to_owned(),
-                room: room.to_owned(),
+                name: name.into(),
+                room: room.into(),
                 secondary_color: colors.1.code().into(),
-                shard: self.world_shard(shard).await?,
+                shard: self.world_shard(shard).await?.map(Into::into),
                 x: x.into(),
                 y: y.into(),
             };
@@ -202,10 +205,10 @@ macro_rules! shared_operations {
         ) -> Result<(), Error> {
             let body = $contract::types::GameChangeFlagColorRequest {
                 color: colors.0.code().into(),
-                name: name.to_owned(),
-                room: Some(room.to_owned()),
+                name: name.into(),
+                room: Some(room.into()),
                 secondary_color: colors.1.code().into(),
-                shard: self.world_shard(shard).await?,
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             self.client
                 .send(&$contract::endpoints::GameChangeFlagColor { body })
@@ -220,9 +223,9 @@ macro_rules! shared_operations {
             name: &str,
         ) -> Result<(), Error> {
             let body = $contract::types::GameRemoveFlagRequest {
-                name: name.to_owned(),
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
+                name: name.into(),
+                room: room.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             self.client
                 .send(&$contract::endpoints::GameRemoveFlag { body })
@@ -232,7 +235,7 @@ macro_rules! shared_operations {
 
         async fn unique_flag_name(&self, shard: Option<&str>) -> Result<String, Error> {
             let body = $contract::types::GameShardOnlyRequest {
-                shard: self.world_shard(shard).await?,
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             let request = $contract::endpoints::GameGenUniqueFlagName { body };
             Ok(self.client.send(&request).await?.body.name)
@@ -240,8 +243,8 @@ macro_rules! shared_operations {
 
         async fn is_flag_name_free(&self, shard: Option<&str>, name: &str) -> Result<bool, Error> {
             let body = $contract::types::GameCheckUniqueFlagNameRequest {
-                name: name.to_owned(),
-                shard: self.world_shard(shard).await?,
+                name: name.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             let request = $contract::endpoints::GameCheckUniqueFlagName { body };
             name_free(self.client.send(&request).await)
@@ -249,7 +252,7 @@ macro_rules! shared_operations {
 
         async fn unique_spawn_name(&self, shard: Option<&str>) -> Result<String, Error> {
             let body = $contract::types::GameGenUniqueObjectNameRequest {
-                shard: self.world_shard(shard).await?,
+                shard: self.world_shard(shard).await?.map(Into::into),
                 r#type: $contract::types::GameGenUniqueObjectNameRequestType::Spawn,
             };
             let request = $contract::endpoints::GameGenUniqueObjectName { body };
@@ -258,8 +261,8 @@ macro_rules! shared_operations {
 
         async fn is_spawn_name_free(&self, shard: Option<&str>, name: &str) -> Result<bool, Error> {
             let body = $contract::types::GameCheckUniqueObjectNameRequest {
-                name: name.to_owned(),
-                shard: self.world_shard(shard).await?,
+                name: name.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
                 r#type: $contract::types::GameCheckUniqueObjectNameRequestType::Spawn,
             };
             let request = $contract::endpoints::GameCheckUniqueObjectName { body };
@@ -275,9 +278,9 @@ macro_rules! shared_operations {
             name: Option<&str>,
         ) -> Result<Option<String>, Error> {
             let body = $contract::types::GameCreateConstructionRequest {
-                name: name.map(str::to_owned),
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
+                name: name.map(Into::into),
+                room: room.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
                 structure_type: structure,
                 x: coordinate(x),
                 y: coordinate(y),
@@ -293,9 +296,9 @@ macro_rules! shared_operations {
             enabled: bool,
         ) -> Result<(), Error> {
             let body = $contract::types::GameSetNotifyWhenAttackedRequest {
-                id: id.to_owned(),
+                id: id.into(),
                 enabled: Some(enabled),
-                shard: self.world_shard(shard).await?,
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             self.client
                 .send(&$contract::endpoints::GameSetNotifyWhenAttacked { body })
@@ -311,11 +314,11 @@ macro_rules! shared_operations {
             intent: GameAddObjectIntentRequestIntent,
         ) -> Result<(), Error> {
             let body = $contract::types::GameAddObjectIntentRequest {
-                id: target.to_owned(),
-                intent: Some(intent),
-                name: name.to_owned(),
-                room: room.to_owned(),
-                shard: self.world_shard(shard).await?,
+                id: target.into(),
+                intent: Some(Cow::Owned(intent)),
+                name: name.into(),
+                room: room.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             self.client
                 .send(&$contract::endpoints::GameAddObjectIntent { body })
@@ -330,9 +333,9 @@ macro_rules! shared_operations {
             intent: BTreeMap<String, Value>,
         ) -> Result<(), Error> {
             let body = $contract::types::GameAddGlobalIntentRequest {
-                intent: Some(intent),
-                name: name.to_owned(),
-                shard: self.world_shard(shard).await?,
+                intent: Some(Cow::Owned(intent)),
+                name: name.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             self.client
                 .send(&$contract::endpoints::GameAddGlobalIntent { body })
@@ -342,8 +345,8 @@ macro_rules! shared_operations {
 
         async fn remove_invader(&self, shard: Option<&str>, id: &str) -> Result<(), Error> {
             let body = $contract::types::GameRemoveInvaderRequest {
-                id: id.to_owned(),
-                shard: self.world_shard(shard).await?,
+                id: id.into(),
+                shard: self.world_shard(shard).await?.map(Into::into),
             };
             self.client
                 .send(&$contract::endpoints::GameRemoveInvader { body })
@@ -357,11 +360,11 @@ macro_rules! shared_operations {
 fn invader_body(
     request: &InvaderRequest,
     shard: Option<String>,
-) -> official::types::GameCreateInvaderRequest {
+) -> official::types::GameCreateInvaderRequest<'_> {
     official::types::GameCreateInvaderRequest {
         boosted: Some(request.boosted),
-        room: request.room.clone(),
-        shard,
+        room: request.room.as_str().into(),
+        shard: shard.map(Into::into),
         size: request.size,
         r#type: request.kind,
         x: coordinate(request.x),
@@ -370,16 +373,16 @@ fn invader_body(
 }
 
 /// The request of `POST /api/game/place-spawn` of the official and the community contract.
-fn place_spawn_body(
-    room: &str,
+fn place_spawn_body<'a>(
+    room: &'a str,
     (x, y): (u8, u8),
-    name: Option<&str>,
+    name: Option<&'a str>,
     shard: Option<String>,
-) -> official::types::GamePlaceSpawnRequest {
+) -> official::types::GamePlaceSpawnRequest<'a> {
     official::types::GamePlaceSpawnRequest {
-        name: name.map(str::to_owned),
-        room: room.to_owned(),
-        shard,
+        name: name.map(Into::into),
+        room: room.into(),
+        shard: shard.map(Into::into),
         x: coordinate(x),
         y: coordinate(y),
     }
@@ -616,8 +619,8 @@ impl WorldApi for Community {
     ) -> Result<(), Error> {
         if let Some(admin_utils) = self.screepsmod_admin_utils() {
             let name = match name {
-                Some(name) => name.to_owned(),
-                None => self.unique_spawn_name(shard).await?,
+                Some(name) => Cow::Borrowed(name),
+                None => Cow::Owned(self.unique_spawn_name(shard).await?),
             };
             return admin_utils.place_spawn(room, at, name).await;
         }
@@ -649,10 +652,15 @@ impl ScreepsmodAdminUtils<'_> {
     }
 
     /// screepsmod-admin-utils' first spawn: always named.
-    async fn place_spawn(&self, room: &str, (x, y): (u8, u8), name: String) -> Result<(), Error> {
+    async fn place_spawn(
+        &self,
+        room: &str,
+        (x, y): (u8, u8),
+        name: Cow<'_, str>,
+    ) -> Result<(), Error> {
         let body = screepsmod_admin_utils::types::GamePlaceSpawnRequest {
             name,
-            room: room.to_owned(),
+            room: room.into(),
             shard: None,
             x: Some(coordinate(x)),
             y: Some(coordinate(y)),

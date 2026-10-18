@@ -48,7 +48,7 @@ impl PowerCreeps {
         class: PowerCreepClassName,
     ) -> Result<Option<PowerCreep>, Error> {
         let api = self.overseer.user_api()?;
-        Ok(api.create_power_creep(name.to_owned(), class).await?)
+        Ok(api.create_power_creep(name, class).await?)
     }
 
     /// Renames the unspawned power creep `id` (`POST /api/game/power-creeps/rename`).
@@ -58,8 +58,7 @@ impl PowerCreeps {
     /// See [`PowerCreeps`].
     pub async fn rename(&self, id: &str, name: &str) -> Result<(), Error> {
         let api = self.overseer.user_api()?;
-        api.rename_power_creep(id.to_owned(), name.to_owned())
-            .await?;
+        api.rename_power_creep(id, name).await?;
         Ok(())
     }
 
@@ -72,7 +71,7 @@ impl PowerCreeps {
     /// See [`PowerCreeps`].
     pub async fn delete(&self, id: &str) -> Result<(), Error> {
         let api = self.overseer.user_api()?;
-        api.delete_power_creep(id.to_owned()).await?;
+        api.delete_power_creep(id).await?;
         Ok(())
     }
 
@@ -84,7 +83,7 @@ impl PowerCreeps {
     /// See [`PowerCreeps`].
     pub async fn cancel_delete(&self, id: &str) -> Result<(), Error> {
         let api = self.overseer.user_api()?;
-        api.cancel_power_creep_delete(id.to_owned()).await?;
+        api.cancel_power_creep_delete(id).await?;
         Ok(())
     }
 
@@ -97,7 +96,7 @@ impl PowerCreeps {
     /// See [`PowerCreeps`].
     pub async fn upgrade(&self, id: &str, powers: BTreeMap<String, u64>) -> Result<(), Error> {
         let api = self.overseer.user_api()?;
-        api.upgrade_power_creep(id.to_owned(), powers).await?;
+        api.upgrade_power_creep(id, powers).await?;
         Ok(())
     }
 

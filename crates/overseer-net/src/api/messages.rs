@@ -35,18 +35,15 @@ pub trait MessagesApi {
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send), for example the server's
     /// refusal `invalid respondent`, or `text too long` over 100 KiB.
-    fn send_message(
-        &self,
-        respondent: String,
-        text: String,
-    ) -> impl Future<Output = Result<(), Error>>;
+    fn send_message(&self, respondent: &str, text: &str)
+    -> impl Future<Output = Result<(), Error>>;
 
     /// Marks the incoming message `id` read (`POST /api/user/messages/mark-read`).
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send).
-    fn mark_read(&self, id: String) -> impl Future<Output = Result<(), Error>>;
+    fn mark_read(&self, id: &str) -> impl Future<Output = Result<(), Error>>;
 
     /// The number of unread incoming messages (`GET /api/user/messages/unread-count`).
     ///
@@ -65,11 +62,11 @@ impl MessagesApi for Api {
         delegate!(self, api => api.conversation(respondent).await)
     }
 
-    async fn send_message(&self, respondent: String, text: String) -> Result<(), Error> {
+    async fn send_message(&self, respondent: &str, text: &str) -> Result<(), Error> {
         delegate!(self, api => api.send_message(respondent, text).await)
     }
 
-    async fn mark_read(&self, id: String) -> Result<(), Error> {
+    async fn mark_read(&self, id: &str) -> Result<(), Error> {
         delegate!(self, api => api.mark_read(id).await)
     }
 
@@ -94,15 +91,18 @@ macro_rules! messages_api {
                 Ok(self.client.send(&list).await?.body.messages)
             }
 
-            async fn send_message(&self, respondent: String, text: String) -> Result<(), Error> {
-                let body = $contract::types::UserMessagesSendRequest { respondent, text };
+            async fn send_message(&self, respondent: &str, text: &str) -> Result<(), Error> {
+                let body = $contract::types::UserMessagesSendRequest {
+                    respondent: respondent.into(),
+                    text: text.into(),
+                };
                 let send = $contract::endpoints::UserMessagesSend { body };
                 self.client.send(&send).await?;
                 Ok(())
             }
 
-            async fn mark_read(&self, id: String) -> Result<(), Error> {
-                let body = $contract::types::UserMessagesMarkReadRequest { id };
+            async fn mark_read(&self, id: &str) -> Result<(), Error> {
+                let body = $contract::types::UserMessagesMarkReadRequest { id: id.into() };
                 let mark = $contract::endpoints::UserMessagesMarkRead { body };
                 self.client.send(&mark).await?;
                 Ok(())

@@ -5,6 +5,9 @@
 //! Fields are the operation's query and path parameters (`Option` when not required) and its
 //! JSON request body (`body`); [`Endpoint::Response`] is the success body. The session sends
 //! the `X-Token`, `X-Username` and `X-Server-Password` headers itself.
+//!
+//! A request body that no other type holds keeps its strings, lists and objects as `Cow`, so
+//! that it can borrow the values of the caller. The endpoint then has the lifetime of its body.
 
 #[cfg(test)]
 mod tests;
@@ -72,12 +75,12 @@ impl Endpoint for PlatformExperimentalPvp {
 ///
 /// screepsmod-admin-utils: `name` must be a string of at most 50 characters (`invalid params`). `name: "auto"` skips the coordinates and the construction-spot checks, claims the controller with `autoSpawn` and places no spawn; the first spawn construction site the player then creates in that room becomes a complete spawn when the tick is processed. Otherwise coordinates outside 0..49 are `invalid params` (missing coordinates are not rejected). It then checks the account (`blocked`, `no cpu`, `too soon after last respawn`), the room (`invalid room`, `out of borders`, `not supported`), `already playing`, the controller (`invalid room`, `room busy`) and the tile (`invalid location`). On success other players' creeps and structures in the room are deleted (no ruins; their construction sites remain), the controller is claimed at level 1 with 20000 ticks of safe mode, the room is activated and `{ok: 1, newbie: true}` is returned; CPU settings are not changed.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GamePlaceSpawn {
+pub struct GamePlaceSpawn<'a> {
     /// The JSON request body.
-    pub body: types::GamePlaceSpawnRequest,
+    pub body: types::GamePlaceSpawnRequest<'a>,
 }
 
-impl Endpoint for GamePlaceSpawn {
+impl Endpoint for GamePlaceSpawn<'_> {
     type Response = types::GamePlaceSpawnResponse;
     const METHOD: Method = Method::POST;
     const PATH: &'static str = "api/game/place-spawn";

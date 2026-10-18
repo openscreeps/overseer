@@ -39,8 +39,8 @@ macro_rules! console_api {
         impl ConsoleApi for $api {
             async fn console(&self, expression: &str, shard: Option<&str>) -> Result<(), Error> {
                 let body = $contract::types::UserConsoleRequest {
-                    expression: expression.to_owned(),
-                    shard: self.client.resolve_shard(shard).await?,
+                    expression: expression.into(),
+                    shard: self.client.resolve_shard(shard).await?.map(Into::into),
                 };
                 self.client
                     .send(&$contract::endpoints::UserConsole { body })
@@ -70,12 +70,12 @@ mod tests {
     #[test]
     fn both_console_replies_decode() {
         // screeps.com echoes the inserted console document and the driver's metadata.
-        assert!(decodes::<official::endpoints::UserConsole>(
+        assert!(decodes::<official::endpoints::UserConsole<'_>>(
             r#"{"ok":1,"result":{"ok":1,"n":1},"ops":[{"user":"5a1b2c3d4e5f60718293a4b5",
                 "expression":"Game.time","shard":"shard3","_id":"65f0c0ffee0123456789abcd"}],
                 "insertedCount":1,"insertedIds":["65f0c0ffee0123456789abcd"]}"#
         ));
-        assert!(decodes::<openscreeps::endpoints::UserConsole>(
+        assert!(decodes::<openscreeps::endpoints::UserConsole<'_>>(
             r#"{"ok":1}"#
         ));
     }

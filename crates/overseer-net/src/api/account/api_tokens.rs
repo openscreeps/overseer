@@ -93,7 +93,7 @@ impl ApiTokens for Official {
     async fn delete_auth_token(&self, id: &str) -> Result<(), Error> {
         let delete = official::endpoints::UserAuthTokenDelete {
             body: official::types::UserAuthTokenDeleteRequest {
-                token_id: id.to_owned(),
+                token_id: id.into(),
             },
         };
         self.client.send(&delete).await?;
@@ -121,7 +121,7 @@ impl ApiTokens for ScreepsmodAuth<'_> {
     async fn delete_auth_token(&self, id: &str) -> Result<(), Error> {
         let delete = screepsmod_auth::endpoints::UserAuthTokenDelete {
             body: screepsmod_auth::types::UserAuthTokenDeleteRequest {
-                token_id: id.to_owned(),
+                token_id: id.into(),
             },
         };
         self.client.send(&delete).await?;

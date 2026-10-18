@@ -9,6 +9,7 @@ mod api_tokens;
 mod password;
 mod rate_limit_lift;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::ready;
 
@@ -291,7 +292,9 @@ macro_rules! shared_account_ops {
 
         async fn set_badge(&self, badge: UserBadgeInput) -> Result<(), Error> {
             let set = $contract::endpoints::UserBadgeSet {
-                body: $contract::types::UserBadgeSetRequest { badge },
+                body: $contract::types::UserBadgeSetRequest {
+                    badge: Cow::Owned(badge),
+                },
             };
             self.client.send(&set).await?;
             Ok(())
@@ -300,7 +303,7 @@ macro_rules! shared_account_ops {
         async fn set_email(&self, email: &str) -> Result<(), Error> {
             let set = $contract::endpoints::UserEmailSet {
                 body: $contract::types::UserEmailRequest {
-                    email: email.to_owned(),
+                    email: email.into(),
                 },
             };
             self.client.send(&set).await?;
@@ -310,8 +313,8 @@ macro_rules! shared_account_ops {
         async fn set_username(&self, username: &str, email: Option<&str>) -> Result<(), Error> {
             let set = $contract::endpoints::RegisterSetUsername {
                 body: $contract::types::RegisterSetUsernameRequest {
-                    username: username.to_owned(),
-                    email: email.map(str::to_owned),
+                    username: username.into(),
+                    email: email.map(Into::into),
                     ..Default::default()
                 },
             };
@@ -352,7 +355,9 @@ impl AccountApi for Official {
 
     async fn set_cpu_shards(&self, cpu: BTreeMap<String, u64>) -> Result<(), Error> {
         let set = official::endpoints::UserCpuShardsSet {
-            body: official::types::UserCpuShardsRequest { cpu },
+            body: official::types::UserCpuShardsRequest {
+                cpu: Cow::Owned(cpu),
+            },
         };
         self.client.send(&set).await?;
         Ok(())
@@ -439,7 +444,9 @@ impl AccountApi for Community {
 
     async fn set_badge(&self, badge: UserBadgeInput) -> Result<(), Error> {
         let set = community::endpoints::UserBadgeSet {
-            body: community::types::UserBadgeSetRequest { badge },
+            body: community::types::UserBadgeSetRequest {
+                badge: Cow::Owned(badge),
+            },
         };
         self.client.send(&set).await?;
         Ok(())
@@ -455,7 +462,7 @@ impl AccountApi for Community {
     async fn set_email(&self, email: &str) -> Result<(), Error> {
         let set = community::endpoints::UserEmailSet {
             body: community::types::UserEmailRequest {
-                email: email.to_owned(),
+                email: email.into(),
             },
         };
         self.client.send(&set).await?;
@@ -465,8 +472,8 @@ impl AccountApi for Community {
     async fn set_username(&self, username: &str, email: Option<&str>) -> Result<(), Error> {
         let set = community::endpoints::RegisterSetUsername {
             body: community::types::RegisterSetUsernameRequest {
-                username: username.to_owned(),
-                email: email.map(str::to_owned),
+                username: username.into(),
+                email: email.map(Into::into),
                 ..Default::default()
             },
         };
