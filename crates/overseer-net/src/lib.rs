@@ -194,6 +194,14 @@
 //! No total request timeout is applied (the socket upgrade shares the client); wrap calls in
 //! [`rt::timeout`] where needed.
 //!
+//! # Failed operations
+//!
+//! [`Error::outcome`] tells whether a failed operation can have changed state on the server.
+//! [`Outcome::NotApplied`] means that no attempt of the request left the client, sign-ins and
+//! retries included. Every other failure is [`Outcome::Unknown`]: the server can have applied
+//! the operation in full, in part or not at all. The outcome causes no retries: the application
+//! decides whether to read the state, wait or try again.
+//!
 //! # Native and web
 //!
 //! The crate builds natively and for browsers (`wasm32-unknown-unknown`); [`rt`] provides the
@@ -302,6 +310,19 @@ pub enum Error {
     /// A password change was refused: the current password given is not the account's.
     #[error("the current password is wrong")]
     WrongPassword,
+    /// The server answered the request with HTTP 401 or 429 (`answer`), and the retry then
+    /// failed before it sent anything more (`source`): the sign-in that the retry needs, or the
+    /// retry itself, did not leave the client. [`Client::send`] returns it in place of `source`,
+    /// because the first attempt reached the server.
+    #[error("{answer}; the retry was not sent")]
+    RetryNotSent {
+        /// The answer to the first attempt: [`ApiError::Unauthorized`] or
+        /// [`ApiError::RateLimited`].
+        answer: ApiError,
+        /// Why the retry was not sent.
+        #[source]
+        source: Box<Error>,
+    },
 }
 
 impl Error {
@@ -322,10 +343,93 @@ impl Error {
             _ => None,
         }
     }
+
+    /// What the failed operation can have done on the server. The value covers every attempt
+    /// of the operation: the sign-in before the request, the retry after HTTP 401 and the retry
+    /// after HTTP 429 ([`Client::send`]).
+    ///
+    /// It is [`Outcome::NotApplied`] only when no attempt of the request left the client:
+    ///
+    /// - [`Self::Request`], [`Self::Unsupported`] and [`Self::Anonymous`]: the client did not
+    ///   build the request, or the server does not offer the operation.
+    /// - [`Self::Http`] when `reqwest` could not build the request
+    ///   ([`reqwest::Error::is_builder`]) or, natively, could not connect
+    ///   (`reqwest::Error::is_connect`): no byte of the request was written.
+    ///
+    /// Every other error is [`Outcome::Unknown`]. This includes:
+    ///
+    /// - Every answer of the server. No contract states that the server refuses HTTP 401 or 429
+    ///   before it runs the request. An `{error}` reply is no proof either: community servers
+    ///   also report exceptions that a request handler throws halfway this way.
+    /// - A timeout, a connection lost after the request was written, and a reply that does not
+    ///   decode.
+    /// - In browsers, every failure of `fetch`: the browser reports a network error and a reply
+    ///   that CORS blocks alike.
+    ///
+    /// An operation of the domain API ([`Api`]) can read first, for example the discovery, the
+    /// profile or a free name. [`Outcome::NotApplied`] then tells only that its change was not
+    /// sent. Session upkeep is not part of the operation: a sign-in of the client and a token
+    /// that a reply rotates change server state that the operation does not own.
+    ///
+    /// Caution: with an HTTP client from [`ClientBuilder::http_client`], a failed connection
+    /// proves nothing if that client resends requests that the server can have received. The
+    /// default `reqwest` client resends only requests that an HTTP/2 server refused before it
+    /// processed them.
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            Self::Request(_) | Self::Unsupported(_) | Self::Anonymous => Outcome::NotApplied,
+            Self::Http(error) if unsent(error) => Outcome::NotApplied,
+            Self::Http(_)
+            | Self::Api(_)
+            | Self::WebSocket(_)
+            | Self::Socket(_)
+            | Self::Terrain(_)
+            | Self::Memory(_)
+            | Self::UnexpectedReply(_)
+            | Self::WrongPassword
+            | Self::RetryNotSent { .. } => Outcome::Unknown,
+        }
+    }
+
+    /// `self` as the failure of a retry after the server answered `answer`: wrapped in
+    /// [`Self::RetryNotSent`] when `self` alone reports [`Outcome::NotApplied`].
+    pub(crate) fn after_answer(self, answer: ApiError) -> Self {
+        match self.outcome() {
+            Outcome::NotApplied => Self::RetryNotSent {
+                answer,
+                source: Box::new(self),
+            },
+            Outcome::Unknown => self,
+        }
+    }
 }
 
 impl From<reqwest_websocket::Error> for Error {
     fn from(error: reqwest_websocket::Error) -> Self {
         Self::WebSocket(Box::new(error))
     }
+}
+
+/// What a failed operation can have done on the server ([`Error::outcome`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Outcome {
+    /// The server did not apply the operation: no attempt of its request left the client.
+    NotApplied,
+    /// The server can have applied the operation in full, in part or not at all.
+    Unknown,
+}
+
+/// Whether `reqwest` failed before it wrote a byte of the request: it could not build the
+/// request or connect.
+#[cfg(not(target_arch = "wasm32"))]
+fn unsent(error: &reqwest::Error) -> bool {
+    error.is_builder() || error.is_connect()
+}
+
+/// Whether `reqwest` failed before it called `fetch`: it could not build the request. A failed
+/// `fetch` tells nothing, as the browser reports a lost connection and a blocked reply alike.
+#[cfg(target_arch = "wasm32")]
+fn unsent(error: &reqwest::Error) -> bool {
+    error.is_builder()
 }

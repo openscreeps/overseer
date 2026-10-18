@@ -168,7 +168,8 @@ impl Client {
     /// Returns [`Error::Request`] when the request cannot be built (for example a missing token),
     /// [`Error::Http`] for transport failures and [`Error::Api`] for error replies, including
     /// those of a needed sign-in and [`ApiError::RateLimited`] when a retry is not allowed or
-    /// fails again.
+    /// fails again. A retry after HTTP 401 or 429 that fails before it sends anything more
+    /// returns [`Error::RetryNotSent`]. [`Error::outcome`] covers every attempt.
     pub async fn send<E: Endpoint + Sync>(
         &self,
         endpoint: &E,
@@ -182,8 +183,13 @@ impl Client {
         let (used, result) = self.execute(endpoint).await;
         match (result, &self.inner.credentials) {
             (Err(Error::Api(ApiError::Unauthorized)), Some(credentials)) => {
-                self.renew_token(credentials, used.as_ref()).await?;
-                self.execute(endpoint).await.1
+                let retry = async {
+                    self.renew_token(credentials, used.as_ref()).await?;
+                    self.execute(endpoint).await.1
+                };
+                retry
+                    .await
+                    .map_err(|error| error.after_answer(ApiError::Unauthorized))
             }
             (result, _) => result,
         }
@@ -494,7 +500,7 @@ impl Client {
     }
 
     /// Sends a request, retrying once after HTTP 429 when the policy allows; returns the token
-    /// the last attempt used.
+    /// the last attempt used. A retry that sends nothing fails with [`Error::RetryNotSent`].
     async fn execute<E: Endpoint + Sync>(
         &self,
         endpoint: &E,
@@ -504,8 +510,10 @@ impl Client {
             (&result, &self.inner.rate_limit)
             && let Some(wait) = policy.retry_delay(limit.as_ref(), SystemTime::now())
         {
+            let answer = ApiError::RateLimited(*limit);
             sleep(wait).await;
-            return self.attempt(endpoint).await;
+            let (used, result) = self.attempt(endpoint).await;
+            return (used, result.map_err(|error| error.after_answer(answer)));
         }
         (used, result)
     }

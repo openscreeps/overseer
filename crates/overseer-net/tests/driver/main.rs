@@ -1,9 +1,11 @@
 //! Driver behaviour against an in-process server: discovery, reconnects, backoff, keep-alive,
-//! token sharing, sign-in, rate limits, client flows, the event stream and upgrade retries.
+//! token sharing, sign-in, rate limits, the outcome of failed requests, client flows, the event
+//! stream and upgrade retries.
 
 mod account;
 mod discovery;
 mod flows;
+mod outcome;
 mod server;
 mod signin;
 mod socket;

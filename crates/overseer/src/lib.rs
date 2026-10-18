@@ -142,7 +142,8 @@
 //!
 //! Every typed endpoint remains available through [`Overseer::client`]. Errors that refuse
 //! access (a rejected token or credentials, a missing or wrong server password) are typed:
-//! [`Error::refusal`].
+//! [`Error::refusal`]. [`Error::outcome`] tells whether a failed operation can have changed
+//! state on the server ([`net::Outcome`]).
 
 pub mod account;
 pub mod cache;

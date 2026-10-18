@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use overseer_net::Outcome;
 use overseer_net::core::api::Refusal;
 
 use crate::live::Closed;
@@ -54,6 +55,22 @@ impl Error {
         match self {
             Self::Net(error) => error.refusal(),
             _ => None,
+        }
+    }
+
+    /// What the failed operation can have done on the server
+    /// ([`overseer_net::Error::outcome`]). [`Error::Net`] tells it for every attempt of the
+    /// request. The other errors arise before the operation sends a change, so they are
+    /// [`Outcome::NotApplied`].
+    #[must_use]
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            Self::Net(error) => error.outcome(),
+            Self::Anonymous
+            | Self::Closed
+            | Self::Io { .. }
+            | Self::InvalidInput(_)
+            | Self::Segment(_) => Outcome::NotApplied,
         }
     }
 }

@@ -80,7 +80,7 @@ impl Server {
         routes: impl Fn(&Request) -> R + Send + Sync + 'static,
         upgrades: impl Fn(usize) -> bool + Send + Sync + 'static,
     ) -> Self {
-        Self::launch(routes, upgrades, None).await
+        Self::launch(routes, upgrades, None, None).await
     }
 
     /// Like [`Self::start`], but keeps connections open for further requests, like Node's
@@ -92,13 +92,23 @@ impl Server {
         upgrades: impl Fn(usize) -> bool + Send + Sync + 'static,
         idle: Duration,
     ) -> Self {
-        Self::launch(routes, upgrades, Some(idle)).await
+        Self::launch(routes, upgrades, Some(idle), None).await
+    }
+
+    /// Like [`Self::start`], but accepts only the first `connections` connections. Then it
+    /// stops listening, so that later connection attempts fail.
+    pub async fn start_refusing_after<R: Into<Response>>(
+        routes: impl Fn(&Request) -> R + Send + Sync + 'static,
+        connections: usize,
+    ) -> Self {
+        Self::launch(routes, |_| true, None, Some(connections)).await
     }
 
     async fn launch<R: Into<Response>>(
         routes: impl Fn(&Request) -> R + Send + Sync + 'static,
         upgrades: impl Fn(usize) -> bool + Send + Sync + 'static,
         keep_alive: Option<Duration>,
+        connections: Option<usize>,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = ServerUrl::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
@@ -116,8 +126,12 @@ impl Server {
         let accepting = Arc::clone(&state);
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                accepting.connections.fetch_add(1, Ordering::SeqCst);
+                let accepted = accepting.connections.fetch_add(1, Ordering::SeqCst) + 1;
                 tokio::spawn(serve(stream, Arc::clone(&accepting)));
+                if connections.is_some_and(|limit| accepted >= limit) {
+                    // Drops the listener.
+                    break;
+                }
             }
         });
         Self {
