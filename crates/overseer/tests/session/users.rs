@@ -1,7 +1,8 @@
-//! Other players and leaderboards: request shapes.
+//! Other players and leaderboards: request shapes, and unknown users on each contract.
 
-use overseer::StatInterval;
+use overseer::model::platform::{Plugins, ServerKind};
 use overseer::model::users::LeaderboardMode;
+use overseer::{Auth, Overseer, ServerProfile, StatInterval};
 
 use crate::server::{Request, Server};
 use crate::{connect, routes};
@@ -45,10 +46,10 @@ async fn user_and_leaderboard_requests_have_the_documented_shape() {
     let (overseer, _websocket) = connect(&mut server).await;
     let users = overseer.users();
 
-    let bob = users.find("bob").await.unwrap();
+    let bob = users.find("bob").await.unwrap().unwrap();
     assert_eq!(bob.id, "u2");
     assert_eq!(bob.username.as_deref(), Some("Bob"));
-    assert_eq!(users.find_by_id("u2").await.unwrap(), bob);
+    assert_eq!(users.find_by_id("u2").await.unwrap(), Some(bob));
     let rooms = users.rooms("u2").await.unwrap();
     let rooms: Vec<_> = rooms
         .iter()
@@ -102,4 +103,43 @@ async fn user_and_leaderboard_requests_have_the_documented_shape() {
     ]
     .map(|(path, query)| (path.to_owned(), query.to_owned()));
     assert_eq!(sent, expected);
+}
+
+/// `GET /api/user/find` answering each lookup of `query` with its error string: `ghost` the
+/// contract's own for an unknown user (`unknown`), `stranger` the one of another contract.
+fn lookup_routes(unknown: &'static str, other: &'static str) -> impl Fn(&Request) -> (u16, String) {
+    move |request| match request.path.as_str() {
+        "/api/user/find" if request.query.ends_with("=ghost") => {
+            (200, format!(r#"{{"error":"{unknown}"}}"#))
+        }
+        "/api/user/find" => (200, format!(r#"{{"error":"{other}"}}"#)),
+        _ => routes(request),
+    }
+}
+
+#[tokio::test]
+async fn unknown_users_are_none_in_the_error_string_of_each_contract() {
+    const NOT_FOUND: &str = "user not found";
+    const TYPE_ERROR: &str = "TypeError: Cannot read properties of null (reading 'steam')";
+    for (kind, unknown, other) in [
+        (ServerKind::Official, NOT_FOUND, TYPE_ERROR),
+        (ServerKind::OpenScreeps, NOT_FOUND, TYPE_ERROR),
+        (ServerKind::Community, TYPE_ERROR, NOT_FOUND),
+    ] {
+        let server = Server::start(lookup_routes(unknown, other), |_| true).await;
+        let profile = ServerProfile {
+            url: server.url(),
+            auth: Auth::Anonymous,
+            server_password: None,
+            default_shard: None,
+            server_kind: Some(kind),
+            plugins: Some(Plugins::NONE),
+        };
+        let users = Overseer::connect(profile).await.unwrap().users();
+        assert_eq!(users.find("ghost").await.unwrap(), None, "{kind:?}");
+        assert_eq!(users.find_by_id("ghost").await.unwrap(), None, "{kind:?}");
+        // Another contract's string is a failure, not an unknown user.
+        let error = users.find("stranger").await.unwrap_err();
+        assert_eq!(error.server_message(), Some(other), "{kind:?}");
+    }
 }

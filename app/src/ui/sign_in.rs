@@ -3,7 +3,7 @@
 //! server takes one, a username) and password where it has password sign-in, and the server
 //! password when the server asks for one. Registration is the "Register" tab where the server
 //! registers accounts through its API, and the website's page where it has one. The server is
-//! discovered without an account first ([`session::anonymous_api`]).
+//! discovered without an account first ([`session::guest`]).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -134,10 +134,9 @@ pub fn SignIn(
         let platform = state.platform();
         let url = url.clone();
         spawn_local(async move {
-            let discovered =
-                session::anonymous_api(&platform, &url, server_kind, server_password).await;
+            let discovered = session::guest(&platform, &url, server_kind, server_password).await;
             let found = match discovered {
-                Ok(api) => Discovery::Ready(Methods::of(&api)),
+                Ok(guest) => Discovery::Ready(Methods::of(guest.api())),
                 Err(Failure::ServerPassword) => Discovery::NeedsServerPassword,
                 Err(failure) => Discovery::Failed(failure.to_string()),
             };

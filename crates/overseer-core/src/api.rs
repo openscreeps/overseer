@@ -26,7 +26,9 @@ use url::UrlQuery;
 use url::form_urlencoded::Serializer;
 
 pub use indexed_list::IndexedList;
-pub use session::{ApiError, RateLimit, Reply, RequestError, Session};
+pub use session::{
+    ApiError, INCORRECT_SERVER_PASSWORD, RateLimit, Refusal, Reply, RequestError, Session,
+};
 
 /// Whether an endpoint needs a token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

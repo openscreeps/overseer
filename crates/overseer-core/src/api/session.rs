@@ -331,6 +331,50 @@ pub enum ApiError {
     Decode(#[from] serde_json::Error),
 }
 
+/// The `error` of a password-protected private server when `X-Server-Password` is missing or
+/// wrong (an HTTP 200 `{error}` body, for every `api/…` request).
+pub const INCORRECT_SERVER_PASSWORD: &str = "incorrect server password";
+
+/// Why the server refused the client's access, whatever the request ([`ApiError::refusal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Refusal {
+    /// HTTP 401: the token, or the e-mail and password, were rejected.
+    Unauthorized,
+    /// The server is password-protected and the server password is missing or wrong
+    /// ([`INCORRECT_SERVER_PASSWORD`]).
+    ServerPassword,
+}
+
+impl ApiError {
+    /// The server's own error string: the `error` of a 2xx `{error}` body or of a non-2xx
+    /// status. `None` when the server sent none.
+    #[must_use]
+    pub fn server_message(&self) -> Option<&str> {
+        match self {
+            Self::Server(message)
+            | Self::Status {
+                message: Some(message),
+                ..
+            } => Some(message),
+            _ => None,
+        }
+    }
+
+    /// Why the server refused the client's access, when the error says so: the token or the
+    /// credentials ([`Refusal::Unauthorized`]), or the server password
+    /// ([`Refusal::ServerPassword`]). `None` for every other failure.
+    #[must_use]
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            Self::Unauthorized => Some(Refusal::Unauthorized),
+            error if error.server_message() == Some(INCORRECT_SERVER_PASSWORD) => {
+                Some(Refusal::ServerPassword)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Formats an optional message as `: message`.
 struct ErrorSuffix<'a>(Option<&'a str>);
 
@@ -415,7 +459,7 @@ impl<'de> Visitor<'de> for TruthyVisitor {
 mod tests {
     use ::http::{Method, Response, StatusCode};
 
-    use super::{ApiError, RateLimit, RequestError, Session};
+    use super::{ApiError, RateLimit, Refusal, RequestError, Session};
     use crate::api::official::endpoints::{
         AuthSignin, GameRoomTerrain, GameTime, PlatformOfficialRoomHistory, PlatformVersion,
         UserBadgeSvg, UserConsole, UserMemoryGet, UserWorldStatus,
@@ -462,6 +506,28 @@ mod tests {
             reply(200, &[], r#"{"error":"invalid shard"}"#),
         );
         assert!(matches!(result, Err(ApiError::Server(message)) if message == "invalid shard"));
+    }
+
+    #[test]
+    fn refusals_and_server_messages() {
+        let server = |message: &str| ApiError::Server(message.to_owned());
+        assert_eq!(
+            ApiError::Unauthorized.refusal(),
+            Some(Refusal::Unauthorized)
+        );
+        assert_eq!(
+            server("incorrect server password").refusal(),
+            Some(Refusal::ServerPassword)
+        );
+        let status = ApiError::Status {
+            status: StatusCode::FORBIDDEN,
+            message: Some("incorrect server password".to_owned()),
+        };
+        assert_eq!(status.refusal(), Some(Refusal::ServerPassword));
+        assert_eq!(server("exists").refusal(), None);
+        assert_eq!(server("exists").server_message(), Some("exists"));
+        assert_eq!(ApiError::Unauthorized.server_message(), None);
+        assert_eq!(ApiError::MissingOk.refusal(), None);
     }
 
     #[test]

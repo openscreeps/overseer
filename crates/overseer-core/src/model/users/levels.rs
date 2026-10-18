@@ -11,13 +11,13 @@
 //! `4096 ^ (1 / 2.4)`), so the estimate is corrected against the boundaries themselves.
 
 /// `GCL_POW` of the game constants.
-const GCL_POW: f64 = 2.4;
+pub const GCL_POW: f64 = 2.4;
 /// `GCL_MULTIPLY` of the game constants.
-const GCL_MULTIPLY: f64 = 1_000_000.0;
+pub const GCL_MULTIPLY: f64 = 1_000_000.0;
 /// `POWER_LEVEL_POW` of the game constants.
-const POWER_LEVEL_POW: f64 = 2.0;
+pub const POWER_LEVEL_POW: f64 = 2.0;
 /// `POWER_LEVEL_MULTIPLY` of the game constants.
-const POWER_LEVEL_MULTIPLY: f64 = 1000.0;
+pub const POWER_LEVEL_MULTIPLY: f64 = 1000.0;
 
 /// A level and the progress towards the next one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,7 +31,38 @@ pub struct LevelProgress {
 }
 
 impl LevelProgress {
+    /// The Global Control Level for `points` lifetime control points (`gcl` of a profile).
+    /// Negative or non-finite points count as 0: level 1.
+    #[must_use]
+    pub fn gcl(points: f64) -> Self {
+        // Level `L` (from 1) starts at `(L - 1) ^ GCL_POW * GCL_MULTIPLY`.
+        level_of(
+            points,
+            1,
+            |points| (points / GCL_MULTIPLY).powf(GCL_POW.recip()).floor() + 1.0,
+            |level| f64::from(level - 1).powf(GCL_POW) * GCL_MULTIPLY,
+        )
+    }
+
+    /// The power level for `points` lifetime processed power (`power` of a profile).
+    /// Negative or non-finite points count as 0: level 0.
+    #[must_use]
+    pub fn power(points: f64) -> Self {
+        // Level `L` (from 0) starts at `L ^ POWER_LEVEL_POW * POWER_LEVEL_MULTIPLY`.
+        level_of(
+            points,
+            0,
+            |points| {
+                (points / POWER_LEVEL_MULTIPLY)
+                    .powf(POWER_LEVEL_POW.recip())
+                    .floor()
+            },
+            |level| f64::from(level).powf(POWER_LEVEL_POW) * POWER_LEVEL_MULTIPLY,
+        )
+    }
+
     /// Progress towards the next level, `0.0..=1.0`.
+    #[must_use]
     pub fn fraction(&self) -> f64 {
         if self.total > 0.0 {
             (self.progress / self.total).clamp(0.0, 1.0)
@@ -39,32 +70,6 @@ impl LevelProgress {
             0.0
         }
     }
-}
-
-/// The Global Control Level for `points` lifetime control points (`gcl` of the profile).
-pub fn gcl(points: f64) -> LevelProgress {
-    // Level `L` (from 1) starts at `(L - 1) ^ GCL_POW * GCL_MULTIPLY`.
-    level_of(
-        points,
-        1,
-        |points| (points / GCL_MULTIPLY).powf(GCL_POW.recip()).floor() + 1.0,
-        |level| f64::from(level - 1).powf(GCL_POW) * GCL_MULTIPLY,
-    )
-}
-
-/// The power level for `points` lifetime processed power (`power` of the profile).
-pub fn power(points: f64) -> LevelProgress {
-    // Level `L` (from 0) starts at `L ^ POWER_LEVEL_POW * POWER_LEVEL_MULTIPLY`.
-    level_of(
-        points,
-        0,
-        |points| {
-            (points / POWER_LEVEL_MULTIPLY)
-                .powf(POWER_LEVEL_POW.recip())
-                .floor()
-        },
-        |level| f64::from(level).powf(POWER_LEVEL_POW) * POWER_LEVEL_MULTIPLY,
-    )
 }
 
 /// The level whose range holds `points` (negative or non-finite count as 0): the engine's
@@ -103,7 +108,15 @@ fn level_of(
 
 #[cfg(test)]
 mod tests {
-    use super::{gcl, power};
+    use super::LevelProgress;
+
+    fn gcl(points: f64) -> LevelProgress {
+        LevelProgress::gcl(points)
+    }
+
+    fn power(points: f64) -> LevelProgress {
+        LevelProgress::power(points)
+    }
 
     #[test]
     fn gcl_starts_at_level_one() {

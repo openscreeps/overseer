@@ -7,16 +7,12 @@
 //! with an owner-coloured rim; resources and body parts have one colour each
 //! ([`resource_color`], `PART_COLORS` in `objects.wgsl`).
 
+use overseer::model::users::Npc;
 use overseer::model::world::{
     GameRoomObject, GameRoomObjectStore, GameRoomObjectStoreCapacityResource,
 };
 
 use crate::mesh::Shape;
-
-/// User id of the Invader NPC.
-pub const INVADER: &str = "2";
-/// User id of the Source Keeper NPC.
-pub const SOURCE_KEEPER: &str = "3";
 
 /// Owner colours (sRGB): the signed-in user, other players and the two NPCs.
 const MINE: u32 = 0x4c_af_50;
@@ -152,21 +148,23 @@ pub enum Owner {
     Mine,
     /// Another player.
     Other,
-    /// The Invader NPC (user `2`).
+    /// The Invader NPC ([`Npc::Invader`]).
     Invader,
-    /// The Source Keeper NPC (user `3`).
+    /// The Source Keeper NPC ([`Npc::SourceKeeper`]).
     SourceKeeper,
 }
 
 impl Owner {
     /// The owner class of `user` when `me` is signed in.
     pub fn of(user: Option<&str>, me: Option<&str>) -> Self {
-        match user {
-            None => Self::None,
-            Some(INVADER) => Self::Invader,
-            Some(SOURCE_KEEPER) => Self::SourceKeeper,
-            Some(user) if Some(user) == me => Self::Mine,
-            Some(_) => Self::Other,
+        let Some(user) = user else {
+            return Self::None;
+        };
+        match Npc::from_user_id(user) {
+            Some(Npc::Invader) => Self::Invader,
+            Some(Npc::SourceKeeper) => Self::SourceKeeper,
+            None if Some(user) == me => Self::Mine,
+            None => Self::Other,
         }
     }
 

@@ -23,7 +23,7 @@ pub use budget::{GLOBAL_RATE_LIMIT_WAIT, Priority, REQUEST_BUDGET, REQUEST_WINDO
 pub use rate_limit::{EndpointRateLimit, RateLimitPolicy};
 
 use crate::api::{AccountApi as _, Api, PasswordSignIn as _};
-use crate::rt::{Instant, SystemTime, UNIX_EPOCH, sleep};
+use crate::rt::{Instant, SystemTime, UNIX_EPOCH, sleep, sleep_until};
 use crate::socket::{ReconnectPolicy, Socket};
 use crate::{Error, USER_AGENT, World};
 use budget::Budget;
@@ -273,6 +273,18 @@ impl Client {
             return None;
         }
         lock(&self.inner.budget).ready_at(priority, pending, Instant::now())
+    }
+
+    /// Waits until a background request of `priority` may go out after `pending` requests the
+    /// caller allowed but has not sent yet ([`Self::budget_ready_at`]): returns at once when
+    /// it may go now, and on servers without a budget. Drop the future to cancel the wait.
+    ///
+    /// The wait reserves nothing: other tasks can spend the budget between the end of the wait
+    /// and the request. Callers that send several requests count them in `pending`.
+    pub async fn wait_for_budget(&self, priority: Priority, pending: usize) {
+        while let Some(at) = self.budget_ready_at(priority, pending) {
+            sleep_until(at).await;
+        }
     }
 
     /// The server's connection info (kind, plugins, `GET /api/version`), subsystems and shards,

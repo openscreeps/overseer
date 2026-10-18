@@ -30,6 +30,7 @@ use overseer::model::account::Registration;
 use overseer::model::code::Modules;
 use overseer::net::Client;
 use overseer::net::api::{PasswordAccount as _, WorldApi as _};
+use overseer::net::model::users::Npc;
 use overseer::net::model::world::{MapStats, Tile};
 use overseer::{Auth, Overseer, ServerProfile};
 
@@ -395,7 +396,9 @@ pub async fn stronghold(client: &Client) -> String {
         .await
         .stats
         .into_iter()
-        .find(|(_, stat)| stat.own.as_ref().and_then(|own| own.user.as_deref()) == Some("2"))
+        .find(|(_, stat)| {
+            stat.own.as_ref().and_then(|own| own.user.as_deref()) == Some(Npc::Invader.user_id())
+        })
         .map(|(room, _)| room)
         .expect("the world has a stronghold")
 }

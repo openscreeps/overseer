@@ -10,9 +10,10 @@
 use std::collections::BTreeMap;
 
 use overseer::map::PortalDestination;
+use overseer::model::users::Npc;
 use overseer::model::world::{GameRoomObject, RoomUser};
 
-use crate::ui::player::{Player, npc_name};
+use crate::ui::player::Player;
 use crate::ui::style;
 
 mod colours;
@@ -38,7 +39,7 @@ impl Context<'_> {
     /// The name of the user `id` (the room's users, the two NPC ids, else the id).
     pub fn name(&self, id: &str) -> String {
         self.users.get(id).map_or_else(
-            || npc_name(id).map_or_else(|| id.to_owned(), str::to_owned),
+            || Npc::from_user_id(id).map_or_else(|| id.to_owned(), |npc| npc.name().to_owned()),
             |user| user.username.clone(),
         )
     }

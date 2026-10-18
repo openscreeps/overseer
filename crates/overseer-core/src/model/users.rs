@@ -1,7 +1,14 @@
 //! Users: other players' public profiles, rooms and statistics, and the leaderboards. Badges
-//! are [`UserBadge`]s.
+//! are [`UserBadge`]s. The game's non-player characters are [`Npc`]s; the levels of a profile's
+//! points are [`LevelProgress`]es.
+
+mod levels;
+mod npc;
 
 use std::collections::BTreeMap;
+
+pub use levels::{GCL_MULTIPLY, GCL_POW, LevelProgress, POWER_LEVEL_MULTIPLY, POWER_LEVEL_POW};
+pub use npc::Npc;
 
 use crate::api::community::types as community;
 use crate::api::official::types as official;

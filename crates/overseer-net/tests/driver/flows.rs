@@ -15,7 +15,7 @@ use overseer_core::model::code::{CodeTarget, Modules};
 use overseer_core::model::memory::MemoryValue;
 use overseer_core::model::world::Tile;
 use overseer_net::api::{CodeApi as _, ConsoleApi as _, MemoryApi as _, WorldApi as _};
-use overseer_net::{Client, Error, RateLimitPolicy};
+use overseer_net::{Client, Error, GLOBAL_RATE_LIMIT_WAIT, Priority, RateLimitPolicy};
 use tokio::time::Instant;
 
 use crate::server::{Request, Response, Server};
@@ -173,6 +173,31 @@ async fn rate_limited_requests_are_retried_only_once_and_never_when_disabled() {
         "{error:?}"
     );
     assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn budget_waits_follow_the_budget_and_cancel_when_dropped() {
+    let server = rate_limited_server(1, || (429, "{}".to_owned()).into(), now_secs()).await;
+    let client = client(&server, None);
+    // No limit seen yet: no budget, no wait.
+    let started = Instant::now();
+    client.wait_for_budget(Priority::Background, 0).await;
+    assert!(started.elapsed() < Duration::from_secs(1));
+    client.send(&endpoints::AuthMe).await.unwrap_err();
+    // HTTP 429 without the endpoint's limit: every priority waits a minute.
+    let ready = client.budget_ready_at(Priority::Viewed, 0).unwrap();
+    assert!(ready > Instant::now() + GLOBAL_RATE_LIMIT_WAIT - Duration::from_secs(5));
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        client.wait_for_budget(Priority::Viewed, 0),
+    )
+    .await;
+    assert!(cancelled.is_err(), "dropped before the budget allows");
+    // A token exempt from rate limits never waits.
+    client.set_rate_limit_exempt_until(Some(u64::MAX));
+    let started = Instant::now();
+    client.wait_for_budget(Priority::Background, 1000).await;
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 /// An encoded terrain: wall at (0, 0), swamp at (1, 0), wall-and-swamp at (2, 0), plain

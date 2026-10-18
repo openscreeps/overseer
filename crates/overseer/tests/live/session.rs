@@ -143,8 +143,14 @@ async fn anonymous_session_reads_public_data() {
         .users()
         .find(&account.username)
         .await
-        .expect("users are public");
+        .expect("users are public")
+        .expect("the account exists");
     assert_eq!(found.username.as_deref(), Some(account.username.as_str()));
+    let unknown = overseer.users().find("nobody-at-all-0").await;
+    assert!(
+        matches!(unknown, Ok(None)),
+        "an unknown user is none: {unknown:?}"
+    );
     let badge = overseer
         .users()
         .badge_svg(&account.username, false)
@@ -158,7 +164,10 @@ async fn anonymous_session_reads_public_data() {
     ));
     assert!(matches!(overseer.console().feed(), Err(Error::Anonymous)));
     assert!(matches!(
-        overseer.memory().get("ticks", None).await,
+        overseer
+            .memory()
+            .get(&overseer::memory::MemoryPath::parse("ticks").unwrap(), None)
+            .await,
         Err(Error::Anonymous)
     ));
 }

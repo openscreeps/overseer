@@ -5,8 +5,8 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use leptos::prelude::*;
+use overseer::model::users::LevelProgress;
 
-use crate::levels::{self, LevelProgress};
 use crate::state::AppState;
 use crate::ui::spawn_scoped;
 use crate::ui::style;
@@ -98,8 +98,8 @@ pub fn HeadSkeleton(label: &'static str) -> impl IntoView {
 /// lifetime points `gcl` and `power` (0 when not reported).
 #[component]
 pub fn LevelRows(gcl: Option<f64>, power: Option<f64>) -> impl IntoView {
-    let gcl = levels::gcl(gcl.unwrap_or(0.0));
-    let power = levels::power(power.unwrap_or(0.0));
+    let gcl = LevelProgress::gcl(gcl.unwrap_or(0.0));
+    let power = LevelProgress::power(power.unwrap_or(0.0));
     view! {
         <dt class=STAT_NAME>"Global Control Level"</dt>
         <dd class=STAT_VALUE>

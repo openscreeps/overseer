@@ -1,58 +1,36 @@
-//! Client-side rules of the registration, username and password forms. They mirror the
-//! server's (`POST /api/register/submit`, `POST /api/register/set-username`) so mistakes show
-//! before submitting; the server stays the authority and its error strings are shown as-is.
+//! The messages of the registration, username and password forms. The rules are the library's
+//! (`overseer::model::account::check_username` and friends), which mirror the server's so
+//! that mistakes show before submitting; the server stays the authority and its error strings
+//! are shown as-is.
 
-/// Shortest password the server accepts, in UTF-16 code units (JavaScript `length`).
-const PASSWORD_MIN: usize = 8;
-/// Longest password the server accepts, in UTF-16 code units.
-const PASSWORD_MAX: usize = 1024;
+use overseer::model::account::{
+    EmailError, PasswordError, Registration as Account, UsernameError, check_email, check_password,
+    check_username,
+};
 
-/// Why `username` is rejected: the server rule is `^[a-zA-Z0-9_-]{3,}$`.
+/// Why `username` is rejected.
 pub fn username_error(username: &str) -> Option<&'static str> {
-    if username.is_empty() {
-        Some("Enter a username")
-    } else if !username
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        Some("Use only letters, digits, _ and -")
-    } else if username.len() < 3 {
-        Some("Use at least 3 characters")
-    } else {
-        None
-    }
+    check_username(username).err().map(|error| match error {
+        UsernameError::Empty => "Enter a username",
+        UsernameError::InvalidCharacter => "Use only letters, digits, _ and -",
+        UsernameError::TooShort => "Use at least 3 characters",
+    })
 }
 
-/// Why `email` is rejected: the server rule is `^[\w.+&-]+@[\w.&-]+\.[\w.&-]{2,}$` (ASCII
-/// `\w`).
+/// Why `email` is rejected.
 pub fn email_error(email: &str) -> Option<&'static str> {
-    let word = |byte: u8, extra: &[u8]| {
-        byte.is_ascii_alphanumeric() || byte == b'_' || extra.contains(&byte)
-    };
-    if email.is_empty() {
-        return Some("Enter an e-mail address");
-    }
-    let valid = email.split_once('@').is_some_and(|(local, domain)| {
-        let domain_ok = domain.bytes().all(|byte| word(byte, b".&-"));
-        // A dot with at least one character before it and two after it.
-        let dot = domain
-            .char_indices()
-            .any(|(index, c)| c == '.' && index > 0 && domain.len() - index > 2);
-        !local.is_empty() && local.bytes().all(|byte| word(byte, b".+&-")) && domain_ok && dot
-    });
-    (!valid).then_some("Enter a valid e-mail address")
+    check_email(email).err().map(|error| match error {
+        EmailError::Empty => "Enter an e-mail address",
+        EmailError::Invalid => "Enter a valid e-mail address",
+    })
 }
 
-/// Why `password` is rejected: 8–1024 characters.
+/// Why `password` is rejected.
 pub fn password_error(password: &str) -> Option<&'static str> {
-    let length = password.encode_utf16().count();
-    if length < PASSWORD_MIN {
-        Some("Use at least 8 characters")
-    } else if length > PASSWORD_MAX {
-        Some("Use at most 1024 characters")
-    } else {
-        None
-    }
+    check_password(password).err().map(|error| match error {
+        PasswordError::TooShort => "Use at least 8 characters",
+        PasswordError::TooLong => "Use at most 1024 characters",
+    })
 }
 
 /// Why the confirmation does not match `password`.
@@ -73,92 +51,58 @@ pub struct Registration {
     pub confirm: String,
 }
 
-/// The rule each field of a [`Registration`] breaks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RegistrationErrors {
-    /// Username error.
-    pub username: Option<&'static str>,
-    /// E-mail error.
-    pub email: Option<&'static str>,
-    /// Password error.
-    pub password: Option<&'static str>,
-    /// Confirmation error.
-    pub confirm: Option<&'static str>,
-}
-
-impl RegistrationErrors {
-    /// No field breaks a rule.
-    pub const fn is_empty(&self) -> bool {
-        self.username.is_none()
-            && self.email.is_none()
-            && self.password.is_none()
-            && self.confirm.is_none()
-    }
-}
-
 impl Registration {
-    /// Checks every field.
-    pub fn errors(&self) -> RegistrationErrors {
-        RegistrationErrors {
-            username: username_error(&self.username),
-            email: email_error(&self.email),
-            password: password_error(&self.password),
-            confirm: confirm_error(&self.password, &self.confirm),
+    /// Whether a field breaks a rule or the confirmation does not match.
+    pub fn has_errors(&self) -> bool {
+        !self.account().errors().is_empty()
+            || confirm_error(&self.password, &self.confirm).is_some()
+    }
+
+    /// The account to register.
+    pub fn account(&self) -> Account {
+        Account {
+            username: self.username.clone(),
+            email: self.email.clone(),
+            password: self.password.clone(),
+            modules: None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Registration, confirm_error, email_error, password_error, username_error};
+    use super::{Registration, email_error, password_error, username_error};
 
     #[test]
-    fn usernames_follow_the_server_rule() {
-        for good in ["abc", "A_b-9", "___", "player-one"] {
-            assert_eq!(username_error(good), None, "{good}");
-        }
-        for bad in ["", "ab", "a b", "Ünïcode", "name!", "x.y"] {
-            assert!(username_error(bad).is_some(), "{bad}");
-        }
+    fn each_broken_rule_has_a_message() {
+        assert_eq!(username_error(""), Some("Enter a username"));
+        assert_eq!(
+            username_error("a b"),
+            Some("Use only letters, digits, _ and -")
+        );
+        assert_eq!(username_error("ab"), Some("Use at least 3 characters"));
+        assert_eq!(username_error("player"), None);
+        assert_eq!(email_error(""), Some("Enter an e-mail address"));
+        assert_eq!(email_error("a@b"), Some("Enter a valid e-mail address"));
+        assert_eq!(password_error("short"), Some("Use at least 8 characters"));
+        assert_eq!(
+            password_error(&"x".repeat(1025)),
+            Some("Use at most 1024 characters")
+        );
     }
 
     #[test]
-    fn emails_follow_the_server_rule() {
-        for good in ["a@b.cd", "first.last+tag@mail.example.org", "a&b@x-y.co"] {
-            assert_eq!(email_error(good), None, "{good}");
-        }
-        for bad in [
-            "", "a", "a@", "@b.cd", "a@b", "a@b.c", "a@.cd", "a b@c.de", "a@b c.de", "ä@b.cd",
-        ] {
-            assert!(email_error(bad).is_some(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn passwords_need_8_to_1024_characters() {
-        assert!(password_error("1234567").is_some());
-        assert_eq!(password_error("12345678"), None);
-        assert_eq!(password_error(&"x".repeat(1024)), None);
-        assert!(password_error(&"x".repeat(1025)).is_some());
-        // Counted like JavaScript's `length`: an astral character is two units.
-        assert_eq!(password_error("😀😀😀😀"), None);
-        assert!(password_error(&"😀".repeat(513)).is_some());
-    }
-
-    #[test]
-    fn the_form_reports_each_field() {
+    fn the_form_needs_matching_passwords() {
         let mut form = Registration {
             username: "player".to_owned(),
             email: "player@example.com".to_owned(),
             password: "long enough".to_owned(),
             confirm: "long enough".to_owned(),
         };
-        assert!(form.errors().is_empty());
+        assert!(!form.has_errors());
+        assert_eq!(form.account().username, "player");
         form.confirm = "different".to_owned();
-        let errors = form.errors();
-        assert!(!errors.is_empty());
-        assert_eq!(errors.confirm, confirm_error("a", "b"));
-        assert_eq!(errors.username, None);
-        assert!(Registration::default().errors().username.is_some());
+        assert!(form.has_errors());
+        assert!(Registration::default().has_errors());
     }
 }

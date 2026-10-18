@@ -222,7 +222,7 @@ pub mod rt;
 mod socket;
 mod world;
 
-use overseer_core::api::{ApiError, RequestError};
+use overseer_core::api::{ApiError, Refusal, RequestError};
 use overseer_core::model::memory::MemoryError;
 use overseer_core::model::platform::Subsystem;
 use overseer_core::model::world::TerrainError;
@@ -302,6 +302,26 @@ pub enum Error {
     /// A password change was refused: the current password given is not the account's.
     #[error("the current password is wrong")]
     WrongPassword,
+}
+
+impl Error {
+    /// The server's own error string ([`ApiError::server_message`]), when it sent one.
+    #[must_use]
+    pub fn server_message(&self) -> Option<&str> {
+        match self {
+            Self::Api(error) => error.server_message(),
+            _ => None,
+        }
+    }
+
+    /// Why the server refused the client's access ([`ApiError::refusal`]), when it did.
+    #[must_use]
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            Self::Api(error) => error.refusal(),
+            _ => None,
+        }
+    }
 }
 
 impl From<reqwest_websocket::Error> for Error {

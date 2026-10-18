@@ -4,10 +4,8 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer::Auth;
 use overseer::model::account::Availability;
-use overseer::net::Api;
-use overseer::net::api::{AccountApi as _, PasswordAccount as _};
+use overseer::{Auth, Guest};
 
 use crate::register::{Registration, confirm_error, email_error, password_error, username_error};
 use crate::route::Route;
@@ -57,7 +55,7 @@ fn live_check(
     value: RwSignal<String>,
     kind: CheckKind,
     rule: fn(&str) -> Option<&'static str>,
-    api: RwSignal<Option<Api>, LocalStorage>,
+    api: RwSignal<Option<Guest>, LocalStorage>,
 ) -> RwSignal<Check> {
     let check = RwSignal::new(Check::Idle);
     let generation = StoredValue::new(0_u64);
@@ -77,13 +75,13 @@ fn live_check(
                 if generation.try_get_value() != Some(current) {
                     return;
                 }
-                let Some(api) = api.try_get_untracked().flatten() else {
+                let Some(guest) = api.try_get_untracked().flatten() else {
                     return;
                 };
                 spawn_local(async move {
                     let result = match kind {
-                        CheckKind::Username => api.username_available(&text).await,
-                        CheckKind::Email => api.email_available(&text).await,
+                        CheckKind::Username => guest.username_available(&text).await,
+                        CheckKind::Email => guest.email_available(&text).await,
                     };
                     if generation.try_get_value() != Some(current) {
                         return;
@@ -91,7 +89,7 @@ fn live_check(
                     check.set(match result {
                         Ok(Availability::Available) => Check::Available,
                         Ok(Availability::Taken) => Check::Taken,
-                        Err(error) => Check::Failed(session::message(&error)),
+                        Err(error) => Check::Failed(session::error_message(&error)),
                     });
                 });
             },
@@ -121,7 +119,7 @@ pub fn Register(
     let saved = state.server(&server);
     let server_kind = saved.as_ref().and_then(|server| server.kind.forced());
     let name = saved.map_or_else(|| server.clone(), |server| server.name);
-    let api = RwSignal::new_local(None::<Api>);
+    let api = RwSignal::new_local(None::<Guest>);
     let error = RwSignal::new(None::<String>);
     // The server has no password accounts: nothing to submit.
     let unsupported = RwSignal::new(false);
@@ -129,9 +127,9 @@ pub fn Register(
         let platform = state.platform();
         let url = server.clone();
         spawn_scoped(async move {
-            match session::anonymous_api(&platform, &url, server_kind, None).await {
+            match session::guest(&platform, &url, server_kind, None).await {
                 Ok(anonymous) => {
-                    if anonymous.password_account().is_none() {
+                    if !anonymous.can_register() {
                         unsupported.set(true);
                         error.set(Some(NO_REGISTRATION.to_owned()));
                     }
@@ -179,7 +177,7 @@ pub fn Register(
         event.prevent_default();
         submitted.set(true);
         let registration = form();
-        if !registration.errors().is_empty() {
+        if registration.has_errors() {
             error.set(Some("Correct the marked fields.".to_owned()));
             return;
         }
@@ -192,20 +190,13 @@ pub fn Register(
         let url = url.clone();
         let platform = state.platform();
         spawn_local(async move {
-            let Some(accounts) = anonymous.password_account() else {
+            if let Err(failure) = anonymous.register(registration.account()).await {
                 busy.set(false);
-                error.set(Some(NO_REGISTRATION.to_owned()));
-                return;
-            };
-            let account = overseer::model::account::Registration {
-                username: registration.username.clone(),
-                email: registration.email,
-                password: registration.password.clone(),
-                modules: None,
-            };
-            if let Err(failure) = accounts.register(account).await {
-                busy.set(false);
-                error.set(Some(session::message(&failure)));
+                error.set(Some(if anonymous.can_register() {
+                    session::error_message(&failure)
+                } else {
+                    NO_REGISTRATION.to_owned()
+                }));
                 return;
             }
             let auth = Auth::Credentials {
@@ -324,7 +315,7 @@ pub fn SetUsername() -> impl IntoView {
         state
             .session
             .get_untracked()
-            .map(|session| session.overseer.api().clone()),
+            .map(|session| session.overseer.guest()),
     );
     let username = RwSignal::new(String::new());
     let email = RwSignal::new(String::new());

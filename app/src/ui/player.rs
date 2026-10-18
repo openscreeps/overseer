@@ -9,7 +9,7 @@ pub mod summary;
 
 use leptos::prelude::*;
 use overseer::Overseer;
-use overseer::model::users::PublicProfile;
+use overseer::model::users::{Npc, PublicProfile};
 
 pub use rooms::{OwnRooms, RoomList};
 pub use search::FindPlayer;
@@ -21,9 +21,6 @@ use crate::ui::icon::{Icon, IconKind};
 use crate::ui::spawn_scoped;
 use crate::ui::style::{self, concatcp};
 use summary::{HeadSkeleton, LevelRows, STATS, SummaryHead, load_badge, open_map};
-
-/// The game's non-player characters: user id and name.
-const NPCS: [(&str, &str); 2] = [("2", "Invader"), ("3", "Source Keeper")];
 
 /// A name that links to the player's page: the text keeps its colour, the underline marks
 /// the link. A finger gets a row-high target.
@@ -46,17 +43,10 @@ pub struct Player {
     pub name: String,
 }
 
-/// The name of the non-player character with user id `id`; `None` for a player.
-pub fn npc_name(id: &str) -> Option<&'static str> {
-    NPCS.iter()
-        .find(|(npc, _)| *npc == id)
-        .map(|(_, name)| *name)
-}
-
-/// Whether user `id` named `name` has a profile page: not for the NPCs, and not for a user
-/// whose name is unknown (`name` is the id).
+/// Whether user `id` named `name` has a profile page: not for the NPCs ([`Npc`]), and not for
+/// a user whose name is unknown (`name` is the id).
 fn has_page(id: &str, name: &str) -> bool {
-    npc_name(id).is_none() && !name.trim().is_empty() && name != id
+    Npc::from_user_id(id).is_none() && !name.trim().is_empty() && name != id
 }
 
 /// The name of `player`: a link to the player's page ([`Route::User`]). NPCs, unknown names
@@ -123,8 +113,8 @@ pub fn PlayerPage(
             lookup.set(None);
             spawn_scoped(async move {
                 lookup.set(Some(match overseer.users().find(&name).await {
-                    Ok(profile) => Lookup::Found(Box::new(profile)),
-                    Err(error) if session::is_unknown_user(&error) => Lookup::Unknown,
+                    Ok(Some(profile)) => Lookup::Found(Box::new(profile)),
+                    Ok(None) => Lookup::Unknown,
                     Err(error) => Lookup::Failed(session::error_message(&error)),
                 }));
             });

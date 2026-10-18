@@ -11,6 +11,7 @@ use std::time::Duration;
 use overseer::map::{
     DetailState, Interest, RoomCoord, RoomRect, RoomStatus, Terrain, WorldEvent, WorldMap,
 };
+use overseer::model::users::Npc;
 use overseer::model::world::Tile;
 use tokio::time::timeout;
 
@@ -171,10 +172,14 @@ async fn overviews_cover_the_whole_world() {
     let stronghold = bounds
         .iter()
         .filter_map(|room| world.stat(room))
-        .find(|stat| stat.owner.as_ref().is_some_and(|owner| owner.id == "2"))
+        .find(|stat| {
+            stat.owner
+                .as_ref()
+                .is_some_and(|owner| owner.id == Npc::Invader.user_id())
+        })
         .expect("an invader core owns a room");
     let owner = stronghold.owner.as_ref().expect("checked above");
-    assert_eq!(owner.username.as_deref(), Some("Invader"));
+    assert_eq!(owner.username.as_deref(), Some(Npc::Invader.name()));
     assert!(owner.level >= 1, "level {}", owner.level);
     assert!(
         bounds
