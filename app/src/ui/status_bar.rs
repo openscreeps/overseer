@@ -1,10 +1,13 @@
-//! The status bar: connection · shard and tick · zoom level · hovered room · loading progress
-//! · rate limits lifted … CPU and Memory usage, frame time, graphics backend and platform.
+//! The status bar: connection · shard, tick and tick duration · zoom level · hovered room ·
+//! loading progress · rate limits lifted … CPU and Memory usage, frame time, graphics backend
+//! and platform.
 //!
 //! An item shows only once its value is known (no "—" placeholders). While a map is shown its
 //! tick and zoom-level slots keep their width even before they are known, and every item has a
-//! fixed minimum width with tabular digits (the tick's sized for the server's shard names and a
-//! 9-digit tick), so values arriving or changing never shift their neighbours.
+//! fixed minimum width with tabular digits (the tick's sized for the server's shard names, a
+//! 9-digit tick and the longest tick duration), so values arriving or changing never shift
+//! their neighbours. The tick item's tooltip says where the tick duration comes from
+//! ([`TickUi`]).
 //!
 //! A narrow window drops whole items, lowest priority first: the platform and the frame time,
 //! then (on phones) the hovered room, the graphics backend and the fixed widths. The
@@ -21,9 +24,11 @@ use overseer_view::Lod;
 use crate::platform::Platform;
 use crate::route::Shard;
 use crate::state::AppState;
+use crate::tick::{COMPACT_CHARS, TickDuration};
 use crate::ui::hover::{MapRooms, place_text};
 use crate::ui::rate_limits::{RateLimitsUi, StatusLifted, StatusReset};
 use crate::ui::style;
+use crate::ui::tick::TickUi;
 use crate::ui::topbar::status_class;
 use crate::ui::usage::StatusUsage;
 use crate::ui::world::{MapState, Phase};
@@ -90,6 +95,8 @@ struct Facts {
     shard: Option<String>,
     /// Game tick of the latest live room.
     game_time: Option<u64>,
+    /// The tick duration of the shard shown.
+    tick: Option<TickDuration>,
     /// Zoom level of the world map.
     lod: Option<Lod>,
     /// CPU time of the map's last frame, in milliseconds.
@@ -112,9 +119,16 @@ struct MapItems {
 
 impl MapItems {
     fn of(facts: &Facts) -> Self {
-        let place = facts.game_time.map(|time| match &facts.shard {
-            Some(shard) => format!("{shard} · tick {time}"),
-            None => format!("tick {time}"),
+        // The shard only names the shard of a tick or a duration.
+        let values: Vec<String> = facts
+            .game_time
+            .map(|time| format!("tick {time}"))
+            .into_iter()
+            .chain(facts.tick.as_ref().map(TickDuration::compact))
+            .collect();
+        let place = (!values.is_empty()).then(|| {
+            let shard = facts.shard.iter().cloned();
+            shard.chain(values).collect::<Vec<_>>().join(SEPARATOR)
         });
         let on_map = |value: Option<String>| value.filter(|_| facts.map);
         Self {
@@ -132,19 +146,35 @@ impl MapItems {
 
 /// Digits the tick slot leaves room for: 9 (a long-running server's ticks have 8).
 const TICK_DIGITS: usize = 9;
+/// The separator of the parts of the tick slot.
+const SEPARATOR: &str = " · ";
 
 /// The minimum width of the tick slot, in `ch` (the width of a digit; with tabular digits every
 /// digit takes it, the letters of `tick` and of shard names take less): `tick ` and
 /// [`TICK_DIGITS`] digits, after `<shard> · ` for the longest of the server's `shards` and the
-/// `shown` one. Constant for a server, so the first tick arriving never moves the items after it.
+/// `shown` one, and before ` · ` and the longest tick duration. Constant for a server, so the
+/// first tick or duration arriving never moves the items after it.
 fn place_width(shards: &[String], shown: Option<&str>) -> usize {
+    let separator = SEPARATOR.chars().count();
     let shard = shards
         .iter()
         .map(String::as_str)
         .chain(shown)
         .map(|name| name.chars().count())
         .max();
-    "tick ".len() + TICK_DIGITS + shard.map_or(0, |length| length + " · ".chars().count())
+    "tick ".len()
+        + TICK_DIGITS
+        + separator
+        + COMPACT_CHARS
+        + shard.map_or(0, |length| length + separator)
+}
+
+/// The tooltip of the tick slot: what it shows, and where the tick duration comes from.
+fn place_title(tick: Option<&TickDuration>) -> String {
+    match tick {
+        Some(tick) => format!("Game tick and tick duration: {}", tick.sentence()),
+        None => "Game tick".to_owned(),
+    }
 }
 
 /// The status item of `slot` with `class` and `title`, at least `min_width` `ch` wide when
@@ -153,9 +183,10 @@ fn place_width(shards: &[String], shown: Option<&str>) -> usize {
 fn item(
     slot: Memo<Slot>,
     class: &'static str,
-    title: &'static str,
+    title: impl Into<Signal<String>>,
     min_width: Option<Memo<usize>>,
 ) -> impl IntoView {
+    let title = title.into();
     let shown = Memo::new(move |_| slot.with(|slot| *slot != Slot::Hidden));
     let reserved = Memo::new(move |_| slot.with(|slot| *slot == Slot::Reserved));
     let style = move || {
@@ -186,6 +217,7 @@ pub fn StatusBar() -> impl IntoView {
     let map = MapState::expect();
     let rooms = MapRooms::expect();
     let limits = RateLimitsUi::expect();
+    let tick = TickUi::expect();
     let items = Memo::new(move |_| {
         MapItems::of(&Facts {
             map: map.phase.get() != Phase::Idle,
@@ -193,6 +225,7 @@ pub fn StatusBar() -> impl IntoView {
                 .shard
                 .with(|shard| shard.as_ref().and_then(Shard::name).map(str::to_owned)),
             game_time: map.game_time.get(),
+            tick: tick.duration.get(),
             lod: map.lod.get(),
             frame_ms: map.frame_ms.get(),
             backend: map.backend.get(),
@@ -203,6 +236,7 @@ pub fn StatusBar() -> impl IntoView {
         })
     });
     let place = Memo::new(move |_| items.with(|items| items.place.clone()));
+    let place_title = Memo::new(move |_| tick.duration.with(|tick| place_title(tick.as_ref())));
     // Known with the session (the server's shards) and the route (the shard shown), before
     // the first tick.
     let place_width = Memo::new(move |_| {
@@ -269,7 +303,7 @@ pub fn StatusBar() -> impl IntoView {
             {item(
                 place,
                 "inline-flex flex-none items-center gap-2 max-sm:min-w-0!",
-                "Game tick",
+                place_title,
                 Some(place_width),
             )}
             {item(
@@ -318,7 +352,13 @@ mod tests {
     use overseer::ConnectionStatus;
     use overseer_view::Lod;
 
-    use super::{Facts, MapItems, Slot, connection_text, level_name, place_width};
+    use super::{Facts, MapItems, Slot, connection_text, level_name, place_title, place_width};
+    use crate::tick::{Source, TickDuration};
+
+    /// A tick duration of `ms` from `source`.
+    const fn duration(ms: f64, source: Source) -> TickDuration {
+        TickDuration { ms, source }
+    }
 
     #[test]
     fn zoom_levels_are_named_from_the_world_in_to_a_room() {
@@ -409,18 +449,57 @@ mod tests {
     }
 
     #[test]
-    fn the_tick_slot_fits_the_longest_shard_and_a_nine_digit_tick() {
-        // Single world: `tick 123456789`.
-        assert_eq!(place_width(&[], None), "tick 123456789".chars().count());
-        // screeps.com: `shard0 · tick 123456789`, whichever shard is shown.
+    fn the_tick_slot_adds_the_tick_duration() {
+        let timed = Facts {
+            map: true,
+            shard: Some("shard3".to_owned()),
+            game_time: Some(1234),
+            tick: Some(duration(3104.0, Source::Server)),
+            ..Facts::default()
+        };
+        assert_eq!(
+            MapItems::of(&timed).place,
+            Slot::Shown("shard3 · tick 1234 · 3.1 s/tick".to_owned())
+        );
+        // The server's duration can come before the first live room.
+        let no_room = Facts {
+            game_time: None,
+            ..timed
+        };
+        assert_eq!(
+            MapItems::of(&no_room).place,
+            Slot::Shown("shard3 · 3.1 s/tick".to_owned())
+        );
+        // The tooltip says where the duration comes from.
+        assert_eq!(place_title(None), "Game tick");
+        assert_eq!(
+            place_title(Some(&duration(3100.0, Source::Server))),
+            "Game tick and tick duration: 3.10 s per tick (0.32 ticks per second), reported by \
+             the server"
+        );
+        assert_eq!(
+            place_title(Some(&duration(250.0, Source::Measured))),
+            "Game tick and tick duration: 0.25 s per tick (4.00 ticks per second), measured from \
+             game time"
+        );
+    }
+
+    #[test]
+    fn the_tick_slot_fits_the_longest_shard_a_nine_digit_tick_and_a_duration() {
+        // Single world: `tick 123456789 · 250 ms/tick`.
+        assert_eq!(
+            place_width(&[], None),
+            "tick 123456789 · 250 ms/tick".chars().count()
+        );
+        // screeps.com: `shard0 · tick 123456789 · 250 ms/tick`, whichever shard is shown.
         let shards = ["shard0", "shard1", "shard2", "shard3"].map(str::to_owned);
-        let widest = "shard0 · tick 123456789".chars().count();
+        let widest = "shard0 · tick 123456789 · 250 ms/tick".chars().count();
         assert_eq!(place_width(&shards, Some("shard2")), widest);
         assert_eq!(place_width(&shards, None), widest);
         // A longer name (a season's) widens it; a shown shard counts before the list arrives.
         assert_eq!(
             place_width(&[], Some("shardSeason")),
-            "shardSeason · tick 123456789".chars().count()
+            "shardSeason · tick 123456789 · 250 ms/tick".chars().count()
         );
     }
 

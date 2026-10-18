@@ -61,6 +61,7 @@ mod state;
     )
 )]
 mod terrain_cache;
+mod tick;
 mod ui;
 mod usage;
 

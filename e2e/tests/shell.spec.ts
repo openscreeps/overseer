@@ -76,10 +76,12 @@ test.describe('shell', () => {
     await expect(bar.getByTitle('Zoom level', { exact: true })).toHaveText('Room', {
       timeout: 30_000,
     });
-    // On a sharded server the shard comes first (`shard3 · tick N`).
-    await expect(bar.getByTitle('Game tick')).toHaveText(/^(\w+ · )?tick \d+$/, {
-      timeout: 30_000,
-    });
+    // On a sharded server the shard comes first (`shard3 · tick N`); the tick duration
+    // follows once known, with its unit (`· 3.1 s/tick`, `· 250 ms/tick`).
+    await expect(bar.getByTitle('Game tick')).toHaveText(
+      /^(\w+ · )?tick \d+( · (\d+ ms|\d+(\.\d)? s)\/tick)?$/,
+      { timeout: 30_000 },
+    );
     await expect(bar.getByTitle('Graphics backend')).toHaveText(/^(WebGPU|WebGL2)$/);
     await expect(bar.getByTitle('CPU time of the last frame')).toHaveText(/^frame \d+\.\d\d ms$/);
     const { texts, lefts } = await page.evaluate(() => ({

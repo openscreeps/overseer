@@ -293,7 +293,7 @@ pub fn sparkline(values: &[f64], top: f64, width: f64, height: f64) -> String {
         .join(" ")
 }
 
-/// The CPU of a shard where the server allocates CPU to each shard.
+/// The CPU of a shard where the server allocates CPU to each shard, with its average tick.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShardCpu {
     /// The shard's name.
@@ -302,6 +302,8 @@ pub struct ShardCpu {
     pub assigned: f64,
     /// The most CPU the shard lets a player use, when the shard caps it.
     pub cap: Option<f64>,
+    /// The shard's average tick duration in milliseconds, when the server lists it.
+    pub average_tick: Option<f64>,
     /// The map shows this shard.
     pub shown: bool,
 }
@@ -339,20 +341,25 @@ pub fn shard_order(server: &[String], assigned: &BTreeMap<String, f64>) -> Vec<S
 }
 
 /// The CPU of each shard ([`shard_order`]; a shard missing from the allocation `assigned`
-/// gets 0), with the `caps` of the shards that cap the CPU and the `shown` shard marked.
+/// gets 0), with the cap and the average tick of the shard's entry in `info` and the `shown`
+/// shard marked.
 pub fn shard_cpu(
     shards: &[String],
     assigned: &BTreeMap<String, f64>,
-    caps: &BTreeMap<String, f64>,
+    info: &[ShardInfo],
     shown: Option<&str>,
 ) -> Vec<ShardCpu> {
     shard_order(shards, assigned)
         .into_iter()
-        .map(|name| ShardCpu {
-            assigned: assigned.get(&name).copied().unwrap_or(0.0),
-            cap: caps.get(&name).copied(),
-            shown: shown == Some(name.as_str()),
-            name,
+        .map(|name| {
+            let entry = info.iter().find(|shard| shard.name == name);
+            ShardCpu {
+                assigned: assigned.get(&name).copied().unwrap_or(0.0),
+                cap: entry.and_then(|shard| shard.cpu_limit),
+                average_tick: entry.and_then(|shard| shard.tick),
+                shown: shown == Some(name.as_str()),
+                name,
+            }
         })
         .collect()
 }
@@ -757,8 +764,19 @@ mod tests {
         let shards = ["shard0".to_owned(), "shard3".to_owned()];
         let assigned =
             BTreeMap::from([("shard3".to_owned(), 30.0), ("shardSeason".to_owned(), 5.0)]);
-        let caps = BTreeMap::from([("shard3".to_owned(), 20.0)]);
-        let rows = shard_cpu(&shards, &assigned, &caps, Some("shard3"));
+        let info = [
+            ShardInfo {
+                name: "shard0".to_owned(),
+                cpu_limit: None,
+                tick: Some(4100.0),
+            },
+            ShardInfo {
+                name: "shard3".to_owned(),
+                cpu_limit: Some(20.0),
+                tick: Some(3150.5),
+            },
+        ];
+        let rows = shard_cpu(&shards, &assigned, &info, Some("shard3"));
         assert_eq!(
             rows,
             [
@@ -766,18 +784,21 @@ mod tests {
                     name: "shard0".to_owned(),
                     assigned: 0.0,
                     cap: None,
+                    average_tick: Some(4100.0),
                     shown: false,
                 },
                 ShardCpu {
                     name: "shard3".to_owned(),
                     assigned: 30.0,
                     cap: Some(20.0),
+                    average_tick: Some(3150.5),
                     shown: true,
                 },
                 ShardCpu {
                     name: "shardSeason".to_owned(),
                     assigned: 5.0,
                     cap: None,
+                    average_tick: None,
                     shown: false,
                 },
             ]

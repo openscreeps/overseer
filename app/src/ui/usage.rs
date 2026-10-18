@@ -5,12 +5,11 @@
 //! [`UsageUi::follow`] subscribes once to the usage of each live session that is signed in
 //! and forgets the runs when the session changes. It also loads the account
 //! ([`overseer::Account::me`]: the CPU limit and its allocation to the shards) and, where the
-//! server allocates CPU to each shard, the CPU cap of each shard
+//! server allocates CPU to each shard, the CPU cap and the average tick of each shard
 //! ([`overseer::Overseer::shards_info`]). The library caches both for the session.
 
 mod panel;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures_util::future::{AbortHandle, abortable, join3};
@@ -19,6 +18,7 @@ use leptos::task::spawn_local;
 use overseer::model::account::Profile;
 use overseer::model::platform::Subsystem;
 use overseer::model::socket::UserCpu;
+use overseer::model::world::ShardInfo;
 use overseer::{Overseer, Watch};
 
 use crate::route::Shard;
@@ -53,8 +53,9 @@ pub struct UsageUi {
     /// The server of the live session allocates CPU to each shard
     /// ([`Subsystem::CpuShards`]).
     pub per_shard: RwSignal<bool>,
-    /// The CPU caps of the shards that cap the CPU, by shard name; `None` while unknown.
-    pub caps: RwSignal<Option<BTreeMap<String, f64>>>,
+    /// The shards' CPU caps and average ticks where the server allocates CPU to each shard;
+    /// `None` while unknown.
+    pub info: RwSignal<Option<Arc<[ShardInfo]>>>,
     /// Now, in milliseconds since the Unix epoch, updated every second.
     pub now: Signal<u64>,
     /// The session followed ([`crate::state::Session::epoch`]).
@@ -72,7 +73,7 @@ impl UsageUi {
             live: RwSignal::new(false),
             profile: RwSignal::new(None),
             per_shard: RwSignal::new(false),
-            caps: RwSignal::new(None),
+            info: RwSignal::new(None),
             now,
             epoch: StoredValue::new(None),
             task: StoredValue::new(None),
@@ -108,7 +109,7 @@ impl UsageUi {
         }
         self.runs.set(Runs::default());
         self.profile.set(None);
-        self.caps.set(None);
+        self.info.set(None);
         let watch = session
             .as_ref()
             .and_then(|(_, overseer)| overseer.account().cpu().ok());
@@ -123,7 +124,7 @@ impl UsageUi {
         let (future, handle) = abortable(join3(
             self.watch(watch),
             self.load_profile(overseer.clone()),
-            self.load_caps(overseer, per_shard),
+            self.load_info(overseer, per_shard),
         ));
         self.task.set_value(Some(handle));
         spawn_local(async move {
@@ -160,14 +161,14 @@ impl UsageUi {
         }
     }
 
-    /// Loads the CPU caps of the shards where the server allocates CPU to each shard
-    /// (`per_shard`). A failure leaves the caps unknown.
-    async fn load_caps(self, overseer: Overseer, per_shard: bool) {
+    /// Loads the CPU caps and average ticks of the shards where the server allocates CPU to
+    /// each shard (`per_shard`). A failure leaves them unknown.
+    async fn load_info(self, overseer: Overseer, per_shard: bool) {
         if !per_shard {
             return;
         }
         if let Ok(shards) = overseer.shards_info().await {
-            self.caps.set(Some(usage::shard_caps(&shards)));
+            self.info.set(Some(shards));
         }
     }
 
@@ -189,10 +190,9 @@ impl UsageUi {
             .shard
             .with(|shard| shard.as_ref().and_then(Shard::name).map(str::to_owned));
         map.shards.with(|shards| {
-            self.caps.with(|caps| {
-                let none = BTreeMap::new();
-                let caps = caps.as_ref().unwrap_or(&none);
-                usage::shard_cpu(shards, &profile.cpu_shards, caps, shown.as_deref())
+            self.info.with(|info| {
+                let info = info.as_deref().unwrap_or_default();
+                usage::shard_cpu(shards, &profile.cpu_shards, info, shown.as_deref())
             })
         })
     }

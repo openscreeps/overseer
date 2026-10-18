@@ -1,6 +1,6 @@
 //! The Usage panel: the latest run's CPU and Memory against their limits, their average and
-//! peak over the recent runs with a sparkline each, and the CPU of each shard where the server
-//! allocates CPU to each shard.
+//! peak over the recent runs with a sparkline each, and the CPU and the average tick of each
+//! shard where the server allocates CPU to each shard.
 
 use leptos::html::{Button, Section};
 use leptos::prelude::*;
@@ -9,6 +9,7 @@ use web_sys::KeyboardEvent;
 
 use crate::route::Route;
 use crate::state::AppState;
+use crate::tick;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
 use crate::ui::usage::{Anchor, UsageUi, tone};
@@ -455,13 +456,13 @@ fn Sparkline(
 }
 
 /// The CPU of each shard where the server allocates CPU to each shard: the assigned CPU, the
-/// shard's cap and the usable CPU, with the shard on the map marked, and the way to the
-/// allocation on the profile page. Nothing elsewhere.
+/// shard's cap and the usable CPU, with the shard's average tick, the shard on the map marked,
+/// and the way to the allocation on the profile page. Nothing elsewhere.
 #[component]
 fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
     let state = AppState::expect();
     let ui = UsageUi::expect();
-    let caps_known = Memo::new(move |_| ui.caps.with(Option::is_some));
+    let info_known = Memo::new(move |_| ui.info.with(Option::is_some));
     let open_profile = move |_| {
         let slug = state
             .session_server()
@@ -476,11 +477,14 @@ fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
             .get()
             .into_iter()
             .map(|shard| {
-                let cap = match (shard.cap, caps_known.get()) {
+                let cap = match (shard.cap, info_known.get()) {
                     (Some(cap), _) => usage::cpu_amount(cap),
                     (None, true) => "none".to_owned(),
                     (None, false) => "unknown".to_owned(),
                 };
+                let average_tick = shard
+                    .average_tick
+                    .map_or_else(|| "unknown".to_owned(), tick::compact);
                 let usable_class = if shard.over_cap() {
                     concatcp!(style::TABLE_CELL, " text-warn")
                 } else {
@@ -495,6 +499,7 @@ fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
                         <td class=style::TABLE_CELL>{usage::cpu_amount(shard.assigned)}</td>
                         <td class=style::TABLE_CELL>{cap}</td>
                         <td class=usable_class>{usage::cpu_amount(shard.usable())}</td>
+                        <td class=style::TABLE_CELL>{average_tick}</td>
                     </tr>
                 }
             })
@@ -535,6 +540,7 @@ fn ShardPart(shards: Memo<Vec<ShardCpu>>) -> impl IntoView {
                                 <th scope="col" class=style::TABLE_COLUMN>"Assigned"</th>
                                 <th scope="col" class=style::TABLE_COLUMN>"Cap"</th>
                                 <th scope="col" class=style::TABLE_COLUMN>"Usable"</th>
+                                <th scope="col" class=style::TABLE_COLUMN>"Average tick"</th>
                             </tr>
                         </thead>
                         <tbody>{rows}</tbody>
