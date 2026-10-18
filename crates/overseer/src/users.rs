@@ -12,7 +12,8 @@ use overseer_net::Api;
 use overseer_net::api::UsersApi as _;
 use overseer_net::model::account::UserRoomStatValues;
 use overseer_net::model::users::{
-    LeaderboardMode, LeaderboardPage, LeaderboardResult, LeaderboardSeason, PublicProfile, UserRoom,
+    LeaderboardMode, LeaderboardPage, LeaderboardResult, LeaderboardSeason, PublicProfile,
+    RoomHoldings, UserRoom,
 };
 
 use crate::rooms::StatInterval;
@@ -79,13 +80,30 @@ impl Users {
     }
 
     /// The rooms whose controller user `id` owns, with their shard on sharded servers
-    /// (`GET /api/user/rooms`).
+    /// (`GET /api/user/rooms`). The list does not show a shard without owned rooms, and it
+    /// does not tell such a shard from a shard that the reply does not report. Use
+    /// [`Self::room_holdings`] for that difference and for the reserved rooms.
     ///
     /// # Errors
     ///
     /// See [`Users`].
     pub async fn rooms(&self, id: &str) -> Result<Vec<UserRoom>, Error> {
-        Ok(self.api()?.rooms(id).await?)
+        Ok(self.api()?.rooms(id, false).await?.into())
+    }
+
+    /// The rooms that user `id` holds, as the server reports them (`GET /api/user/rooms`).
+    /// With `reservations`, the request asks for the reserved rooms too. Only sharded servers
+    /// report reserved rooms: a single-world server gives [`RoomHoldings::SingleWorld`].
+    ///
+    /// Each call sends a request; nothing is kept in a cache. The holdings are not proof
+    /// that the user has no creeps or other objects in a room. Single-world servers give an
+    /// empty list for an unknown `id`.
+    ///
+    /// # Errors
+    ///
+    /// See [`Users`]. A failed request is an error, never an empty report.
+    pub async fn room_holdings(&self, id: &str, reservations: bool) -> Result<RoomHoldings, Error> {
+        Ok(self.api()?.rooms(id, reservations).await?)
     }
 
     /// The totals of each room statistic of user `id` over `interval`

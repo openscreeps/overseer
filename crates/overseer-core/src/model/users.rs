@@ -73,41 +73,82 @@ pub struct UserRoom {
     pub room: String,
 }
 
+/// The rooms that a player holds, as the server reports them (`GET /api/user/rooms`): the
+/// rooms whose controller the player owns and, on sharded servers, the rooms whose controller
+/// the player reserves.
+///
+/// The maps keep the difference between an empty list and a missing key:
+///
+/// - A shard with an empty list: the server reports no room on the shard.
+/// - A shard that is not in the map: the reply has no report for the shard.
+///
+/// The holdings are not proof that the player has no creeps or other objects on a shard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomHoldings {
+    /// The reply of a sharded server (screeps.com).
+    Sharded {
+        /// The owned rooms, keyed by shard (`shards`).
+        owned: BTreeMap<String, Vec<String>>,
+        /// The reserved rooms, keyed by shard (`reservations`). `None` when the reply has no
+        /// `reservations` map: then the reply has no report of reserved rooms. The web client
+        /// asks for the map with the `reservation` flag.
+        reserved: Option<BTreeMap<String, Vec<String>>>,
+    },
+    /// The reply of a single-world server (`OpenScreeps` and community servers). These
+    /// servers do not report reserved rooms. The reply is no report about a named shard.
+    SingleWorld {
+        /// The owned rooms, highest controller level first.
+        owned: Vec<String>,
+    },
+}
+
 /// `From` the official rooms of a player, grouped by shard.
-impl From<official::UserRoomsShardedResponse> for Vec<UserRoom> {
+impl From<official::UserRoomsShardedResponse> for RoomHoldings {
     fn from(reply: official::UserRoomsShardedResponse) -> Self {
-        reply
-            .shards
-            .into_iter()
-            .flat_map(|(shard, rooms)| {
-                rooms.into_iter().map(move |room| UserRoom {
-                    shard: Some(shard.clone()),
-                    room,
-                })
-            })
-            .collect()
+        Self::Sharded {
+            owned: reply.shards,
+            reserved: reply.reservations,
+        }
     }
 }
 
 /// `From` the single-world rooms of a player on each private contract.
-macro_rules! user_rooms_from {
+macro_rules! room_holdings_from {
     ($($reply:ty),+) => {$(
-        impl From<$reply> for Vec<UserRoom> {
+        impl From<$reply> for RoomHoldings {
             fn from(reply: $reply) -> Self {
-                reply
-                    .rooms
-                    .into_iter()
-                    .map(|room| UserRoom { shard: None, room })
-                    .collect()
+                Self::SingleWorld { owned: reply.rooms }
             }
         }
     )+};
 }
 
-user_rooms_from!(
+room_holdings_from!(
     openscreeps::UserRoomsFlatResponse,
     community::UserRoomsFlatResponse
 );
+
+/// `From` the holdings into the owned rooms, with their shard on sharded servers. The list
+/// drops the reserved rooms, and it does not show the shards without owned rooms.
+impl From<RoomHoldings> for Vec<UserRoom> {
+    fn from(holdings: RoomHoldings) -> Self {
+        match holdings {
+            RoomHoldings::Sharded { owned, .. } => owned
+                .into_iter()
+                .flat_map(|(shard, rooms)| {
+                    rooms.into_iter().map(move |room| UserRoom {
+                        shard: Some(shard.clone()),
+                        room,
+                    })
+                })
+                .collect(),
+            RoomHoldings::SingleWorld { owned } => owned
+                .into_iter()
+                .map(|room| UserRoom { shard: None, room })
+                .collect(),
+        }
+    }
+}
 
 /// A page of a leaderboard (`GET /api/leaderboard/list`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -198,7 +239,9 @@ impl From<official::LeaderboardFindResponse> for Vec<LeaderboardResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LeaderboardPage, LeaderboardResult, PublicProfile, UserRoom};
+    use std::collections::BTreeMap;
+
+    use super::{LeaderboardPage, LeaderboardResult, PublicProfile, RoomHoldings, UserRoom};
     use crate::api::community::types as community;
     use crate::api::official::types as official;
     use crate::api::openscreeps::types as openscreeps;
@@ -222,31 +265,85 @@ mod tests {
         assert_eq!(profile.username.as_deref(), Some("Bob"));
     }
 
+    /// The shard map of `entries`.
+    fn shards(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(shard, rooms)| {
+                let rooms = rooms.iter().map(|&room| room.to_owned()).collect();
+                ((*shard).to_owned(), rooms)
+            })
+            .collect()
+    }
+
+    fn sharded(json: &str) -> RoomHoldings {
+        let reply: official::UserRoomsShardedResponse = serde_json::from_str(json).unwrap();
+        RoomHoldings::from(reply)
+    }
+
     #[test]
-    fn rooms_convert_from_the_sharded_and_the_flat_replies() {
-        let room = |shard: Option<&str>, room: &str| UserRoom {
-            shard: shard.map(str::to_owned),
-            room: room.to_owned(),
-        };
-        let official: official::UserRoomsShardedResponse = serde_json::from_str(
-            r#"{"ok":1,"shards":{"shard0":["W1N1"],"shard3":["W2N2","W3N3"]},
-                "reservations":{"shard0":["W1N2"]}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            Vec::<UserRoom>::from(official),
-            [
-                room(Some("shard0"), "W1N1"),
-                room(Some("shard3"), "W2N2"),
-                room(Some("shard3"), "W3N3"),
-            ]
+    fn sharded_holdings_keep_empty_shards_apart_from_absent_ones() {
+        // `shard1` is absent; `shard3` owns nothing, and `shard0` reserves nothing.
+        let holdings = sharded(
+            r#"{"ok":1,"shards":{"shard0":["W1N1"],"shard3":[]},
+                "reservations":{"shard0":[],"shard2":["W5N5"]}}"#,
         );
-        let flat = r#"{"ok":1,"rooms":["W2N2","W3N2"]}"#;
-        let expected = [room(None, "W2N2"), room(None, "W3N2")];
+        assert_eq!(
+            holdings,
+            RoomHoldings::Sharded {
+                owned: shards(&[("shard0", &["W1N1"]), ("shard3", &[])]),
+                reserved: Some(shards(&[("shard0", &[]), ("shard2", &["W5N5"])])),
+            }
+        );
+        // The owned-room list keeps neither the reservations nor the empty shard.
+        assert_eq!(
+            Vec::<UserRoom>::from(holdings),
+            [UserRoom {
+                shard: Some("shard0".to_owned()),
+                room: "W1N1".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reservations_are_kept_without_owned_rooms_and_absent_without_the_map() {
+        let holdings = sharded(r#"{"ok":1,"shards":{},"reservations":{"shard0":["W1N2"]}}"#);
+        assert_eq!(
+            holdings,
+            RoomHoldings::Sharded {
+                owned: BTreeMap::new(),
+                reserved: Some(shards(&[("shard0", &["W1N2"])])),
+            }
+        );
+        assert_eq!(Vec::<UserRoom>::from(holdings), Vec::new());
+        // A reply without `reservations` has no report of reserved rooms, not an empty one.
+        assert_eq!(
+            sharded(r#"{"ok":1,"shards":{"shard0":[]}}"#),
+            RoomHoldings::Sharded {
+                owned: shards(&[("shard0", &[])]),
+                reserved: None,
+            }
+        );
+    }
+
+    #[test]
+    fn single_world_holdings_keep_the_order_and_have_no_shard() {
+        let flat = r#"{"ok":1,"rooms":["W3N2","W2N2"]}"#;
+        let expected = RoomHoldings::SingleWorld {
+            owned: vec!["W3N2".to_owned(), "W2N2".to_owned()],
+        };
         let openscreeps: openscreeps::UserRoomsFlatResponse = serde_json::from_str(flat).unwrap();
-        assert_eq!(Vec::<UserRoom>::from(openscreeps), expected);
+        assert_eq!(RoomHoldings::from(openscreeps), expected);
         let community: community::UserRoomsFlatResponse = serde_json::from_str(flat).unwrap();
-        assert_eq!(Vec::<UserRoom>::from(community), expected);
+        assert_eq!(RoomHoldings::from(community), expected);
+        let rooms: Vec<_> = Vec::<UserRoom>::from(expected)
+            .into_iter()
+            .map(|room| (room.shard, room.room))
+            .collect();
+        assert_eq!(
+            rooms,
+            [(None, "W3N2".to_owned()), (None, "W2N2".to_owned())]
+        );
     }
 
     #[test]

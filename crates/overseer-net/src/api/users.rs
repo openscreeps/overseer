@@ -4,7 +4,8 @@
 use overseer_core::api::{community, official, openscreeps};
 use overseer_core::model::account::UserRoomStatValues;
 use overseer_core::model::users::{
-    LeaderboardMode, LeaderboardPage, LeaderboardResult, LeaderboardSeason, PublicProfile, UserRoom,
+    LeaderboardMode, LeaderboardPage, LeaderboardResult, LeaderboardSeason, PublicProfile,
+    RoomHoldings,
 };
 
 use super::{Api, Community, Official, OpenScreeps, delegate};
@@ -25,12 +26,18 @@ pub trait UsersApi {
         id: Option<&str>,
     ) -> impl Future<Output = Result<PublicProfile, Error>>;
 
-    /// The rooms whose controller user `id` owns (`GET /api/user/rooms`).
+    /// The rooms that user `id` holds, as the server reports them (`GET /api/user/rooms`).
+    /// With `reservations`, the request asks for the reserved rooms too (the `reservation`
+    /// flag). Only sharded servers report reserved rooms.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Client::send`](crate::Client::send).
-    fn rooms(&self, id: &str) -> impl Future<Output = Result<Vec<UserRoom>, Error>>;
+    fn rooms(
+        &self,
+        id: &str,
+        reservations: bool,
+    ) -> impl Future<Output = Result<RoomHoldings, Error>>;
 
     /// The totals of each room statistic of user `id` over the last `interval` minutes (8,
     /// 180 or 1440), keyed by statistic name (`GET /api/user/stats`).
@@ -98,8 +105,8 @@ impl UsersApi for Api {
         delegate!(self, api => api.find(username, id).await)
     }
 
-    async fn rooms(&self, id: &str) -> Result<Vec<UserRoom>, Error> {
-        delegate!(self, api => api.rooms(id).await)
+    async fn rooms(&self, id: &str, reservations: bool) -> Result<RoomHoldings, Error> {
+        delegate!(self, api => api.rooms(id, reservations).await)
     }
 
     async fn stats(&self, id: &str, interval: u64) -> Result<UserRoomStatValues, Error> {
@@ -151,10 +158,11 @@ macro_rules! users_api {
                 Ok(self.client.send(&find).await?.body.user.into())
             }
 
-            async fn rooms(&self, id: &str) -> Result<Vec<UserRoom>, Error> {
+            async fn rooms(&self, id: &str, reservations: bool) -> Result<RoomHoldings, Error> {
                 let rooms = $contract::endpoints::UserRooms {
                     id: id.to_owned(),
-                    reservation: None,
+                    // The web client sends the flag without a value (`?reservation`).
+                    reservation: reservations.then(String::new),
                 };
                 Ok(self.client.send(&rooms).await?.body.into())
             }

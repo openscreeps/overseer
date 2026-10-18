@@ -1,7 +1,10 @@
-//! Other players and leaderboards: request shapes, and unknown users on each contract.
+//! Other players and leaderboards: request shapes, unknown users on each contract, and the
+//! room holdings of sharded and single-world servers.
+
+use std::collections::BTreeMap;
 
 use overseer::model::platform::{Plugins, ServerKind};
-use overseer::model::users::LeaderboardMode;
+use overseer::model::users::{LeaderboardMode, RoomHoldings};
 use overseer::{Auth, Overseer, ServerProfile, StatInterval};
 
 use crate::server::{Request, Server};
@@ -142,4 +145,82 @@ async fn unknown_users_are_none_in_the_error_string_of_each_contract() {
         let error = users.find("stranger").await.unwrap_err();
         assert_eq!(error.server_message(), Some(other), "{kind:?}");
     }
+}
+
+/// The `GET /api/user/rooms` replies of a sharded server: `reservations` only for the flag,
+/// and an error for user `ghost`.
+fn sharded_rooms_routes(request: &Request) -> (u16, String) {
+    match (request.path.as_str(), request.query.as_str()) {
+        ("/api/user/rooms", "id=ghost&reservation=") => {
+            (200, r#"{"error":"invalid params"}"#.to_owned())
+        }
+        ("/api/user/rooms", "id=u2") => (
+            200,
+            r#"{"ok":1,"shards":{"shard0":["W1N1"],"shard3":[]}}"#.to_owned(),
+        ),
+        ("/api/user/rooms", "id=u2&reservation=") => (
+            200,
+            r#"{"ok":1,"shards":{"shard0":["W1N1"],"shard3":[]},"reservations":{"shard0":[],"shard3":["W9N9"]}}"#
+                .to_owned(),
+        ),
+        _ => routes(request),
+    }
+}
+
+#[tokio::test]
+async fn room_holdings_keep_reservations_and_empty_shards_and_errors() {
+    let server = Server::start(sharded_rooms_routes, |_| true).await;
+    let profile = ServerProfile {
+        url: server.url(),
+        auth: Auth::Anonymous,
+        server_password: None,
+        default_shard: None,
+        server_kind: Some(ServerKind::Official),
+        plugins: Some(Plugins::NONE),
+    };
+    let users = Overseer::connect(profile).await.unwrap().users();
+    let shards = |entries: &[(&str, &[&str])]| -> BTreeMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(shard, rooms)| {
+                let rooms = rooms.iter().map(|&room| room.to_owned()).collect();
+                ((*shard).to_owned(), rooms)
+            })
+            .collect()
+    };
+    let owned = shards(&[("shard0", &["W1N1"]), ("shard3", &[])]);
+
+    assert_eq!(
+        users.room_holdings("u2", true).await.unwrap(),
+        RoomHoldings::Sharded {
+            owned: owned.clone(),
+            reserved: Some(shards(&[("shard0", &[]), ("shard3", &["W9N9"])])),
+        }
+    );
+    // Without the flag the reply has no report of reserved rooms.
+    assert_eq!(
+        users.room_holdings("u2", false).await.unwrap(),
+        RoomHoldings::Sharded {
+            owned,
+            reserved: None,
+        }
+    );
+    let rooms = users.rooms("u2").await.unwrap();
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms[0].shard.as_deref(), Some("shard0"));
+    // A server error stays an error.
+    let error = users.room_holdings("ghost", true).await.unwrap_err();
+    assert_eq!(error.server_message(), Some("invalid params"));
+}
+
+#[tokio::test]
+async fn single_world_room_holdings_have_no_reservations() {
+    let mut server = Server::start(user_routes, |_| true).await;
+    let (overseer, _websocket) = connect(&mut server).await;
+    assert_eq!(
+        overseer.users().room_holdings("u2", true).await.unwrap(),
+        RoomHoldings::SingleWorld {
+            owned: vec!["W2N2".to_owned(), "W3N2".to_owned()],
+        }
+    );
 }
