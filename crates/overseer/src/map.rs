@@ -1,5 +1,6 @@
 //! The world map: the continuous [`WorldMap`] and what it knows ([`WorldKnowledge`]), room
-//! map views, map statistics, terrain, portals, player badges, world size and map visuals.
+//! map views, map statistics, terrain, portals, player badges, world size, game time, tick
+//! duration and map visuals.
 
 mod coord;
 mod knowledge;
@@ -57,7 +58,7 @@ impl MapStat {
 }
 
 /// The world map: the continuous [`WorldMap`], room map views, map statistics, terrain,
-/// portals, player badges, world size and map visuals.
+/// portals, player badges, world size, game time, tick duration and map visuals.
 ///
 /// Created by [`Overseer::map`]; cheap to clone. `shard` names a shard (`None`: the default
 /// shard); it is ignored by single-world servers. Room status is part of [`Self::stats`]
@@ -143,6 +144,35 @@ impl Map {
         self.overseer.ensure_open()?;
         let shard = self.overseer.resolve_shard(shard);
         Ok(self.overseer.api().world_size(shard.as_deref()).await?)
+    }
+
+    /// The current game tick (`GET /api/game/time`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
+    /// [`Error::Net`] when the request fails.
+    pub async fn game_time(&self, shard: Option<&str>) -> Result<u64, Error> {
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(self.overseer.api().game_time(shard.as_deref()).await?)
+    }
+
+    /// The duration of a tick in milliseconds as the server measures it, `None` while it does
+    /// not know it yet. screeps.com reports the current tick duration of the shard
+    /// (`GET /api/game/shards/tick`); other servers report the shortest of their last 30
+    /// intervals between completed ticks (`GET /api/game/tick`). Each call sends a request:
+    /// the duration changes over time. [`Overseer::shards_info`] lists the average tick of
+    /// each screeps.com shard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Closed`] after [`Overseer::shutdown`](crate::Overseer::shutdown) and
+    /// [`Error::Net`] when the request fails.
+    pub async fn tick_duration(&self, shard: Option<&str>) -> Result<Option<f64>, Error> {
+        self.overseer.ensure_open()?;
+        let shard = self.overseer.resolve_shard(shard);
+        Ok(self.overseer.api().tick_duration(shard.as_deref()).await?)
     }
 
     /// The badge of the user named `username` as an SVG document, optionally with a border

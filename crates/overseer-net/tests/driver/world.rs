@@ -1,8 +1,8 @@
 //! The world operations where the contracts differ: the shard information (native, or
-//! screepsmod-admin-utils' on community servers), room objects (native, or
-//! screepsmod-admin-utils' on community servers), the first spawn (screepsmod-admin-utils
-//! requires a name), room history and the operations stock community servers lack, and the
-//! ranking of map statistics.
+//! screepsmod-admin-utils' on community servers), the tick duration (per shard on
+//! screeps.com), room objects (native, or screepsmod-admin-utils' on community servers), the
+//! first spawn (screepsmod-admin-utils requires a name), room history and the operations stock
+//! community servers lack, and the ranking of map statistics.
 
 use overseer_core::Token;
 use overseer_core::model::platform::Subsystem;
@@ -170,14 +170,14 @@ fn shard(name: &str, cpu_limit: Option<f64>, tick: Option<f64>) -> ShardInfo {
     }
 }
 
-/// The only request to `GET /api/game/shards/info`.
-fn shards_info_request(server: &Server) -> Request {
+/// The only request to `path`.
+fn only_request(server: &Server, path: &str) -> Request {
     let mut sent = server
         .requests()
         .into_iter()
-        .filter(|request| request.path == "/api/game/shards/info");
-    let request = sent.next().expect("a request to /api/game/shards/info");
-    assert!(sent.next().is_none(), "one request");
+        .filter(|request| request.path == path);
+    let request = sent.next().unwrap_or_else(|| panic!("a request to {path}"));
+    assert!(sent.next().is_none(), "one request to {path}");
     request
 }
 
@@ -207,7 +207,7 @@ async fn official_shards_info_reads_capped_and_uncapped_shards() {
             shard("shard3", Some(20.0), Some(3150.5)),
         ]
     );
-    let request = shards_info_request(&server);
+    let request = only_request(&server, "/api/game/shards/info");
     assert_eq!(request.method, "GET");
     assert_eq!(request.query, "");
 }
@@ -233,7 +233,7 @@ async fn community_shards_info_comes_from_screepsmod_admin_utils() {
     // The plugin reports no cap (0); an entry without a name is skipped.
     let shards = api.shards_info().await.unwrap();
     assert_eq!(shards, [shard("shardS", None, Some(1100.0))]);
-    assert_eq!(shards_info_request(&server).method, "GET");
+    assert_eq!(only_request(&server, "/api/game/shards/info").method, "GET");
 }
 
 #[tokio::test]
@@ -256,6 +256,66 @@ async fn other_servers_refuse_the_shards_info_without_a_request() {
             "{error:?}"
         );
         assert_eq!(server.requests().len(), before, "nothing was sent");
+    }
+}
+
+#[tokio::test]
+async fn official_tick_duration_is_the_shards() {
+    let server = Server::start(
+        routes(OFFICIAL_VERSION, |request| match request.path.as_str() {
+            "/api/game/shards/tick" => Some((
+                200,
+                match request.query.as_str() {
+                    "shard=shard1" => r#"{"ok":1,"tick":3150.5}"#,
+                    _ => r#"{"ok":1,"tick":null}"#,
+                }
+                .to_owned(),
+            )),
+            _ => None,
+        }),
+        |_| true,
+    )
+    .await;
+    let api = client(&server, true).api().await.unwrap();
+    assert_eq!(
+        api.tick_duration(Some("shard1")).await.unwrap(),
+        Some(3150.5)
+    );
+    let request = only_request(&server, "/api/game/shards/tick");
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.query, "shard=shard1");
+    // A shard whose duration the server does not know yet.
+    assert_eq!(api.tick_duration(Some("shard0")).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn openscreeps_and_community_tick_durations_are_the_servers() {
+    for (version, reply, expected) in [
+        (VERSION, r#"{"ok":1,"tick":1000}"#, Some(1000.0)),
+        (VERSION, r#"{"ok":1,"tick":0}"#, None),
+        (STOCK_VERSION, r#"{"ok":1,"tick":245.5}"#, Some(245.5)),
+        // Fewer than two ticks completed since the server started.
+        (STOCK_VERSION, r#"{"ok":1,"tick":null}"#, None),
+    ] {
+        let server = Server::start(
+            routes(version, move |request| match request.path.as_str() {
+                "/api/game/tick" => Some((200, reply.to_owned())),
+                "/room-history" => Some((500, "not implemented".to_owned())),
+                _ => None,
+            }),
+            |_| true,
+        )
+        .await;
+        let api = client(&server, false).api().await.unwrap();
+        // A single world: the shard is not sent.
+        assert_eq!(
+            api.tick_duration(Some("shard0")).await.unwrap(),
+            expected,
+            "{reply}"
+        );
+        let request = only_request(&server, "/api/game/tick");
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.query, "");
     }
 }
 

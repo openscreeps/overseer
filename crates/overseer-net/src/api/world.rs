@@ -1,16 +1,19 @@
-//! World area: shards, terrain, room information, map statistics, world size, room history and
-//! the actions on rooms (flags, construction sites, names, intents, the first spawn,
-//! invaders), plus the subsystem of reading a room's objects ([`RoomObjectsSource`]).
+//! World area: shards, terrain, room information, map statistics, world size, game time and tick
+//! duration, room history and the actions on rooms (flags, construction sites, names, intents,
+//! the first spawn, invaders), plus the subsystem of reading a room's objects
+//! ([`RoomObjectsSource`]).
 //!
 //! Every contract shares the request and reply types of these operations except map
-//! statistics (the ranking's shape), the created invader (`OpenScreeps` returns the creep)
-//! and room history (screeps.com serves static chunks per shard, `OpenScreeps`
-//! `GET /room-history`). The community contract lacks the shard information, room
-//! decorations, the object lookup, the random novice room, room objects and room history (its
-//! stock server keeps none); screepsmod-admin-utils provides the shard information and room
-//! objects and adapts the first spawn (a name is required). `OpenScreeps` lacks the shard
-//! information. Operations of a [`Subsystem`](crate::model::platform::Subsystem) the server
-//! lacks fail with [`Error::Unsupported`] without a request.
+//! statistics (the ranking's shape), the tick duration (screeps.com reports it per shard with
+//! `GET /api/game/shards/tick`, the others with `GET /api/game/tick`), the created invader
+//! (`OpenScreeps` returns the creep) and room history (screeps.com serves static chunks per
+//! shard, `OpenScreeps` `GET /room-history`). The community contract lacks the shard
+//! information, room decorations, the object lookup, the random novice room, room objects and
+//! room history (its stock server keeps none); screepsmod-admin-utils provides the shard
+//! information and room objects and adapts the first spawn (a name is required). `OpenScreeps`
+//! lacks the shard information. Operations of a
+//! [`Subsystem`](crate::model::platform::Subsystem) the server lacks fail with
+//! [`Error::Unsupported`] without a request.
 
 mod contracts;
 mod room_objects;
@@ -141,6 +144,20 @@ pub trait WorldApi {
     ///
     /// Returns the errors of [`Client::send`]; [`Error::UnexpectedReply`] for a negative tick.
     fn game_time(&self, shard: Option<&str>) -> impl Future<Output = Result<u64, Error>>;
+
+    /// The duration of a tick in milliseconds, as the server measures it; `None` while the
+    /// server does not know it (a reply without a positive duration). screeps.com reports the
+    /// current tick duration of the shard (`GET /api/game/shards/tick`), `OpenScreeps` and
+    /// community servers the shortest of the last 30 intervals between completed ticks
+    /// (`GET /api/game/tick`; a community server knows it after two completed ticks).
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Client::send`].
+    fn tick_duration(
+        &self,
+        shard: Option<&str>,
+    ) -> impl Future<Output = Result<Option<f64>, Error>>;
 
     /// The room-history chunk of `room` that holds `tick`, ready to
     /// [replay](RoomHistory::replay)
@@ -418,6 +435,10 @@ impl WorldApi for Api {
 
     async fn game_time(&self, shard: Option<&str>) -> Result<u64, Error> {
         delegate!(self, api => api.game_time(shard).await)
+    }
+
+    async fn tick_duration(&self, shard: Option<&str>) -> Result<Option<f64>, Error> {
+        delegate!(self, api => api.tick_duration(shard).await)
     }
 
     async fn room_history(

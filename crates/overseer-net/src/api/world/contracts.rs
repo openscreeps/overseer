@@ -76,6 +76,12 @@ const fn chunk_base(tick: u64, chunk_size: u64) -> u64 {
     }
 }
 
+/// A tick duration as a reply gives it: `None` unless positive and finite (`null` and 0 say the
+/// server does not know it yet).
+fn known_duration(tick: Option<f64>) -> Option<f64> {
+    tick.filter(|tick| tick.is_finite() && *tick > 0.0)
+}
+
 /// The operations whose request and reply types every contract shares, for the impl of
 /// `$contract` (`official`, `openscreeps` or `community`): items of an `impl WorldApi`.
 macro_rules! shared_operations {
@@ -387,6 +393,13 @@ impl WorldApi for Official {
         Ok(self.client.send(&info).await?.body.into())
     }
 
+    async fn tick_duration(&self, shard: Option<&str>) -> Result<Option<f64>, Error> {
+        let tick = official::endpoints::GameShardsTick {
+            shard: self.world_shard(shard).await?,
+        };
+        Ok(known_duration(self.client.send(&tick).await?.body.tick))
+    }
+
     async fn room_decorations(
         &self,
         shard: Option<&str>,
@@ -468,6 +481,11 @@ impl WorldApi for OpenScreeps {
         ready(Err(Error::Unsupported(Subsystem::ShardsInfo)))
     }
 
+    async fn tick_duration(&self, _shard: Option<&str>) -> Result<Option<f64>, Error> {
+        let tick = openscreeps::endpoints::GameTick;
+        Ok(known_duration(self.client.send(&tick).await?.body.tick))
+    }
+
     async fn room_decorations(
         &self,
         shard: Option<&str>,
@@ -545,6 +563,11 @@ impl WorldApi for Community {
             .screepsmod_admin_utils()
             .ok_or(Error::Unsupported(Subsystem::ShardsInfo))?;
         admin_utils.shards_info().await
+    }
+
+    async fn tick_duration(&self, _shard: Option<&str>) -> Result<Option<f64>, Error> {
+        let tick = community::endpoints::GameTick;
+        Ok(known_duration(self.client.send(&tick).await?.body.tick))
     }
 
     fn room_decorations(
@@ -643,7 +666,7 @@ impl ScreepsmodAdminUtils<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::chunk_base;
+    use super::{chunk_base, known_duration};
 
     #[test]
     fn chunks_start_at_multiples_of_the_chunk_size() {
@@ -651,5 +674,14 @@ mod tests {
         assert_eq!(chunk_base(1200, 100), 1200);
         assert_eq!(chunk_base(19, 20), 0);
         assert_eq!(chunk_base(7, 0), 7);
+    }
+
+    #[test]
+    fn only_positive_finite_durations_are_known() {
+        assert_eq!(known_duration(Some(3150.5)), Some(3150.5));
+        assert_eq!(known_duration(None), None);
+        assert_eq!(known_duration(Some(0.0)), None);
+        assert_eq!(known_duration(Some(-1.0)), None);
+        assert_eq!(known_duration(Some(f64::NAN)), None);
     }
 }
