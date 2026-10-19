@@ -123,6 +123,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use overseer_core::{ServerUrl, ServerUrlError};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -161,9 +162,9 @@ pub struct ProxyConfig {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProxyError {
-    /// The upstream base is not a plain http or https URL.
+    /// The upstream base is not a server base URL ([`ServerUrl::parse`]).
     #[error("invalid upstream URL: {0}")]
-    Upstream(&'static str),
+    Upstream(#[from] ServerUrlError),
     /// An allowed origin is not of the form `scheme://host[:port]`.
     #[error("invalid allowed origin `{0}` (expected scheme://host[:port])")]
     Origin(String),
@@ -206,7 +207,7 @@ impl Proxy {
     ///
     /// Returns [`ProxyError`] when the configuration is invalid or the address cannot be bound.
     pub async fn start(config: ProxyConfig) -> Result<Self, ProxyError> {
-        let upstream = upstream_base(config.upstream)?;
+        let upstream = ServerUrl::parse(config.upstream.as_str())?.base().clone();
         let origins = cors::Origins::new(&config.allowed_origins)?;
         if let Some(path) = &config.static_dir {
             check_static_dir(path)?;
@@ -268,27 +269,6 @@ impl Drop for Proxy {
     }
 }
 
-/// Validates the upstream base and makes it end with `/`.
-fn upstream_base(mut upstream: Url) -> Result<Url, ProxyError> {
-    if !matches!(upstream.scheme(), "http" | "https") {
-        return Err(ProxyError::Upstream("the scheme must be http or https"));
-    }
-    if upstream.host_str().is_none() {
-        return Err(ProxyError::Upstream("a host is required"));
-    }
-    if !upstream.username().is_empty() || upstream.password().is_some() {
-        return Err(ProxyError::Upstream("credentials are not allowed"));
-    }
-    if upstream.query().is_some() || upstream.fragment().is_some() {
-        return Err(ProxyError::Upstream("a query or fragment is not allowed"));
-    }
-    if !upstream.path().ends_with('/') {
-        let path = format!("{}/", upstream.path());
-        upstream.set_path(&path);
-    }
-    Ok(upstream)
-}
-
 fn check_static_dir(path: &std::path::Path) -> Result<(), ProxyError> {
     let metadata = std::fs::metadata(path).map_err(|source| ProxyError::StaticDir {
         path: path.to_owned(),
@@ -319,26 +299,6 @@ fn local_url(address: SocketAddr) -> Url {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn upstream_base_gets_a_final_slash_and_keeps_its_prefix() {
-        let base = upstream_base("https://screeps.com/season".parse().unwrap()).unwrap();
-        assert_eq!(base.as_str(), "https://screeps.com/season/");
-        let base = upstream_base("https://screeps.com".parse().unwrap()).unwrap();
-        assert_eq!(base.as_str(), "https://screeps.com/");
-    }
-
-    #[test]
-    fn upstream_base_rejects_other_schemes_credentials_and_queries() {
-        for url in [
-            "ftp://screeps.com/",
-            "https://user:pass@screeps.com/",
-            "https://screeps.com/?a=1",
-            "https://screeps.com/#x",
-        ] {
-            assert!(upstream_base(url.parse().unwrap()).is_err(), "{url}");
-        }
-    }
 
     #[test]
     fn local_url_reports_loopback_for_unspecified_addresses() {

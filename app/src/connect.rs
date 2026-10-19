@@ -6,6 +6,7 @@
 //!   `overseer-proxy` that serves the page itself (`GET /overseer-proxy.json` names its
 //!   upstream): that one is reached through the page's own origin.
 
+use overseer::core::ServerUrl;
 use serde::Deserialize;
 use url::Url;
 
@@ -28,7 +29,7 @@ impl PageProxy {
         }
         let discovery: Discovery = serde_json::from_str(discovery).ok()?;
         let origin = Url::parse(page_origin).ok()?.join("/").ok()?;
-        let upstream = base(&discovery.upstream)?;
+        let upstream = ServerUrl::parse(&discovery.upstream).ok()?.base().clone();
         Some(Self { origin, upstream })
     }
 }
@@ -50,24 +51,12 @@ pub fn connect_target(tauri: bool, page_proxy: Option<&PageProxy>, server: &Url)
     if tauri {
         return ConnectTarget::TauriProxy;
     }
-    match (page_proxy, base(server.as_str())) {
-        (Some(proxy), Some(server)) if proxy.upstream == server => {
+    match (page_proxy, ServerUrl::parse(server.as_str())) {
+        (Some(proxy), Ok(server)) if proxy.upstream == *server.base() => {
             ConnectTarget::PageOrigin(proxy.origin.clone())
         }
         _ => ConnectTarget::Direct(server.clone()),
     }
-}
-
-/// `input` as a base URL with a trailing `/` in its path, for comparisons.
-fn base(input: &str) -> Option<Url> {
-    let mut url = Url::parse(input).ok()?;
-    if !url.path().ends_with('/') {
-        let path = format!("{}/", url.path());
-        url.set_path(&path);
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Some(url)
 }
 
 #[cfg(test)]

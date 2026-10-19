@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 # Server side of the relayed socket (the upstream side is reqwest-websocket).
@@ -16,6 +17,8 @@ http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }
+# `ServerUrl`: the upstream base.
+overseer-core.workspace = true
 reqwest.workspace = true
 reqwest-websocket.workspace = true
 # The crypto provider for reqwest's rustls, as in overseer-net.

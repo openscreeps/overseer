@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
+use overseer_core::ServerUrl;
 use overseer_proxy::{Proxy, ProxyConfig};
 use tokio::sync::Mutex;
 use url::Url;
@@ -30,7 +31,10 @@ pub struct Proxies {
 impl Proxies {
     /// The URL of the proxy forwarding to `upstream`, started on first use (one per base URL).
     async fn url(&self, upstream: &str) -> Result<String, String> {
-        let upstream = upstream_base(upstream)?;
+        let upstream = ServerUrl::parse(upstream)
+            .map_err(|error| error.to_string())?
+            .base()
+            .clone();
         let mut running = self.running.lock().await;
         if let Some(proxy) = running.get(&upstream) {
             return Ok(proxy.url().into());
@@ -67,7 +71,7 @@ impl Proxies {
 ///
 /// # Errors
 ///
-/// Returns a message when `upstream` is not an http(s) URL or the proxy cannot start.
+/// Returns a message when [`ServerUrl::parse`] rejects `upstream` or the proxy cannot start.
 #[tauri::command]
 pub async fn proxy_url(
     upstream: String,
@@ -76,32 +80,9 @@ pub async fn proxy_url(
     proxies.url(&upstream).await
 }
 
-/// `input` as an http(s) base URL with a trailing `/`: the key of its proxy.
-fn upstream_base(input: &str) -> Result<Url, String> {
-    let mut url = Url::parse(input).map_err(|error| format!("invalid server URL: {error}"))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("invalid server URL: {input} is not http(s)"));
-    }
-    if !url.path().ends_with('/') {
-        let path = format!("{}/", url.path());
-        url.set_path(&path);
-    }
-    Ok(url)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Proxies, upstream_base};
-
-    #[test]
-    fn upstreams_are_keyed_by_their_base() {
-        assert_eq!(
-            upstream_base("https://SCREEPS.com/season").unwrap(),
-            upstream_base("https://screeps.com:443/season/").unwrap()
-        );
-        assert!(upstream_base("ftp://screeps.com/").is_err());
-        assert!(upstream_base("screeps.com").is_err());
-    }
+    use super::Proxies;
 
     #[test]
     fn one_loopback_proxy_per_server() {

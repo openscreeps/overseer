@@ -28,9 +28,12 @@ pub enum ServerUrlError {
     /// Only `http` and `https` servers are supported.
     #[error("server URL must use http or https, not {0}")]
     Scheme(String),
-    /// Credentials, queries and fragments would leak into every request.
-    #[error("server URL must not carry credentials, a query or a fragment")]
-    Extra,
+    /// Credentials go into every request.
+    #[error("server URL must not carry credentials")]
+    Credentials,
+    /// A query or a fragment goes into every request.
+    #[error("server URL must not carry a query or a fragment")]
+    QueryOrFragment,
 }
 
 /// The host of every official server ([`ServerUrl::is_official`]).
@@ -63,12 +66,11 @@ impl ServerUrl {
             "https" => "wss",
             other => return Err(ServerUrlError::Scheme(other.to_owned())),
         };
-        if !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-        {
-            return Err(ServerUrlError::Extra);
+        if !base.username().is_empty() || base.password().is_some() {
+            return Err(ServerUrlError::Credentials);
+        }
+        if base.query().is_some() || base.fragment().is_some() {
+            return Err(ServerUrlError::QueryOrFragment);
         }
         if !base.path().ends_with('/') {
             let path = format!("{}/", base.path());
@@ -209,15 +211,32 @@ mod tests {
             ServerUrl::parse("ftp://screeps.com/"),
             Err(ServerUrlError::Scheme("ftp".to_owned()))
         );
-        for leaky in [
-            "https://user:pass@screeps.com/",
-            "https://screeps.com/?token=x",
-            "https://screeps.com/#x",
-        ] {
+        assert_eq!(
+            ServerUrl::parse("https://user:pass@screeps.com/"),
+            Err(ServerUrlError::Credentials)
+        );
+        for leaky in ["https://screeps.com/?token=x", "https://screeps.com/#x"] {
             assert_eq!(
                 ServerUrl::parse(leaky),
-                Err(ServerUrlError::Extra),
+                Err(ServerUrlError::QueryOrFragment),
                 "{leaky}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_server_has_a_host() {
+        for empty in ["http://", "https://", "http:", "http://:80/"] {
+            assert_eq!(
+                ServerUrl::parse(empty),
+                Err(ServerUrlError::Parse(url::ParseError::EmptyHost)),
+                "{empty}"
+            );
+        }
+        for input in ["http:///x", "http:x"] {
+            assert!(
+                ServerUrl::parse(input).unwrap().base().host_str().is_some(),
+                "{input}"
             );
         }
     }

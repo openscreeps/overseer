@@ -6,6 +6,7 @@
 //! are kept apart in the platform's secret store under [`token_key`] and
 //! [`server_password_key`].
 
+use overseer::core::{ServerUrl, ServerUrlError};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -290,13 +291,12 @@ pub fn base_slug(url: &str) -> String {
     }
 }
 
-/// The base URL of a server as entered: `http://` is assumed without a scheme, the path gets
-/// a trailing `/`, and only `http` and `https` without credentials, query or fragment are
-/// accepted.
+/// The base URL of a server as entered: `http://` is assumed without a scheme, then
+/// [`ServerUrl::parse`] makes the base.
 ///
 /// # Errors
 ///
-/// Returns a message for anything else.
+/// Returns a message for empty input and for the errors of [`ServerUrl::parse`].
 pub fn normalize_url(input: &str) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -307,21 +307,19 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     } else {
         format!("http://{input}")
     };
-    let mut url = Url::parse(&with_scheme).map_err(|error| format!("Invalid address: {error}"))?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("The address must be an http:// or https:// URL".to_owned());
+    match ServerUrl::parse(&with_scheme) {
+        Ok(url) => Ok(url.base().as_str().to_owned()),
+        Err(ServerUrlError::Parse(error)) => Err(format!("Invalid address: {error}")),
+        Err(ServerUrlError::Scheme(_)) => {
+            Err("The address must be an http:// or https:// URL".to_owned())
+        }
+        Err(ServerUrlError::Credentials) => {
+            Err("The address must not contain credentials".to_owned())
+        }
+        Err(ServerUrlError::QueryOrFragment) => {
+            Err("The address must not contain a query or fragment".to_owned())
+        }
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("The address must not contain credentials".to_owned());
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("The address must not contain a query or fragment".to_owned());
-    }
-    if !url.path().ends_with('/') {
-        let path = format!("{}/", url.path());
-        url.set_path(&path);
-    }
-    Ok(url.into())
 }
 
 /// Secret-store key of the session or API token for the server at `url`.
@@ -460,15 +458,20 @@ mod tests {
             normalize_url("HTTPS://Screeps.com:443/").unwrap(),
             OFFICIAL_URL
         );
-        for bad in [
-            "",
-            "ws://host/",
-            "http://user:pw@host/",
-            "http://host/?a=1",
-            "http://host/#x",
-            "http://",
+        for (bad, message) in [
+            ("  ", "Enter the server address"),
+            (
+                "ws://host/",
+                "The address must be an http:// or https:// URL",
+            ),
+            ("user:pw@host", "The address must not contain credentials"),
+            (
+                "host/#x",
+                "The address must not contain a query or fragment",
+            ),
+            ("http://", "Invalid address: empty host"),
         ] {
-            assert!(normalize_url(bad).is_err(), "{bad}");
+            assert_eq!(normalize_url(bad), Err(message.to_owned()), "{bad}");
         }
     }
 
