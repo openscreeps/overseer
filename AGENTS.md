@@ -92,6 +92,17 @@ The CLI changes live Screeps accounts. These rules protect the accounts.
   directly, without a shell. Revalidate its answer.
 - Never log or commit credentials. Do not copy credential values into fixtures or documentation.
 - Keep the explicit `--env-file` loading, the environment precedence and the redacted errors.
+- Never read a secret from the command line. Read it from stdin (a prompt without echo on a
+  terminal) or from the environment.
+- Never save a password. `overseer login --email` saves an API token where the server makes one,
+  else the session token.
+- Keep the precedence: credentials in `overseer.toml` win over a saved sign-in, so that CI needs
+  no OS keychain.
+- Change the saved profiles only through `Storage::update` with a `profiles::Change`. Do not
+  overwrite the whole document: the desktop app and the CLI change it at the same time.
+- In tests, use `overseer_storage::native::memory::install()` (feature `test-support`) or a
+  unique `OVERSEER_APP_IDENTIFIER`, and remove its directory and secrets afterwards. Never use
+  the storage of the app identifier `com.openscreeps.overseer`.
 
 ## Checks
 

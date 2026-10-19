@@ -62,8 +62,9 @@ To skip the discovery, force the contract with `ClientBuilder::server_kind` and 
 | `crates/overseer-view` | World and room viewer: renders rooms with wgpu (WebGPU, else WebGL2) |
 | `crates/overseer-proxy` | Same-origin proxy for servers that send no CORS headers |
 | `crates/overseer-cli` | The `overseer` command: uploads built code to branches through profiles and keeps a spawn in the world |
+| `crates/overseer-storage` | Saved servers and sign-ins: the profiles document, the profiles file and the OS keychain that the desktop app and the CLI share, and the browser storage of the web app |
 | `app` | The Overseer app: a Leptos UI for browsers |
-| `app/src-tauri` | The desktop shell of the app (Tauri 2). Its executable is `overseer-ui` |
+| `app/src-tauri` | The desktop shell of the app (Tauri 2). Its executable is `overseer-ui`. It keeps the saved servers in the profiles file that the CLI shares, and the secrets in the OS keychain |
 | `web/demo` | A small browser demo of `overseer` |
 | `xtask` | Repository automation (`cargo xtask …`) |
 | `reference` | The API contracts that the code is generated from |
@@ -95,6 +96,26 @@ Run `cargo doc --workspace --no-deps --open` for the API documentation.
 The `overseer` command uploads a build directory to the branches of Screeps servers. It also
 keeps a spawn of the account in the world. For the installation, the configuration and the
 safety rules, see [`crates/overseer-cli/README.md`](crates/overseer-cli/README.md).
+
+## Saved servers and sign-ins
+
+The desktop app and the `overseer` command share the saved servers and the sign-ins
+(`crates/overseer-storage`). Sign in one time, in the app or with `overseer login`. The other
+program then uses the same sign-in.
+
+- The server list is `profiles.json` in the configuration directory of the app:
+  `%APPDATA%\com.openscreeps.overseer` on Windows,
+  `~/Library/Application Support/com.openscreeps.overseer` on macOS and
+  `~/.config/com.openscreeps.overseer` on Linux.
+- The tokens and the server passwords are in the OS keychain, under the service `overseer`.
+- The desktop app reads the list again when its window gets the focus.
+- A sign-in with a password saves an API token where the server has API tokens (screeps.com,
+  OpenScreeps, screepsmod-auth). It never saves the password. A session token expires soon on
+  a private server.
+
+The web app in a browser keeps its own `localStorage`. For the CLI commands and the order in
+which `overseer.toml` finds a server, see
+[`crates/overseer-cli/README.md`](crates/overseer-cli/README.md#saved-servers-and-sign-ins).
 
 ## Build and run
 
