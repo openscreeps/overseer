@@ -16,9 +16,10 @@
 //!   tests read the port from `DevToolsActivePort` in the profile. The `WEBVIEW2_*`
 //!   environment variables cannot do it: the arguments the shell passes take precedence.
 //!
-//! The executable is copied to `<target>/e2e/desktop/overseer-e2e.exe`: a running test app
-//! never blocks a rebuild, and it is told apart from the user's own `overseer.exe`. The tests
-//! write its process id to `overseer-e2e.pid` next to it while it runs.
+//! The executable `overseer-ui.exe` is copied to `<target>/e2e/desktop/overseer-e2e.exe`: a
+//! running test app never blocks a rebuild, and it is told apart from the user's own
+//! `overseer-ui.exe`. The tests write its process id to `overseer-e2e.pid` next to it while it
+//! runs.
 //!
 //! [`clean`] runs before the tests, [`finish`] after them and [`teardown`] however the run
 //! ends: they stop a test app left running and delete the identifier's data directories
@@ -78,7 +79,7 @@ pub fn build(root: &Path, target: &Path, dist: &Path, executable: &Path) -> Resu
     }
     let built = target
         .join("release")
-        .join(format!("overseer{}", std::env::consts::EXE_SUFFIX));
+        .join(format!("overseer-ui{}", std::env::consts::EXE_SUFFIX));
     fs::copy(&built, executable)
         .map_err(|error| format!("cannot copy {}: {error}", built.display()))?;
     Ok(())

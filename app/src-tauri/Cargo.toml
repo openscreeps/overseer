@@ -5,17 +5,18 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
+# Not `overseer`: that is the binary of the command-line tool (`crates/overseer-cli`).
 [[bin]]
-name = "overseer"
+name = "overseer-ui"
 path = "src/main.rs"
-# Named like the `overseer` library, whose docs would otherwise be overwritten.
-doc = false
 
 [build-dependencies]
 tauri-build.workspace = true
 
 [dependencies]
+overseer-core.workspace = true
 overseer-proxy.workspace = true
 serde.workspace = true
 tauri.workspace = true
