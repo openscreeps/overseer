@@ -23,6 +23,9 @@ use keyring::Entry;
 use crate::Error;
 use crate::profiles::Profiles;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod memory;
+
 /// Identifier of the desktop app (`tauri.conf.json`), whose credential service is `overseer`.
 pub const APP_IDENTIFIER: &str = "com.openscreeps.overseer";
 /// Name of the profiles file in the storage directory.

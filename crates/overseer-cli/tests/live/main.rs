@@ -10,8 +10,12 @@
 //!
 //! The spawn selector is `selector.js` in this directory. Node.js runs it, so `node` must be on
 //! the `PATH`.
+//!
+//! The scenario of the saved sign-in ([`storage`]) uses the storage of a unique app identifier
+//! and the OS credential store. Without a credential store, it skips with a message.
 
 mod observer;
 mod scenario;
+mod storage;
 mod support;
 mod workspace;

@@ -4,7 +4,8 @@
 //! - [`profiles`]: the saved servers and who is signed in on them, as one JSON document. All
 //!   targets.
 //! - `native` (not on `wasm32`): the profiles file in the configuration directory of the app,
-//!   and the secrets in the OS credential store.
+//!   and the secrets in the OS credential store. With the feature `test-support`,
+//!   `native::memory` keeps the secrets of tests in memory.
 //! - `web` (feature `web`): the profiles document and the secrets in the `localStorage` of a
 //!   browser page.
 //!

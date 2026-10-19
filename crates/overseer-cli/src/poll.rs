@@ -39,10 +39,11 @@ use overseer::{CodeTarget, MapStat, Overseer, net};
 
 use crate::Error;
 use crate::branch::{BranchName, GitError};
-use crate::config::{Config, ProfileName, SecretError, Selected, ServerName, ShardChoice, Spawn};
-use crate::connection;
+use crate::config::{Config, ProfileName, SecretError, Selected, ServerRef, ShardChoice, Spawn};
+use crate::connection::{self, Session};
 use crate::envfile::EnvFile;
 use crate::room::{self, Unfit};
+use crate::saved::Saved;
 use crate::selector::{self, Candidate, Choice};
 use clock::{cooldown, now_ms, utc};
 use safety::{footholds, recheck_lost, room_footholds, target_rooms, user_rooms};
@@ -79,6 +80,8 @@ pub(crate) struct Poll {
 struct Context<'a> {
     /// The `--env-file` variables.
     env: &'a EnvFile,
+    /// The saved sign-ins.
+    saved: &'a Saved,
     /// The directory of the configuration. The selector runs in it.
     root: &'a Path,
     /// Whether the CLI may change the world (`--execute`).
@@ -89,16 +92,19 @@ struct Context<'a> {
 
 impl Poll {
     /// Polls the profiles of `config` one time or until the process stops.
-    /// Uses the `--env-file` variables `env`. Prints each step to `out`.
+    /// Uses the `--env-file` variables `env` and the saved sign-ins `saved`.
+    /// Prints each step to `out`.
     pub(crate) async fn run(
         self,
         config: &Config,
         env: &EnvFile,
+        saved: &Saved,
         out: &mut dyn Write,
     ) -> Result<(), Error> {
         let targets = config.select_spawn(&self.profiles)?;
         let context = Context {
             env,
+            saved,
             root: config.root(),
             execute: self.execute,
             once: self.once,
@@ -120,7 +126,7 @@ impl Poll {
             .filter_map(|target| {
                 let spawn = target.profile.spawn.as_ref()?;
                 let mut watch = Watch::new(target, spawn, start);
-                watch.reset_owner = reset_servers.insert(&target.profile.server);
+                watch.reset_owner = reset_servers.insert(target.server.identity.as_str());
                 Some(watch)
             })
             .collect();
@@ -208,7 +214,7 @@ struct Watch<'a> {
     target: Selected<'a>,
     spawn: &'a Spawn,
     /// The signed-in client. The watch keeps it between polls.
-    client: Option<Overseer>,
+    client: Option<Session>,
     /// The confirmation of a lost account.
     confirm: Option<Confirm>,
     /// The time of the last reset from this process that the server can
@@ -282,16 +288,15 @@ impl<'a> Watch<'a> {
 
     /// Discovers the server and signs in through `connection::connect`. The
     /// execution gate in `reset` and `place` still guards all changes.
-    async fn sign_in(&self, context: &Context<'_>) -> Result<Overseer, Failure> {
+    async fn sign_in(&self, context: &Context<'_>) -> Result<Session, Failure> {
         let server = self.target.server;
         let credentials = server
-            .auth
-            .resolve(context.env)
+            .credentials(context.env, context.saved)
             .map_err(|source| Failure::Secret {
                 server: self.target.profile.server.clone(),
                 source,
             })?;
-        Ok(connection::connect(&server.url, credentials).await?)
+        Ok(connection::connect(server, credentials, context.saved).await?)
     }
 
     /// Reads the world and acts on its status.
@@ -827,10 +832,13 @@ pub(crate) enum Failure {
     #[error("server {server}: {source}")]
     Secret {
         /// The server.
-        server: ServerName,
+        server: ServerRef,
         /// Why the secret is not available.
         source: SecretError,
     },
+    /// The connection failed.
+    #[error(transparent)]
+    Connect(#[from] connection::Error),
     /// An API call failed.
     #[error(transparent)]
     Api(#[from] overseer::Error),

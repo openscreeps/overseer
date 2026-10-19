@@ -20,13 +20,22 @@ clap = { workspace = true, features = ["derive", "env"] }
 # `--env-file`: the dotenv format that other tools write, with quotes, escapes and substitutions.
 dotenvy.workspace = true
 overseer.workspace = true
+# The saved servers and sign-ins, shared with the desktop app.
+overseer-storage.workspace = true
+# `login` reads a token or a password from the terminal without echo.
+rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# The session workers run while the CLI waits for its selector process.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# The session workers run while the CLI waits for its selector process. A task saves each new
+# session token until the session stops.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 # The configuration file.
 toml = { workspace = true, features = ["parse", "serde", "std"] }
+
+[dev-dependencies]
+# The unit tests keep the secrets in memory, never in the OS credential store.
+overseer-storage = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

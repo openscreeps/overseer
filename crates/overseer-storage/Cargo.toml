@@ -10,6 +10,9 @@ license.workspace = true
 [features]
 # `web`: the browser storage of the app (`localStorage`).
 web = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+# `test-support`: `native::memory`, a credential store in memory for the tests of other crates.
+# Use it only in `[dev-dependencies]`.
+test-support = []
 
 [dependencies]
 # `ServerUrl`: the normalized base URL of a saved server; `ServerKind`: the contract to force.

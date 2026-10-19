@@ -40,6 +40,9 @@
 //! - `email` and `password`: the sign-in of an account on a private server
 //!   with screepsmod-auth. Use them instead of `token`.
 //!
+//! A server without `token`, `email` and `password` uses the saved sign-in of
+//! its URL ([`Saved`]). The credentials of the file win over a saved sign-in.
+//!
 //! A secret is a string or a `{ env = "VARIABLE" }` table. The CLI reads the
 //! variable from the process environment, or else from the `--env-file`
 //! ([`EnvFile`](crate::envfile::EnvFile)). The CLI reads a secret only when a
@@ -47,7 +50,8 @@
 //!
 //! A profile has these keys:
 //!
-//! - `server`: the name of a server.
+//! - `server`: the name of a `[servers.NAME]` table. If the file has no such
+//!   table, the name or the URL of a saved server (`overseer servers`).
 //! - `branch`: the branch (default: `default`). `auto` is the current git
 //!   branch.
 //! - `activate`: where the upload makes the branch run (`world`, `sim`).
@@ -70,11 +74,13 @@
 //! - [`name`] checks the names.
 //! - [`secret`] holds and resolves the secrets.
 //! - [`server`] reads the URLs and the sign-in of the servers.
+//! - [`resolve`] finds the server of each profile.
 //! - [`spawn`] reads the spawn tables.
 //!
 //! This module connects the profiles to their servers and selects profiles.
 
 mod name;
+mod resolve;
 mod secret;
 mod server;
 mod spawn;
@@ -83,14 +89,18 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use overseer_storage::profiles::{Ambiguous, Profiles};
 use serde::Deserialize;
 
-pub(crate) use name::{ProfileName, ServerName};
+pub(crate) use name::{ProfileName, ServerRef};
 pub(crate) use secret::{SecretError, Sensitive};
-pub(crate) use server::Server;
+pub(crate) use server::{Auth, Credentials, Server};
 pub(crate) use spawn::{ShardChoice, Spawn};
 
 use crate::branch::{Active, Branch};
+use crate::saved::{self, Saved};
+use name::ServerName;
+use server::FileServer;
 
 /// The name of the configuration file. The CLI looks for it in the working
 /// directory and its parents.
@@ -104,7 +114,7 @@ const DEFAULT_DIR: &str = "dist";
 #[serde(deny_unknown_fields)]
 pub(crate) struct Profile {
     /// The server.
-    pub(crate) server: ServerName,
+    pub(crate) server: ServerRef,
     /// The branch.
     #[serde(default)]
     pub(crate) branch: Branch,
@@ -124,19 +134,21 @@ struct File {
     #[serde(default)]
     default: Vec<ProfileName>,
     #[serde(default)]
-    servers: BTreeMap<ServerName, Server>,
+    servers: BTreeMap<ServerName, FileServer>,
     #[serde(default)]
     profiles: BTreeMap<ProfileName, Profile>,
 }
 
-/// A valid configuration. Each profile names a server of the configuration.
+/// A valid configuration. Each profile has a server of the file or a saved
+/// server.
 #[derive(Debug)]
 pub(crate) struct Config {
     /// The file.
     pub(crate) path: PathBuf,
     /// The build directory, relative to the file.
     pub(crate) dir: PathBuf,
-    servers: BTreeMap<ServerName, Server>,
+    /// The server of each profile, by the `server` of the profile.
+    servers: BTreeMap<ServerRef, Server>,
     profiles: BTreeMap<ProfileName, Profile>,
     default: Vec<ProfileName>,
 }
@@ -155,12 +167,13 @@ pub(crate) struct Selected<'a> {
 impl Config {
     /// Reads the configuration from the file `path`. Without `path`, reads
     /// the nearest [`FILE_NAME`] in the working directory or its parents.
+    /// `saved` gives the saved servers.
     ///
     /// # Errors
     ///
     /// Returns an error when the CLI finds no file, or when the file is not
     /// readable or not valid.
-    pub(crate) fn load(path: Option<&Path>) -> Result<Self, Error> {
+    pub(crate) fn load(path: Option<&Path>, saved: &Saved) -> Result<Self, Error> {
         let path = if let Some(path) = path {
             path.to_owned()
         } else {
@@ -172,31 +185,23 @@ impl Config {
             found.ok_or(Error::NotFound { dir })?
         };
         match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text, path),
+            Ok(text) => Self::parse(&text, path, saved),
             Err(source) => Err(Error::Read { path, source }),
         }
     }
 
-    /// Parses the text `text` of the file `path` as a configuration.
+    /// Parses the text `text` of the file `path` as a configuration. Finds
+    /// the server of each profile in the file, or else in `saved`.
     ///
     /// # Errors
     ///
-    /// Returns an error when the text is not a valid configuration.
-    pub(crate) fn parse(text: &str, path: PathBuf) -> Result<Self, Error> {
+    /// Returns an error when the text is not a valid configuration, when a
+    /// profile names no server, or when the saved servers are not available.
+    pub(crate) fn parse(text: &str, path: PathBuf, saved: &Saved) -> Result<Self, Error> {
         let file: File = match toml::from_str(text) {
             Ok(file) => file,
             Err(source) => return Err(Error::Parse { path, source }),
         };
-        for (name, profile) in &file.profiles {
-            if !file.servers.contains_key(&profile.server) {
-                return Err(Error::UnknownServer {
-                    path,
-                    profile: name.clone(),
-                    server: profile.server.clone(),
-                    servers: file.servers.keys().cloned().collect(),
-                });
-            }
-        }
         for name in &file.default {
             if !file.profiles.contains_key(name) {
                 return Err(Error::UnknownDefault {
@@ -206,6 +211,21 @@ impl Config {
                 });
             }
         }
+        let profiles = if file.profiles.is_empty() {
+            Profiles::default()
+        } else {
+            match saved.load() {
+                Ok(profiles) => profiles,
+                Err(source) => return Err(Error::Saved { path, source }),
+            }
+        };
+        let mut servers = BTreeMap::new();
+        for (name, profile) in &file.profiles {
+            if !servers.contains_key(&profile.server) {
+                let server = resolve::server(&file.servers, &profiles, &path, name, profile)?;
+                servers.insert(profile.server.clone(), server);
+            }
+        }
         let dir = path
             .parent()
             .unwrap_or(Path::new(""))
@@ -213,7 +233,7 @@ impl Config {
         Ok(Self {
             path,
             dir,
-            servers: file.servers,
+            servers,
             profiles: file.profiles,
             default: file.default,
         })
@@ -277,8 +297,8 @@ impl Config {
 
     /// Selects the profiles of `poll`: the profiles `names`, in order and
     /// without repeats. Each of them must have a spawn table. Without names,
-    /// selects each profile with a spawn table. Two profiles of one server
-    /// must name two different shards.
+    /// selects each profile with a spawn table. Two profiles of one account
+    /// (the same [`Server::identity`]) must name two different shards.
     ///
     /// # Errors
     ///
@@ -313,7 +333,7 @@ impl Config {
         }
         for (at, first) in selected.iter().enumerate() {
             if let Some(second) = selected[at + 1..].iter().find(|other| {
-                other.profile.server == first.profile.server
+                other.server.identity == first.server.identity
                     && !matches!(
                         (
                             first.profile.spawn.as_ref().and_then(|spawn| spawn.shard.as_ref()),
@@ -399,11 +419,13 @@ pub(crate) enum Error {
         /// The location and the cause.
         source: toml::de::Error,
     },
-    /// A profile names a server that the file does not have.
+    /// A profile names a server that neither the file nor the saved servers
+    /// have.
     #[error(
-        "{}: profile {profile}: no server {server}; servers: {}",
+        "{}: profile {profile}: no server {server}; servers: {}; saved servers: {}",
         .path.display(),
-        list(.servers)
+        list(.servers),
+        list(.saved)
     )]
     UnknownServer {
         /// The file.
@@ -411,9 +433,39 @@ pub(crate) enum Error {
         /// The profile.
         profile: ProfileName,
         /// The server that it names.
-        server: ServerName,
+        server: ServerRef,
         /// The servers of the file.
-        servers: Vec<ServerName>,
+        servers: Box<[ServerName]>,
+        /// The names of the saved servers.
+        saved: Box<[String]>,
+    },
+    /// A profile names a saved server, and two saved servers have that name.
+    #[error("{}: profile {profile}: {source}", .path.display())]
+    AmbiguousServer {
+        /// The file.
+        path: PathBuf,
+        /// The profile.
+        profile: ProfileName,
+        /// The saved servers with the name.
+        source: Ambiguous,
+    },
+    /// The URL of a saved server is not a server URL.
+    #[error("{}: profile {profile}: the saved server URL: {source}", .path.display())]
+    SavedUrl {
+        /// The file.
+        path: PathBuf,
+        /// The profile.
+        profile: ProfileName,
+        /// Why the URL is not valid.
+        source: overseer::core::ServerUrlError,
+    },
+    /// The saved servers are not available.
+    #[error("{}: {source}", .path.display())]
+    Saved {
+        /// The file.
+        path: PathBuf,
+        /// Why the saved servers are not available.
+        source: saved::Error,
     },
     /// `default` names a profile that the file does not have.
     #[error(
@@ -453,7 +505,7 @@ pub(crate) enum Error {
         /// The file.
         path: PathBuf,
     },
-    /// Two profiles of one server do not name two different shards.
+    /// Two profiles of one account do not name two different shards.
     #[error(
         "{}: profiles {first} and {second} share server {server}: use distinct explicit shard targets",
         .path.display()
@@ -465,8 +517,8 @@ pub(crate) enum Error {
         first: ProfileName,
         /// The second profile.
         second: ProfileName,
-        /// The server.
-        server: ServerName,
+        /// The server of the first profile.
+        server: ServerRef,
     },
     /// The file has no profile.
     #[error("{}: no profile; add a [profiles.NAME] table", .path.display())]
@@ -496,6 +548,7 @@ mod tests {
     use super::secret::Secret;
     use super::server::Auth;
     use super::*;
+    use crate::saved::testing::TempSaved;
 
     /// A server and one profile without a spawn table.
     const SERVER_ONLY_PROFILE: &str =
@@ -539,8 +592,13 @@ mod tests {
     /// Parses `text` as the file `project/overseer.toml`. The text must be a
     /// valid configuration.
     fn parsed(text: &str) -> Config {
-        Config::parse(text, PathBuf::from("project").join(FILE_NAME))
-            .expect("a valid configuration")
+        parse(text, PathBuf::from("project").join(FILE_NAME)).expect("a valid configuration")
+    }
+
+    /// Parses `text` as the file `path`, with an empty storage of saved
+    /// servers.
+    fn parse(text: &str, path: PathBuf) -> Result<Config, Error> {
+        Config::parse(text, path, &TempSaved::new("config"))
     }
 
     /// The names of `selected`.
@@ -662,7 +720,7 @@ mod tests {
                 "a name has",
             ),
         ] {
-            let error = Config::parse(&text, PathBuf::from(FILE_NAME)).expect_err(&text);
+            let error = parse(&text, PathBuf::from(FILE_NAME)).expect_err(&text);
             assert!(error.to_string().contains(expected), "{text}\n{error}");
         }
     }
@@ -699,8 +757,8 @@ mod tests {
         );
         assert_eq!(spawn("sim"), None);
         assert_eq!(config.root(), Path::new("project"));
-        let bare = Config::parse(SERVER_ONLY_PROFILE, PathBuf::from(FILE_NAME))
-            .expect("a valid configuration");
+        let bare =
+            parse(SERVER_ONLY_PROFILE, PathBuf::from(FILE_NAME)).expect("a valid configuration");
         assert_eq!(bare.root(), Path::new("."));
 
         let all = config.select_spawn(&[]).expect("spawn profiles");
@@ -773,7 +831,7 @@ mod tests {
             ),
             (format!("{base}selector = [\"s\"]\nname = \"x\"\n"), "name"),
         ] {
-            let error = Config::parse(&text, PathBuf::from(FILE_NAME)).expect_err(&text);
+            let error = parse(&text, PathBuf::from(FILE_NAME)).expect_err(&text);
             assert!(error.to_string().contains(expected), "{text}\n{error}");
         }
     }

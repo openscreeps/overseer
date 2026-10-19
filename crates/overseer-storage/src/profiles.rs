@@ -6,8 +6,12 @@
 //! dropped alone, and screeps.com is always first. Tokens and server passwords are in the
 //! secret store of the platform, under [`token_key`] and [`server_password_key`].
 
+mod change;
+
 use overseer_core::{ServerUrl, ServerUrlError};
 use serde::{Deserialize, Serialize};
+
+pub use change::Change;
 
 /// Version written into the saved document; older documents parse with defaults.
 pub const VERSION: u32 = 2;
@@ -218,6 +222,40 @@ impl Profiles {
         self.servers
             .retain(|server| server.kind == ServerKind::Official || server.url != url);
     }
+
+    /// The saved server that `key` names: the only server with the name `key`, else the
+    /// server whose base URL is the normalized `key` ([`normalize_url`]). `None` when no server
+    /// matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Ambiguous`] when two or more servers have the name `key`.
+    pub fn find(&self, key: &str) -> Result<Option<&Server>, Ambiguous> {
+        let key = key.trim();
+        let named: Vec<&Server> = self
+            .servers
+            .iter()
+            .filter(|server| server.name == key)
+            .collect();
+        match named.as_slice() {
+            [] => Ok(normalize_url(key).ok().and_then(|url| self.server(&url))),
+            [server] => Ok(Some(server)),
+            several => Err(Ambiguous {
+                name: key.to_owned(),
+                urls: several.iter().map(|server| server.url.clone()).collect(),
+            }),
+        }
+    }
+}
+
+/// Two or more saved servers have the name that [`Profiles::find`] looks for.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{} saved servers have the name {name}: {}; use the URL", urls.len(), urls.join(", "))]
+pub struct Ambiguous {
+    /// The name.
+    pub name: String,
+    /// The base URLs of the servers with this name.
+    pub urls: Vec<String>,
 }
 
 /// The base URL of a server as entered: `http://` is assumed without a scheme, then
@@ -266,8 +304,8 @@ pub fn server_password_key(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OFFICIAL_URL, Profiles, SEASON_URL, SavedUser, Server, ServerKind, VERSION, normalize_url,
-        server_password_key, token_key,
+        Ambiguous, OFFICIAL_URL, Profiles, SEASON_URL, SavedUser, Server, ServerKind, VERSION,
+        normalize_url, server_password_key, token_key,
     };
 
     fn private(url: &str) -> Server {
@@ -402,6 +440,54 @@ mod tests {
         profiles.remove("http://localhost:21025/");
         profiles.remove(OFFICIAL_URL);
         assert_eq!(profiles, Profiles::default());
+    }
+
+    #[test]
+    fn finds_a_server_by_name_or_url() {
+        let mut profiles = Profiles::default();
+        profiles.add(private("localhost:21025")).unwrap();
+        let url = |found: Option<&Server>| found.map(|server| server.url.clone());
+        assert_eq!(
+            url(profiles.find(" Local ").unwrap()).as_deref(),
+            Some("http://localhost:21025/")
+        );
+        assert_eq!(
+            url(profiles.find("screeps.com").unwrap()).as_deref(),
+            Some(OFFICIAL_URL)
+        );
+        assert_eq!(
+            url(profiles.find("https://screeps.com").unwrap()).as_deref(),
+            Some(OFFICIAL_URL)
+        );
+        assert_eq!(
+            url(profiles.find("localhost:21025").unwrap()).as_deref(),
+            Some("http://localhost:21025/")
+        );
+        assert_eq!(profiles.find("local").unwrap(), None);
+        assert_eq!(profiles.find("http://other:21025").unwrap(), None);
+        assert_eq!(profiles.find("").unwrap(), None);
+
+        profiles.add(private("http://second:21025")).unwrap();
+        let error = profiles.find("Local").unwrap_err();
+        assert_eq!(
+            error,
+            Ambiguous {
+                name: "Local".to_owned(),
+                urls: vec![
+                    "http://localhost:21025/".to_owned(),
+                    "http://second:21025/".to_owned()
+                ],
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "2 saved servers have the name Local: http://localhost:21025/, http://second:21025/; use the URL"
+        );
+        // The URL still finds one of them.
+        assert_eq!(
+            url(profiles.find("http://second:21025/").unwrap()).as_deref(),
+            Some("http://second:21025/")
+        );
     }
 
     #[test]

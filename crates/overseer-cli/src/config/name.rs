@@ -1,6 +1,9 @@
 //! The names of the configuration: server, profile and shard names. A name
-//! is not empty and has only letters, digits, `-`, `_` and `.`.
+//! is not empty and has only letters, digits, `-`, `_` and `.`. The server of
+//! a profile ([`ServerRef`]) can also be the name or the URL of a saved
+//! server.
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -44,6 +47,12 @@ macro_rules! name {
                 f.pad(&self.0)
             }
         }
+
+        impl Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                &self.0
+            }
+        }
     };
 }
 
@@ -69,6 +78,42 @@ impl ShardName {
         &self.0
     }
 }
+
+/// The server of a profile: the name of a `[servers.NAME]` table of the
+/// configuration, or the name or the URL of a saved server. It is not empty.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub(crate) struct ServerRef(String);
+
+impl ServerRef {
+    /// The text of the configuration.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ServerRef {
+    type Error = EmptyServer;
+
+    fn try_from(server: String) -> Result<Self, EmptyServer> {
+        if server.trim().is_empty() {
+            Err(EmptyServer)
+        } else {
+            Ok(Self(server))
+        }
+    }
+}
+
+impl fmt::Display for ServerRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// The server of a profile is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("server: the server of a profile is not empty")]
+pub(crate) struct EmptyServer;
 
 /// A name that is empty or has a character that is not a letter, a digit,
 /// `-`, `_` or `.`.

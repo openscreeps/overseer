@@ -100,6 +100,11 @@ On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`.
 ## Usage
 
 ```sh
+overseer servers                           # list the saved servers (shared with the desktop app)
+overseer servers add http://127.0.0.1:21025 --name local   # save a server
+overseer login local --email me@example.com               # sign in; the password comes from stdin
+overseer login screeps.com --token         # sign in with an API token from stdin
+overseer logout local                      # delete the saved sign-in
 overseer profiles                          # list the profiles of the configuration
 overseer upload                            # upload to the default profiles
 overseer upload -p main                    # upload to one profile
@@ -113,9 +118,10 @@ overseer poll -p main --execute            # also place the spawn, or reset, whe
 overseer --env-file .env upload -p main    # read the secrets from a dotenv file
 ```
 
-Each command reads the configuration file `overseer.toml`. The CLI looks for this file in the
-working directory, then in each parent directory. To use another file, give `--config FILE`
-(`-c FILE`) or set `OVERSEER_CONFIG`.
+`upload`, `poll` and `profiles` read the configuration file `overseer.toml`. The CLI looks for
+this file in the working directory, then in each parent directory. To use another file, give
+`--config FILE` (`-c FILE`) or set `OVERSEER_CONFIG`. `servers`, `login` and `logout` need no
+configuration file. See [Saved servers and sign-ins](#saved-servers-and-sign-ins).
 
 `upload [DIR]` reads the modules of the build directory one time. The default build directory is
 the `dir` of the configuration. Then, for each profile, `upload` replaces every module of the
@@ -125,7 +131,7 @@ the branch of every profile.
 
 Without `--profile` (`-p`) or `OVERSEER_PROFILE`, `upload` uses the `default` profiles of the
 configuration. If the configuration has only one profile, `upload` uses that profile. The
-profiles of one server share one sign-in.
+profiles of one account share one sign-in.
 
 The first failure stops the upload. The CLI writes the error to stderr as `overseer: ...` and
 exits with status 1. A bad command line gives status 2.
@@ -208,7 +214,7 @@ shard = "auto"
 | `servers.NAME.token`             | The API token (official server: account settings, auth tokens)                        |
 | `servers.NAME.email`             | The account email, with `password`, for a private server with screepsmod-auth         |
 | `servers.NAME.password`          | The account password                                                                  |
-| `profiles.NAME.server`           | The server of the profile                                                             |
+| `profiles.NAME.server`           | A `[servers.NAME]` table, or else the name or the URL of a saved server               |
 | `profiles.NAME.branch`           | The branch of the upload. `auto` is the current git branch. Default `default`         |
 | `profiles.NAME.activate`         | Where the upload makes the branch run: `world`, `sim`. Default: nowhere               |
 | `profiles.NAME.spawn.selector`   | The program and the arguments of the selector (no shell). It runs next to the file    |
@@ -217,26 +223,129 @@ shard = "auto"
 | `profiles.NAME.spawn.radius`     | The distance from the start room to the candidates, 1 to 10 rooms. Default 5          |
 | `profiles.NAME.spawn.candidates` | The maximum number of candidates for the selector, 1 to 64. Default 16                |
 
-A server signs in with `token`, or with `email` and `password`. A secret is a string, or
-`{ env = "VARIABLE" }`. The second form reads the secret from the environment (or the
-`--env-file`) when a command needs it. Thus you can commit the configuration. Names have
-letters, digits, `-`, `_` and `.`. A key that the format does not have is an error.
+A server signs in with `token`, with `email` and `password`, or with the saved sign-in of its
+URL (no credential keys). A secret is a string, or `{ env = "VARIABLE" }`. The second form reads
+the secret from the environment (or the `--env-file`) when a command needs it. Thus you can
+commit the configuration. Server and profile names have letters, digits, `-`, `_` and `.`. A key
+that the format does not have is an error.
+
+### The server of a profile
+
+The CLI finds the server of `profiles.NAME.server = "X"` in this order:
+
+1. The table `[servers.X]` of the file. If the table has `token`, or `email` and `password`, the
+   CLI uses them. Else it uses the saved sign-in of the URL of the table.
+2. The saved server with the name `X`. If two saved servers have this name, the CLI stops with
+   an error that lists their URLs. Use the URL in place of the name.
+3. The saved server whose URL is `X` (after normalization, for example `127.0.0.1:21025` is
+   `http://127.0.0.1:21025/`).
+
+The credentials of the file always win over a saved sign-in. Thus a CI job with
+`token = { env = "SCREEPS_TOKEN" }` works as before and does not touch the credential store. The
+server password of a saved private server comes from the saved secrets.
+
+A server without credentials and without a saved sign-in is not an error for `profiles`. A
+command that connects stops with an error that names `overseer login`. `profiles` shows the
+source of each sign-in in the `AUTH` column: the file (`token in the file`, `token from $VAR`,
+`EMAIL, password ...`), `saved API token`, `saved session token`, or `none`. It shows no secret.
+
+A configuration that uses only saved servers needs no `[servers]` table:
+
+```toml
+[profiles.main]
+server = "screeps.com"
+branch = "main"
+
+[profiles.dev]
+server = "local"      # a saved server: overseer servers add http://127.0.0.1:21025 --name local
+branch = "auto"
+```
 
 ### Credentials and safety
 
 - Keep secrets out of the configuration. Use `{ env = "..." }` with the environment or
-  `--env-file`. Keep the dotenv file out of version control. Errors name the variable, the file
-  and the line, but never a secret.
+  `--env-file`, or sign in with `overseer login`. Keep the dotenv file out of version control.
+  Errors name the variable, the file and the line, but never a secret.
+- The CLI never reads a secret from the command line. `login` reads it from stdin.
 - The token goes only to the configured server, because the client follows no redirect. When the
-  server sends a new `X-Token`, the client uses it for the next calls of the process.
+  server sends a new `X-Token`, the client uses it for the next calls of the process. With a
+  saved token, the CLI also saves each new token.
 - The CLI does not repeat a failed call. The Overseer library sends a request again only after
   HTTP 401 (with a new sign-in) or HTTP 429. The first failure of `upload` stops it. `poll` never
   repeats a call whose outcome is unknown.
-- `profiles` and `upload --dry-run` send nothing. `poll` only reads. Without `--execute`, `poll`
-  refuses every call that changes the world. `upload` replaces the modules of the branch of the
-  profile.
+- `profiles`, `servers` and `upload --dry-run` send nothing. `poll` only reads. Without
+  `--execute`, `poll` refuses every call that changes the world. `upload` replaces the modules of
+  the branch of the profile.
 - Try a configuration against a private server (`http://127.0.0.1:21025`) before you use it with
   an account on the official server.
+
+## Saved servers and sign-ins
+
+The CLI and the Overseer desktop app share one list of saved servers and one sign-in for each
+server. Sign in one time, in the app or with `overseer login`, and both use the sign-in. The web
+app in a browser keeps its own list.
+
+### Commands
+
+- `overseer servers` lists the saved servers: the name, the URL, the kind (`official`, `season`,
+  `private`), the signed-in account, the sign-in kind (`API token`, `session token`, `token` or
+  `none`) and whether a server password is saved. It shows no secret.
+- `overseer servers add URL [--name NAME]` saves a server. Without a scheme, the CLI uses
+  `http://`. The default name is `Season` for `https://screeps.com/season/`, else the host, the
+  port and the path of the URL.
+- `overseer servers remove NAME|URL` removes a saved server, its token and its server password.
+  The CLI cannot remove screeps.com.
+- `overseer login NAME|URL --token` signs in with an API token. The CLI checks the token with a
+  connection and saves it.
+- `overseer login NAME|URL --email EMAIL` signs in with the email (or the username) and the
+  password. Where the server has API tokens, the CLI creates a full API token and saves it. Else,
+  or when the server does not create the token (for example HTTP 404), it saves the session
+  token and tells why. The CLI never saves the password.
+- `--server-password` also reads the server password of a password-protected private server and
+  saves it.
+- `overseer logout NAME|URL` deletes the saved token and forgets the account. With `--revoke`,
+  it first deletes the API token on the server. If the CLI cannot find the token in the token
+  list of the server, it says so and signs out all the same. If the server call fails, the CLI
+  keeps the sign-in: run `logout` again without `--revoke` to sign out of the CLI only.
+
+`login` saves a URL that is not saved yet (an argument with `://`, a `.`, a `:` or a `/`). An
+unknown name without these characters is an error, so a typing error does not save a server.
+
+`login` reads each secret from stdin. On a terminal, it asks for the secret and does not show
+what you type. Else it reads one line for each secret: first the token or the password, then the
+server password. For example:
+
+```sh
+printf '%s\n' "$SCREEPS_PASSWORD" | overseer login local --email me@example.com
+```
+
+**Caution: a session token expires.** A private server drops a session token 60 s after it
+issued it, and replaces it on each reply. While a session of the CLI runs, the CLI saves each new
+token, so the next run finds a valid token. After more than a minute without a session, the
+saved session token is not valid. The next command then stops with an error that names
+`overseer login`. Use an API token where the server has them. The desktop app and the CLI can
+also replace the session token of each other.
+
+### Where the CLI keeps them
+
+The saved servers are in the file `profiles.json` in the configuration directory of the desktop
+app (identifier `com.openscreeps.overseer`):
+
+| OS      | File                                                                        |
+| ------- | --------------------------------------------------------------------------- |
+| Linux   | `$XDG_CONFIG_HOME/com.openscreeps.overseer/profiles.json` (`~/.config/...`) |
+| macOS   | `~/Library/Application Support/com.openscreeps.overseer/profiles.json`      |
+| Windows | `%APPDATA%\com.openscreeps.overseer\profiles.json`                          |
+
+The file has no secrets. The tokens and the server passwords are in the OS credential store
+(Windows Credential Manager, macOS Keychain, the Secret Service on Linux), under the service
+`overseer`. The keys are `token:URL` and `server-password:URL`. Each change of the file occurs
+under a lock, so the CLI and the app keep the changes of each other.
+
+`OVERSEER_APP_IDENTIFIER` selects the storage of another app identifier: the directory with that
+name and the credential service `overseer:IDENTIFIER`. Tests and other builds use it. An
+identifier has ASCII letters, digits, `.`, `-` and `_`. The variable does not select another kind
+of store.
 
 ## Spawning
 
@@ -435,12 +544,20 @@ old names. To migrate a bot project, do these steps:
    `"github:openscreeps/overseer" = { version = "0.3.0", version_prefix = "cli-v" }`.
 5. Change the command in scripts and tasks from `screepsmanager` to `overseer`. Errors now start
    with `overseer:`.
+6. Optional: on a workstation, replace the credentials of a `[servers.NAME]` table with a saved
+   sign-in. Run `overseer login URL --token` (or `--email EMAIL`), then remove `token`, `email`
+   and `password` from the table. Keep the `{ env = "..." }` credentials in CI: they win over a
+   saved sign-in, and CI needs no credential store.
 
 ## Tests
 
-- Run the unit tests with `cargo test -p overseer-cli`.
-- `cargo xtask e2e` also runs the live scenario of the CLI: the test target `live` of this crate.
-  This scenario runs the CLI against a disposable world in Docker.
+- Run the unit tests with `cargo test -p overseer-cli`. They keep the saved servers in a
+  temporary directory and the secrets in memory, never in the credential store of the user.
+- `cargo xtask e2e` also runs the live scenarios of the CLI: the test target `live` of this
+  crate. They run the CLI against a disposable world in Docker. The scenario of the saved sign-in
+  uses a unique `OVERSEER_APP_IDENTIFIER` and removes its directory and its secrets afterwards.
+  Without an OS credential store (for example Linux CI without a Secret Service), it skips with a
+  message.
 
 ## Release
 

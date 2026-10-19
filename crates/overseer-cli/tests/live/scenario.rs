@@ -9,19 +9,20 @@ use overseer::model::world::Tile;
 use overseer::{Modules, Overseer};
 
 use crate::observer::{OwnedSpawn, State, modules, names, settled, state};
+use crate::storage::TestStorage;
 use crate::support::{self, Account};
 use crate::workspace::{MIRROR, PRIMARY, RADIUS, Workspace};
 
 /// The main module of the first build: a live loop that writes to `Memory`.
-const MAIN_V1: &str = "module.exports.loop = function () {\n  Memory.e2e = Game.time;\n};\n";
+pub const MAIN_V1: &str = "module.exports.loop = function () {\n  Memory.e2e = Game.time;\n};\n";
 /// The main module of the second build.
 const MAIN_V2: &str =
     "module.exports.loop = function () {\n  Memory.e2e = { build: 2, tick: Game.time };\n};\n";
 /// The source map of the main module, a JSON map.
-const MAP: &str =
+pub const MAP: &str =
     r#"{"version":3,"file":"main.js","sources":["main.ts"],"names":[],"mappings":"AAAA"}"#;
 /// The smallest `WebAssembly` module: the magic and the version.
-const WASM: &[u8] = b"\0asm\x01\0\0\0";
+pub const WASM: &[u8] = b"\0asm\x01\0\0\0";
 
 /// The commands in order, each followed by what it must have changed:
 ///
@@ -44,7 +45,9 @@ async fn upload_and_first_spawn() {
     }
     let account = Account::register().await;
     let observer = account.connect().await;
-    let workspace = Workspace::new(account);
+    // The configuration has the credentials: the CLI only reads the empty storage of the test.
+    let storage = TestStorage::new();
+    let workspace = Workspace::new(account, storage.identifier());
     workspace.write_build(MAIN_V1, MAP, Some(WASM));
     scenario(&workspace, &observer).await;
     observer.shutdown().await;

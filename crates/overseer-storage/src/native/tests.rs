@@ -1,85 +1,16 @@
 //! Tests of the native storage. They use a temporary directory and an in-memory credential
 //! store, never the configuration directory or the OS credential store of the user.
 
-use std::any::Any;
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier, Mutex, Once, PoisonError};
+use std::sync::{Arc, Barrier};
 use std::thread;
 
-use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
-
-use super::{APP_IDENTIFIER, PROFILES_FILE, Storage, deleted, found, secrets_error, service};
+use super::{
+    APP_IDENTIFIER, PROFILES_FILE, Storage, deleted, found, memory, secrets_error, service,
+};
 use crate::Error;
 use crate::profiles::{OFFICIAL_URL, Profiles, Server, ServerKind};
-
-/// The secrets of the in-memory credential store, by service and key.
-type Secrets = Arc<Mutex<HashMap<(String, String), Vec<u8>>>>;
-
-/// A credential store in memory that keeps its secrets across entries (the mock store of
-/// `keyring` keeps a secret in its entry only).
-#[derive(Debug, Default)]
-struct MemoryStore {
-    secrets: Secrets,
-}
-
-/// One credential of [`MemoryStore`].
-#[derive(Debug)]
-struct MemoryCredential {
-    secrets: Secrets,
-    id: (String, String),
-}
-
-impl CredentialApi for MemoryCredential {
-    fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
-        self.secrets
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(self.id.clone(), secret.to_vec());
-        Ok(())
-    }
-
-    fn get_secret(&self) -> keyring::Result<Vec<u8>> {
-        self.secrets
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&self.id)
-            .cloned()
-            .ok_or(keyring::Error::NoEntry)
-    }
-
-    fn delete_credential(&self) -> keyring::Result<()> {
-        self.secrets
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.id)
-            .map(drop)
-            .ok_or(keyring::Error::NoEntry)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl CredentialBuilderApi for MemoryStore {
-    fn build(
-        &self,
-        _target: Option<&str>,
-        service: &str,
-        user: &str,
-    ) -> keyring::Result<Box<Credential>> {
-        Ok(Box::new(MemoryCredential {
-            secrets: Arc::clone(&self.secrets),
-            id: (service.to_owned(), user.to_owned()),
-        }))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
 
 /// A temporary directory, removed on drop.
 struct TempDir(PathBuf);
@@ -94,10 +25,7 @@ impl TempDir {
 
     /// A storage in this directory, with the secrets in memory under `service`.
     fn storage(&self, service: &str) -> Storage {
-        static MEMORY: Once = Once::new();
-        MEMORY.call_once(|| {
-            keyring::set_default_credential_builder(Box::new(MemoryStore::default()));
-        });
+        memory::install();
         Storage::at(self.0.clone(), service.to_owned())
     }
 }

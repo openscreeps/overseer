@@ -142,6 +142,19 @@ pub(crate) enum SecretError {
     /// The value of the variable is empty.
     #[error("${0} is empty")]
     Empty(String),
+    /// The server has no credentials in the configuration and no saved sign-in. The value is
+    /// the argument of `overseer login`.
+    #[error(
+        "no sign-in: run `overseer login {0} --token` (or `--email EMAIL`), or set `token` in the configuration"
+    )]
+    NotSignedIn(String),
+    /// The saved sign-in has no token in the credential store. The value is the argument of
+    /// `overseer login`.
+    #[error("the saved token is missing: sign in again with `overseer login {0}`")]
+    NoSavedToken(String),
+    /// The saved secrets are not available. The message never contains a secret.
+    #[error("{0}")]
+    Saved(String),
 }
 
 #[cfg(test)]

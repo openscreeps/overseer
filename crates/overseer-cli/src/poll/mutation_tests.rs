@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use overseer::core::api::ApiError;
 
 use super::*;
+use crate::saved::testing::TempSaved;
 
 /// Runs `test` on the watch of a test profile. The watch opens no session.
 fn with_watch(test: impl FnOnce(&mut Watch<'_>)) {
@@ -21,6 +22,7 @@ fn with_watch(test: impl FnOnce(&mut Watch<'_>)) {
         selector = ["unused-selector"]
         "#,
         PathBuf::from("overseer.toml"),
+        &TempSaved::new("mutation"),
     )
     .expect("valid configuration");
     let targets = config.select_spawn(&[]).expect("spawn profile");

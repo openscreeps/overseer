@@ -1,6 +1,6 @@
 //! The `upload` command. It reads the modules of the build directory one
 //! time. Then it uploads them to the branch of each selected profile, in
-//! order. The profiles of one server share one Overseer session. The first
+//! order. The profiles of one account share one Overseer session. The first
 //! failure stops the upload. The command shuts down each session before it
 //! returns.
 
@@ -13,10 +13,11 @@ use overseer::{Modules, Overseer};
 
 use crate::Error;
 use crate::branch::{Active, Branch, BranchName};
-use crate::config::{Config, ProfileName, Selected, ServerName};
-use crate::connection;
+use crate::config::{Config, ProfileName, Selected};
+use crate::connection::{self, Session};
 use crate::envfile::EnvFile;
 use crate::modules::{self, Build};
+use crate::saved::Saved;
 
 /// The arguments of `upload`.
 #[derive(Debug, clap::Args)]
@@ -49,13 +50,14 @@ pub(crate) struct Upload {
 }
 
 impl Upload {
-    /// Runs the upload with `config` and the `--env-file` variables `env`.
-    /// Prints each step to `out`. Shuts down each session that the upload
-    /// opened, also when the upload fails.
+    /// Runs the upload with `config`, the `--env-file` variables `env` and
+    /// the saved sign-ins `saved`. Prints each step to `out`. Shuts down each
+    /// session that the upload opened, also when the upload fails.
     pub(crate) async fn run(
         self,
         config: &Config,
         env: &EnvFile,
+        saved: &Saved,
         out: &mut dyn Write,
     ) -> Result<(), Error> {
         let targets = config.select(&self.profiles)?;
@@ -64,23 +66,24 @@ impl Upload {
         print_build(dir, &build, out)?;
         let mut sessions = BTreeMap::new();
         let result = self
-            .upload_all(&targets, env, &build.modules, &mut sessions, out)
+            .upload_all(&targets, env, saved, &build.modules, &mut sessions, out)
             .await;
-        for session in sessions.values() {
+        for session in sessions.into_values() {
             session.shutdown().await;
         }
         result
     }
 
     /// Uploads `modules` to each of `targets`, in order. Connects one time to
-    /// each server and keeps the sessions in `sessions`. The caller must shut
-    /// down the sessions. A dry run does not connect.
+    /// each account and keeps the sessions in `sessions`. The caller must
+    /// shut down the sessions. A dry run does not connect.
     async fn upload_all<'a>(
         &self,
         targets: &[Selected<'a>],
         env: &EnvFile,
+        saved: &Saved,
         modules: &Modules,
-        sessions: &mut BTreeMap<&'a ServerName, Overseer>,
+        sessions: &mut BTreeMap<&'a str, Session>,
         out: &mut dyn Write,
     ) -> Result<(), Error> {
         let mut git_branch = None;
@@ -109,25 +112,30 @@ impl Upload {
                 )?;
             }
             writeln!(out)?;
-            let credentials = target
-                .server
-                .auth
-                .resolve(env)
-                .map_err(|source| Error::Secret {
-                    server: target.profile.server.clone(),
-                    source,
-                })?;
-            if self.dry_run {
-                writeln!(out, "  dry run: nothing uploaded")?;
-                continue;
-            }
-            let session = match sessions.entry(&target.profile.server) {
+            let session = match sessions.entry(target.server.identity.as_str()) {
                 Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => entry.insert(
-                    connection::connect(&target.server.url, credentials)
-                        .await
-                        .map_err(|source| api_error(&target, source))?,
-                ),
+                Entry::Vacant(entry) => {
+                    let credentials =
+                        target
+                            .server
+                            .credentials(env, saved)
+                            .map_err(|source| Error::Secret {
+                                server: target.profile.server.clone(),
+                                source,
+                            })?;
+                    if self.dry_run {
+                        writeln!(out, "  dry run: nothing uploaded")?;
+                        continue;
+                    }
+                    entry.insert(
+                        connection::connect(target.server, credentials, saved)
+                            .await
+                            .map_err(|source| Error::Connect {
+                                profile: target.name.clone(),
+                                source,
+                            })?,
+                    )
+                }
             };
             upload(session, &target, &branch, modules, &activate, out).await?;
         }
