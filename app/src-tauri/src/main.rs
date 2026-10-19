@@ -6,6 +6,9 @@
 //! - `secret_get(key)`, `secret_set(key, value)`, `secret_delete(key)`: tokens and server
 //!   passwords in the OS credential store (service `overseer`; builds with another app
 //!   identifier use their own service).
+//! - `profiles_load(legacy)`, `profiles_change(change)`: the saved servers in the profiles file
+//!   that the CLI (`overseer servers`) shares. The shell applies each change under the lock of
+//!   the file and returns the document of the file.
 //! - `open_window(route, title)`: the app at a route in a window of its own (a popped-out
 //!   room), one window per route.
 //! - External links open in the system browser through `tauri-plugin-opener`.
@@ -19,13 +22,20 @@
 // No console window behind the app in release builds on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod profiles;
 mod proxies;
 mod secrets;
 mod windows;
 
-use tauri::{Manager, RunEvent};
+use overseer_storage::native::Storage;
+use tauri::{AppHandle, Manager, RunEvent, Runtime};
 
 use crate::proxies::Proxies;
+
+/// The storage of `app`: the profiles file and the secrets of its identifier.
+fn storage<R: Runtime>(app: &AppHandle<R>) -> Result<Storage, String> {
+    Storage::open(&app.config().identifier).map_err(|error| error.to_string())
+}
 
 fn main() -> Result<(), tauri::Error> {
     let app = tauri::Builder::default()
@@ -34,6 +44,8 @@ fn main() -> Result<(), tauri::Error> {
         .manage(Proxies::default())
         .invoke_handler(tauri::generate_handler![
             proxies::proxy_url,
+            profiles::profiles_load,
+            profiles::profiles_change,
             secrets::secret_get,
             secrets::secret_set,
             secrets::secret_delete,

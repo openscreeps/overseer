@@ -1,12 +1,14 @@
 // Playwright fixtures of the desktop app's tests: `import { test, expect } from './fixtures';`.
 //
 // `cargo xtask e2e --desktop` (Windows) builds the Tauri shell for testing and names the
-// executable in `OVERSEER_E2E_DESKTOP_APP` (see `xtask/src/e2e/desktop.rs`). The test build has
-// its own identifier (the overlay `app/src-tauri/tauri.e2e.conf.json`), so its WebView2 profile
-// (`%LOCALAPPDATA%\<identifier>`), saved window state (`%APPDATA%\<identifier>`) and keychain
-// entries (service `overseer:<identifier>`) are its own: the installed app's are never read or
-// written. Its main window's WebView2 listens for the DevTools protocol on a free port, which
-// the profile's `DevToolsActivePort` names; Playwright attaches there (`connectOverCDP`).
+// executable in `OVERSEER_E2E_DESKTOP_APP`, and the CLI in `OVERSEER_E2E_CLI` (see
+// `xtask/src/e2e/desktop.rs`). The test build has its own identifier (the overlay
+// `app/src-tauri/tauri.e2e.conf.json`), so its WebView2 profile (`%LOCALAPPDATA%\<identifier>`),
+// saved window state and profiles file (`%APPDATA%\<identifier>`) and keychain entries (service
+// `overseer:<identifier>`) are its own: the installed app's are never read or written. The CLI
+// uses the same identifier ({@link overseer}). Its main window's WebView2 listens for the
+// DevTools protocol on a free port, which the profile's `DevToolsActivePort` names; Playwright
+// attaches there (`connectOverCDP`).
 //
 // - `app`: the test app ({@link DesktopApp}), not started: `launch()` starts it and returns the
 //   main window's page, `restart()` closes every window the way the user does (the shell saves
@@ -86,6 +88,35 @@ function executable(): string {
   const exe = process.env.OVERSEER_E2E_DESKTOP_APP;
   if (!exe) throw new Error('OVERSEER_E2E_DESKTOP_APP is not set: run `cargo xtask e2e --desktop`');
   return exe;
+}
+
+/** The profiles file (the saved servers) that the test build and the CLI share. */
+export const PROFILES_FILE = join(DATA_DIRS[0] ?? '', 'profiles.json');
+
+/**
+ * Runs the CLI (`overseer`, from the harness) with `args` on the test build's storage
+ * (`OVERSEER_APP_IDENTIFIER`), with `input` on stdin (a password: never in `args`); returns
+ * what it prints.
+ */
+export function overseer(args: string[], input = ''): Promise<string> {
+  const cli = process.env.OVERSEER_E2E_CLI;
+  if (!cli) throw new Error('OVERSEER_E2E_CLI is not set: run `cargo xtask e2e --desktop`');
+  const child = spawn(cli, args, {
+    env: { ...process.env, OVERSEER_APP_IDENTIFIER: IDENTIFIER },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (data: Buffer) => (stdout += data.toString()));
+  child.stderr.on('data', (data: Buffer) => (stderr += data.toString()));
+  child.stdin.end(input);
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  child.on('error', reject);
+  child.on('close', (code) => {
+    if (code === 0) resolve(stdout);
+    else reject(new Error(`overseer ${args[0] ?? ''} failed (${code}): ${stderr.trim()}`));
+  });
+  return promise;
 }
 
 /** Polls `probe` every 100 ms until it returns something other than `undefined`. */

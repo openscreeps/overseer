@@ -3,17 +3,23 @@
 //! | | Tauri shell | Browser |
 //! |---|---|---|
 //! | Servers | through the shell's proxy (`proxy_url`) | directly, or the page's own `overseer-proxy` ([`crate::connect`]) |
-//! | Secrets (tokens, server passwords) | OS credential store (`secret_*` commands) | `localStorage` under `overseer.secret.<key>`, readable by anything running on the page's origin |
+//! | Saved servers ([`overseer_storage::profiles`]) | the profiles file that the CLI shares (`profiles_*` commands); reloaded when a window gains focus | `localStorage` ([`overseer_storage::web`]) |
+//! | Secrets (tokens, server passwords) | OS credential store (`secret_*` commands), shared with the CLI | `localStorage` under `overseer.secret.<key>`, readable by anything running on the page's origin |
 //! | External links | system browser (`tauri-plugin-opener`) | new tab |
 //! | A rate-limit lift page, such as screeps.com's reset page ([`Platform::open_reset_page`]) | system browser; the app rechecks when its window regains focus | popup that keeps this page as its opener; the app resumes on the page's success message |
 //! | Popped-out rooms | a native window per route (`open_window`, size and position remembered) | `window.open` popup per route |
 //!
-//! Saved profiles ([`overseer_storage::web`]) and state ([`crate::saved`]) are in
-//! `localStorage` on both, the terrain cache ([`crate::terrain_cache`]) in `IndexedDB`.
+//! The state ([`crate::saved`]) is in `localStorage` on both, the terrain cache
+//! ([`crate::terrain_cache`]) in `IndexedDB`.
+//!
+//! The shell keeps the saved servers in the profiles file of `overseer-storage`. The desktop
+//! app and the CLI (`overseer servers`) thus share one server list and one sign-in per server.
+//! Earlier versions of the app kept the list in `localStorage`: the main window gives that list
+//! to the shell once, when there is no profiles file yet ([`Platform::load_profiles`]).
 
 use js_sys::{Function, Object, Promise, Reflect};
 use overseer::core::ServerUrl;
-use overseer_storage::profiles::Profiles;
+use overseer_storage::profiles::{Change, Profiles};
 use overseer_storage::web;
 use url::Url;
 use wasm_bindgen::{JsCast, JsValue};
@@ -66,6 +72,66 @@ impl Platform {
             ConnectTarget::Direct(_) => return Ok(upstream),
         };
         ServerUrl::proxied(&proxy, &upstream).map_err(|error| error.to_string())
+    }
+
+    /// The saved profiles: in a browser, from `localStorage`; in the shell, from the profiles
+    /// file. With `import` (the main window), when there is no profiles file yet, the shell
+    /// makes it from the list that the app kept in `localStorage` before
+    /// ([`web::PROFILES_KEY`]). Then this removes that list from `localStorage`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the shell cannot read or write the profiles file. The list in
+    /// `localStorage` then stays.
+    pub async fn load_profiles(&self, import: bool) -> Result<Profiles, String> {
+        if !self.tauri {
+            return Ok(web::load_profiles());
+        }
+        let storage = local_storage();
+        let legacy = storage
+            .as_ref()
+            .filter(|_| import)
+            .and_then(|storage| storage.get_item(web::PROFILES_KEY).ok().flatten());
+        let args = Object::new();
+        if let Some(legacy) = legacy {
+            // Setting a property of a fresh plain object cannot fail.
+            let _ = Reflect::set(
+                &args,
+                &JsValue::from_str("legacy"),
+                &JsValue::from_str(&legacy),
+            );
+        }
+        let loaded = invoke("profiles_load", &args).await?;
+        let field = |name: &str| Reflect::get(&loaded, &JsValue::from_str(name)).ok();
+        let document = field("profiles")
+            .and_then(|document| document.as_string())
+            .ok_or_else(|| "profiles_load returned no document".to_owned())?;
+        if field("imported").and_then(|imported| imported.as_bool()) == Some(true)
+            && let Some(storage) = storage
+        {
+            // A failure leaves an item that nothing reads: the profiles file exists now.
+            let _ = storage.remove_item(web::PROFILES_KEY);
+        }
+        Ok(Profiles::parse(Some(&document)))
+    }
+
+    /// Applies `change` to the profiles file of the shell and returns the profiles of the file
+    /// (with the changes of other programs, such as the CLI).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the shell cannot read or write the profiles file.
+    pub async fn change_profiles(&self, change: &Change) -> Result<Profiles, String> {
+        let change = serde_json::to_string(change).map_err(|error| error.to_string())?;
+        let change = js_sys::JSON::parse(&change).map_err(|error| js_message(&error))?;
+        let args = Object::new();
+        // Setting a property of a fresh plain object cannot fail.
+        let _ = Reflect::set(&args, &JsValue::from_str("change"), &change);
+        let document = invoke("profiles_change", &args)
+            .await?
+            .as_string()
+            .ok_or_else(|| "profiles_change returned no document".to_owned())?;
+        Ok(Profiles::parse(Some(&document)))
     }
 
     /// The secret stored under `key`.
@@ -207,11 +273,6 @@ impl Platform {
     }
 }
 
-/// The saved profiles.
-pub fn load_profiles() -> Profiles {
-    web::load_profiles()
-}
-
 /// The saved state.
 pub fn load_saved() -> Saved {
     let json =
@@ -271,7 +332,8 @@ pub fn replace_hash(hash: &str) {
     }
 }
 
-/// Saves the profiles.
+/// Saves the profiles in `localStorage` (browser only: the shell changes its profiles file with
+/// [`Platform::change_profiles`]).
 ///
 /// # Errors
 ///

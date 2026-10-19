@@ -7,13 +7,9 @@
     reason = "Tauri hands command arguments over by value"
 )]
 
-use overseer_storage::native::Storage;
 use tauri::{AppHandle, Runtime};
 
-/// The storage of `app`.
-fn storage<R: Runtime>(app: &AppHandle<R>) -> Result<Storage, String> {
-    Storage::open(&app.config().identifier).map_err(|error| error.to_string())
-}
+use crate::storage;
 
 /// The secret stored under `key`, `None` when there is none.
 ///

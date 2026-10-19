@@ -462,7 +462,7 @@ fn suites(root: &Path, options: &Options, run: &Path, summary: &mut Summary) -> 
                 && summary.step("desktop app (cargo build --release)", || {
                     desktop::build(root, &target, &prepared.dist, &prepared.desktop)
                 });
-        } else if prepared.desktop.is_file() {
+        } else if prepared.desktop.is_file() && desktop::cli(&prepared.desktop).is_file() {
             summary.skip("desktop app (cargo build --release)", "--no-build");
         } else {
             return Err(format!(
@@ -709,15 +709,16 @@ fn desktop_suite(prepared: &Prepared, summary: &mut Summary, tests: impl FnOnce(
     }
 }
 
-/// `npx playwright test` with the extra arguments; the desktop suite's configuration and test
-/// app (`OVERSEER_E2E_DESKTOP_APP`) with `--desktop`.
+/// `npx playwright test` with the extra arguments; the desktop suite's configuration, test app
+/// (`OVERSEER_E2E_DESKTOP_APP`) and CLI (`OVERSEER_E2E_CLI`) with `--desktop`.
 fn playwright(prepared: &Prepared, options: &Options) -> Command {
     let mut playwright = Command::new(program("npx"));
     playwright.args(["playwright", "test"]);
     if options.desktop {
         playwright
             .args(["--config", "desktop.config.ts"])
-            .env("OVERSEER_E2E_DESKTOP_APP", &prepared.desktop);
+            .env("OVERSEER_E2E_DESKTOP_APP", &prepared.desktop)
+            .env("OVERSEER_E2E_CLI", desktop::cli(&prepared.desktop));
     }
     playwright
         .args(&options.playwright)

@@ -42,7 +42,7 @@ use leptos::task::spawn_local;
 
 use crate::platform::Platform;
 use crate::route::{Route, Shard, WindowView};
-use crate::state::{AppState, Screen};
+use crate::state::{self, AppState, Screen};
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::status_bar::StatusBar;
 use crate::ui::style::concatcp;
@@ -95,13 +95,31 @@ enum Page {
     },
 }
 
-/// The app.
+/// The app: the `Starting…` screen until the saved servers are loaded
+/// ([`state::load_profiles`]; in the shell, from its profiles file), then [`Loaded`].
 #[component]
 pub fn App(
     /// Where the app runs.
     platform: Platform,
 ) -> impl IntoView {
-    let state = AppState::new(platform);
+    let profiles = RwSignal::new(None);
+    let loading = platform.clone();
+    spawn_local(async move { profiles.set(Some(state::load_profiles(&loading).await)) });
+    move || match profiles.get() {
+        None => starting("Starting…".to_owned()),
+        Some(profiles) => view! { <Loaded platform=platform.clone() profiles /> }.into_any(),
+    }
+}
+
+/// The app with its saved servers.
+#[component]
+fn Loaded(
+    /// Where the app runs.
+    platform: Platform,
+    /// The saved profiles at the start, or why they could not be loaded.
+    profiles: Result<overseer_storage::profiles::Profiles, String>,
+) -> impl IntoView {
+    let state = AppState::new(platform, profiles);
     provide_context(state);
     let map = MapState::new();
     provide_context(map);

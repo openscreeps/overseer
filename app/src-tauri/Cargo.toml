@@ -18,7 +18,8 @@ tauri-build.workspace = true
 [dependencies]
 overseer-core.workspace = true
 overseer-proxy.workspace = true
-# Secrets in the OS credential store (the `secret_*` commands).
+# The profiles file that the CLI shares (the `profiles_*` commands) and the secrets in the OS
+# credential store (the `secret_*` commands).
 overseer-storage.workspace = true
 serde.workspace = true
 tauri.workspace = true

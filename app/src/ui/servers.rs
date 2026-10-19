@@ -3,7 +3,9 @@
 use leptos::html::Dialog;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use overseer_storage::profiles::{SEASON_URL, Server, ServerKind, server_password_key, token_key};
+use overseer_storage::profiles::{
+    Change, SEASON_URL, Server, ServerKind, server_password_key, token_key,
+};
 
 use crate::platform::Platform;
 use crate::state::AppState;
@@ -101,13 +103,16 @@ fn ServerItem(server: Server) -> impl IntoView {
                 .is_some_and(|session| session.server == url)
         });
         state.update_saved(|saved| saved.forget(&url, slug.as_deref()));
-        state.update_profiles(|profiles| profiles.remove(&url));
+        // Removing never fails.
+        let _ = state.change_profiles(Change::RemoveServer { url: url.clone() });
         toasts.show(ToastKind::Info, format!("Removed {removed_name}"));
         spawn_local(async move {
             // Its session ends as with signing out.
             if live {
                 state.sign_out().await;
             }
+            // The profiles file never names a server whose secrets are gone.
+            state.profiles_saved().await;
             let _ = platform.secret_delete(&token_key(&url)).await;
             let _ = platform.secret_delete(&server_password_key(&url)).await;
             // The cache is bounded anyway; a failure leaves rooms to be evicted later.
@@ -215,10 +220,8 @@ fn AddServer(
                 ServerKind::Season,
             )
         };
-        let mut result = Err(String::new());
-        state.update_profiles(|profiles| result = profiles.add(server));
-        match result {
-            Ok(server_url) => {
+        match state.change_profiles(Change::AddServer { server }) {
+            Ok(Some(server_url)) => {
                 let password = server_password.get_untracked();
                 if private() && !password.is_empty() {
                     let platform = state.platform();
@@ -238,6 +241,8 @@ fn AddServer(
                 toasts.show(ToastKind::Success, format!("Added {added}"));
                 close();
             }
+            // Adding a server always gives its URL.
+            Ok(None) => close(),
             Err(message) => error.set(Some(message)),
         }
     };

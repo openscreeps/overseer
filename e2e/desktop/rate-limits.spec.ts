@@ -84,6 +84,8 @@ test('lifting the limits opens the reset page in the system browser, then checks
       },
     ],
   };
+  // The app moves a list in `localStorage` into its profiles file when it loads the page again
+  // (`saved-servers.spec.ts`).
   await page.evaluate(
     async ({ profiles, key, token }) => {
       localStorage.setItem('overseer.profiles', JSON.stringify(profiles));

@@ -19,11 +19,15 @@
 //! The executable `overseer-ui.exe` is copied to `<target>/e2e/desktop/overseer-e2e.exe`: a
 //! running test app never blocks a rebuild, and it is told apart from the user's own
 //! `overseer-ui.exe`. The tests write its process id to `overseer-e2e.pid` next to it while it
-//! runs.
+//! runs. The CLI `overseer.exe` (`crates/overseer-cli`) is copied next to it as [`CLI`]: the
+//! tests change the saved servers of the test build with it (`OVERSEER_APP_IDENTIFIER`), as a
+//! user does with the CLI.
 //!
 //! [`clean`] runs before the tests, [`finish`] after them and [`teardown`] however the run
 //! ends: they stop a test app left running and delete the identifier's data directories
-//! (`%APPDATA%\<identifier>`, `%LOCALAPPDATA%\<identifier>`) and keychain entries.
+//! ([`data_dirs`]) and keychain entries. The configuration directory
+//! `%APPDATA%\<identifier>` holds the saved window state and the profiles file that the app
+//! and the CLI share (`profiles.json`, `profiles.lock`, `profiles.json.tmp`).
 
 use std::fs;
 use std::io::ErrorKind;
@@ -46,6 +50,8 @@ const SHELL: &str = "app/src-tauri";
 const APP_IDENTIFIER: &str = "com.openscreeps.overseer";
 /// The test build's executable name.
 pub const EXECUTABLE: &str = "overseer-e2e.exe";
+/// The name of the copy of the CLI that the tests run, next to [`EXECUTABLE`].
+pub const CLI: &str = "overseer-e2e-cli.exe";
 /// The `WebView2` arguments `wry` passes when the configuration names none: keep them.
 const WRY_DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 /// How long a data directory may stay locked by `WebView2` processes that are shutting down.
@@ -64,7 +70,13 @@ pub fn identifier(root: &Path) -> Result<String, Error> {
     Ok(identifier.to_owned())
 }
 
-/// Builds the test app with the web app in `dist` and copies it to `executable`.
+/// The copy of the CLI next to the test app `executable`.
+pub fn cli(executable: &Path) -> PathBuf {
+    executable.with_file_name(CLI)
+}
+
+/// Builds the test app with the web app in `dist` and copies it to `executable`, and the CLI
+/// to [`cli`].
 pub fn build(root: &Path, target: &Path, dist: &Path, executable: &Path) -> Result<(), Error> {
     let config = test_config(root, dist)?;
     status(
@@ -74,14 +86,22 @@ pub fn build(root: &Path, target: &Path, dist: &Path, executable: &Path) -> Resu
             .env("TAURI_CONFIG", config.to_string()),
         "cargo build (desktop app)",
     )?;
+    status(
+        cargo(root).args(["build", "--package", "overseer-cli", "--release"]),
+        "cargo build (CLI)",
+    )?;
     if let Some(dir) = executable.parent() {
         fs::create_dir_all(dir)?;
     }
-    let built = target
-        .join("release")
-        .join(format!("overseer-ui{}", std::env::consts::EXE_SUFFIX));
-    fs::copy(&built, executable)
-        .map_err(|error| format!("cannot copy {}: {error}", built.display()))?;
+    let release = target.join("release");
+    for (built, copy) in [
+        ("overseer-ui", executable.to_owned()),
+        ("overseer", cli(executable)),
+    ] {
+        let built = release.join(format!("{built}{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(&built, &copy)
+            .map_err(|error| format!("cannot copy {}: {error}", built.display()))?;
+    }
     Ok(())
 }
 
@@ -256,8 +276,10 @@ fn credentials(service: &str) -> Result<Vec<String>, Error> {
         .collect())
 }
 
-/// The data directories of the app with identifier `identifier`: its configuration (saved
-/// window state) and its local data (the `WebView2` profile).
+/// The data directories of the app with identifier `identifier`:
+/// - its configuration directory (Tauri's `app_config_dir`, also the one of
+///   `overseer_storage::native::Storage::open`): the saved window state and the profiles file;
+/// - its local data: the `WebView2` profile.
 fn data_dirs(identifier: &str) -> Vec<PathBuf> {
     ["APPDATA", "LOCALAPPDATA"]
         .into_iter()

@@ -9,11 +9,15 @@
 //! A popped-out window ([`Route::Window`] at start) shares the stored tokens but never writes
 //! the saved profiles or [`Saved`] state, and never deletes a token: the main window owns
 //! them.
+//!
+//! In the shell, the saved profiles are the profiles file that the CLI shares ([`profiles`]).
+
+mod profiles;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::{Auth, ConnectionStatus, Notice, Overseer};
-use overseer_storage::profiles::{Profiles, SavedUser, Server, token_key};
+use overseer_storage::profiles::{Change, Profiles, Server, token_key};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::platform::{self, Platform};
@@ -21,6 +25,8 @@ use crate::profiles::Slugs as _;
 use crate::route::Route;
 use crate::saved::Saved;
 use crate::session::{self, Failure};
+
+pub use self::profiles::load as load_profiles;
 
 /// Shown when a stored token is rejected.
 const EXPIRED: &str = "Your session has expired. Sign in again.";
@@ -136,17 +142,26 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// A fresh state on the start screen.
-    pub fn new(platform: Platform) -> Self {
+    /// A fresh state on the start screen, with the saved profiles at the start (`profiles`, see
+    /// [`load_profiles`]). When they could not be loaded, the list of `localStorage` shows and
+    /// the banner says why.
+    pub fn new(platform: Platform, profiles: Result<Profiles, String>) -> Self {
+        let (profiles, banner) = match profiles {
+            Ok(profiles) => (profiles, None),
+            Err(error) => (
+                overseer_storage::web::load_profiles(),
+                Some(format!("Could not load the server list: {error}")),
+            ),
+        };
         Self {
             platform: StoredValue::new(platform),
-            profiles: RwSignal::new(platform::load_profiles()),
+            profiles: RwSignal::new(profiles),
             saved: RwSignal::new(platform::load_saved()),
             route: RwSignal::new(Route::Servers),
             screen: RwSignal::new(Screen::Starting("Starting…".to_owned())),
             session: RwSignal::new_local(None),
             status: RwSignal::new(None),
-            banner: RwSignal::new(None),
+            banner: RwSignal::new(banner),
             popout: StoredValue::new(false),
             epoch: StoredValue::new(0),
             resuming: StoredValue::new(None),
@@ -169,7 +184,8 @@ impl AppState {
     }
 
     /// Starts on the URL's route, else the last route, else the server list; follows the
-    /// URL hash (back, forward, edited links) and keeps the route's server connected.
+    /// URL hash (back, forward, edited links) and keeps the route's server connected. In the
+    /// shell, also follows the profiles file ([`profiles`]).
     pub fn start(self) {
         let hash = platform::location_hash();
         let route = if hash.is_empty() || hash == "#" {
@@ -195,6 +211,7 @@ impl AppState {
         });
         // The app lives as long as the page.
         std::mem::forget(listener);
+        self.follow_storage();
         Effect::new(move |_| {
             let route = self.route.get();
             self.follow_route(&route);
@@ -290,18 +307,6 @@ impl AppState {
             .session
             .with_untracked(|session| session.as_ref().map(|session| session.server.clone()))?;
         self.server(&url)
-    }
-
-    /// Changes the saved profiles and saves them (not in a popped-out window).
-    pub fn update_profiles(self, change: impl FnOnce(&mut Profiles)) {
-        self.profiles.update(change);
-        if self.is_popout() {
-            return;
-        }
-        if let Err(error) = self.profiles.with_untracked(platform::save_profiles) {
-            self.banner
-                .set(Some(format!("Could not save the server list: {error}")));
-        }
     }
 
     /// Changes the saved state and saves it (not in a popped-out window).
@@ -408,25 +413,21 @@ impl AppState {
         }));
         self.status.set(Some(*overseer.status().borrow()));
         self.banner.set(None);
-        let user_id = overseer.user_id().map(str::to_owned);
-        self.update_profiles(|profiles| {
-            if let Some(server) = profiles.server_mut(url) {
-                let saved = server.user.take();
-                let api_token = match &start {
-                    Start::Resumed => saved.as_ref().and_then(|user| user.api_token),
-                    Start::Password(_) => Some(false),
-                    Start::ApiToken => Some(true),
-                };
-                if let Start::Password(Some(login)) = start {
-                    server.login = Some(login);
-                }
-                let username = saved.and_then(|user| user.username);
-                server.user = user_id.map(|id| SavedUser {
-                    id,
-                    username,
-                    api_token,
-                });
-            }
+        // The saved sign-in kind stays when the session resumes.
+        let api_token = match &start {
+            Start::Resumed => None,
+            Start::Password(_) => Some(false),
+            Start::ApiToken => Some(true),
+        };
+        let login = match start {
+            Start::Password(login) => login,
+            Start::Resumed | Start::ApiToken => None,
+        };
+        self.save_change(Change::SignedIn {
+            url: url.to_owned(),
+            user_id: overseer.user_id().map(str::to_owned),
+            api_token,
+            login,
         });
         self.follow_tokens(epoch, url, &overseer);
         self.follow_status(epoch, &overseer);
@@ -468,14 +469,16 @@ impl AppState {
 
     /// Saves the username of the account signed in on `url`.
     pub fn remember_username(self, url: &str, username: Option<String>) {
-        self.update_profiles(|profiles| {
-            if let Some(user) = profiles
-                .server_mut(url)
-                .and_then(|server| server.user.as_mut())
-            {
-                user.username = username;
-            }
+        self.save_change(Change::Username {
+            url: url.to_owned(),
+            username,
         });
+    }
+
+    /// Applies `change` to the saved profiles ([`Self::change_profiles`]); only adding a server
+    /// can fail, and this never adds one.
+    fn save_change(self, change: Change) {
+        let _ = self.change_profiles(change);
     }
 
     /// Whether `epoch` is the live session.
@@ -503,7 +506,10 @@ impl AppState {
                     && stored.as_ref() != Some(&token)
                 {
                     match platform.secret_set(&key, &token).await {
-                        Ok(()) => stored = Some(token),
+                        Ok(()) => {
+                            stored = Some(token);
+                            profiles::token_stored(epoch);
+                        }
                         Err(error) => self
                             .banner
                             .set(Some(format!("Could not store the session token: {error}"))),
@@ -628,6 +634,9 @@ impl AppState {
         };
         self.disconnect().await;
         if forget {
+            self.forget_user(&session.server);
+            // The profiles file never names a sign-in whose token is gone.
+            self.profiles_saved().await;
             if let Err(error) = self
                 .platform()
                 .secret_delete(&token_key(&session.server))
@@ -636,7 +645,6 @@ impl AppState {
                 self.banner
                     .set(Some(format!("Could not delete the stored token: {error}")));
             }
-            self.forget_user(&session.server);
         }
         self.screen.set(Screen::SignIn {
             server: session.server,
@@ -646,10 +654,8 @@ impl AppState {
 
     /// Marks the server with base URL `url` signed out.
     fn forget_user(self, url: &str) {
-        self.update_profiles(|profiles| {
-            if let Some(server) = profiles.server_mut(url) {
-                server.user = None;
-            }
+        self.save_change(Change::SignedOut {
+            url: url.to_owned(),
         });
     }
 }
