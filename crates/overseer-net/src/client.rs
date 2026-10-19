@@ -149,8 +149,8 @@ impl Client {
     /// Whether the server has replaced a held token through an `X-Token` reply since the client
     /// was built: it issues session tokens that expire unless used, such as the one-minute
     /// tokens of private servers, which every authenticated reply replaces. Sign-ins,
-    /// [`Self::set_token`] and the socket's `auth ok` do not count; screeps.com API tokens never
-    /// rotate.
+    /// [`Self::set_token`] and the socket's `auth ok` do not count; API tokens (screeps.com,
+    /// `OpenScreeps`, screepsmod-auth) never rotate.
     #[must_use]
     pub fn rotates_tokens(&self) -> bool {
         self.inner.rotated.load(Ordering::Relaxed)

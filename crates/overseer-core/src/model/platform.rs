@@ -133,7 +133,8 @@ pub enum Subsystem {
     /// ([`Self::AccountWebsite`]).
     PasswordAccounts,
     /// Persistent API tokens of the account (`GET`/`POST /api/user/auth-token`,
-    /// `POST /api/user/delete-auth-token`): screeps.com, screepsmod-auth.
+    /// `POST /api/user/delete-auth-token`): screeps.com, `OpenScreeps`, screepsmod-auth. They
+    /// never expire and the server never replaces them, so a saved sign-in stays valid.
     ApiTokens,
     /// Lifting the rate limits of an API token for a while (`noRatelimitUntil`): on a web page
     /// (screeps.com, a reCAPTCHA) or with one request (screepsmod-auth's
@@ -248,6 +249,7 @@ impl Subsystems {
             ServerKind::OpenScreeps => Self::NONE
                 .with(Subsystem::PasswordSignIn)
                 .with(Subsystem::PasswordAccounts)
+                .with(Subsystem::ApiTokens)
                 .with(Subsystem::UsernameLookup)
                 .with(Subsystem::RoomObjects)
                 .with(Subsystem::RoomHistory)
@@ -263,8 +265,8 @@ impl Subsystems {
     ///
     /// - screeps.com: everything but [`Subsystem::PasswordAccounts`] (its website registers
     ///   accounts and changes passwords).
-    /// - `OpenScreeps`: everything but [`Subsystem::ApiTokens`], [`Subsystem::RateLimitLift`],
-    ///   [`Subsystem::AccountWebsite`], [`Subsystem::CpuShards`] and
+    /// - `OpenScreeps`: everything but [`Subsystem::RateLimitLift`] (it does not rate-limit
+    ///   its API tokens), [`Subsystem::AccountWebsite`], [`Subsystem::CpuShards`] and
     ///   [`Subsystem::ShardsInfo`].
     /// - The stock community server: none; screepsmod-auth adds password sign-in, password
     ///   accounts, API tokens, lifting their rate limits and the username lookup,
@@ -832,6 +834,7 @@ mod tests {
         let openscreeps = [
             PasswordSignIn,
             PasswordAccounts,
+            ApiTokens,
             UsernameLookup,
             RoomObjects,
             RoomHistory,

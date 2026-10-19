@@ -229,7 +229,7 @@ async fn openscreeps_servers_list_their_feature() {
     );
     let api = client.api().await.unwrap();
     assert_accessors_follow_subsystems(&api, &server).await;
-    assert!(api.api_tokens().is_none());
+    assert!(api.api_tokens().is_some());
     assert!(api.password_account().is_some());
     let sign_in = api.password_sign_in().unwrap();
     assert!(sign_in.accepts_username());

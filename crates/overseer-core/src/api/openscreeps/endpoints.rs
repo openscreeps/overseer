@@ -23,7 +23,7 @@ use crate::api::{Auth, Endpoint, Format, Query};
 ///
 /// Returns the private profile of the account owning the token: id, username, e-mail (and an unconfirmed `emailDirty`), CPU, badge, GCL/power progress, credit balance (`money`), notification preferences, linked Steam/GitHub data, shard CPU limits (`cpuShard`, `cpuShardUpdatedTime`), account resources and power-creep experimentation state. Only fields present in storage are serialized. The official web client calls it after storing a token and keeps the result as the signed-in account; node-screeps-api resolves restricted tokens through `GET /api/user/name` + `GET /api/user/find` instead.
 ///
-/// Standalone: Returns the private-server projection only (`_id`, `email`, `emailDirty`, `username`, `cpu`, `badge`, `password`, `lastRespawnDate`, `notifyPrefs`, `gcl`, `lastChargeTime`, `blocked`, `customBadge`, `power`, `money`, `steam`, `powerExperimentations`, `powerExperimentationTime`); never `cpuShard`, `cpuShardUpdatedTime`, `resources`, SSO links or legacy fields. `steam` is an empty object when no Steam account is linked. Token may be sent as `X-Token`, `Authorization: Bearer`, or `?token=`; each authenticated call issues a fresh token in the `X-Token` response header (default lifetime 60 s).
+/// Standalone: Returns the private-server projection only (`_id`, `email`, `emailDirty`, `username`, `cpu`, `badge`, `password`, `lastRespawnDate`, `notifyPrefs`, `gcl`, `lastChargeTime`, `blocked`, `customBadge`, `power`, `money`, `steam`, `powerExperimentations`, `powerExperimentationTime`); never `cpuShard`, `cpuShardUpdatedTime`, `resources`, SSO links or legacy fields. `steam` is an empty object when no Steam account is linked. Token may be sent as `X-Token`, `Authorization: Bearer`, or `?token=`; each call authenticated with a session token issues a fresh session token in the `X-Token` response header (default lifetime 60 s). Persistent API tokens (`POST /api/user/auth-token`) are never replaced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuthMe;
 
@@ -33,6 +33,29 @@ impl Endpoint for AuthMe {
     const PATH: &'static str = "api/auth/me";
     const AUTH: Auth = Auth::Required;
     const FORMAT: Format = Format::Envelope;
+}
+
+/// `GET /api/auth/query-token`: Inspect an API token.
+///
+/// Returns the permissions of a screeps.com account auth token: whether it has full access, or the REST endpoints and WebSocket channel groups it is restricted to, plus its description. node-screeps-api calls it to decide between `GET /api/auth/me` and the restricted `GET /api/user/name` lookup. Unrecognized tokens produce an HTTP error.
+///
+/// Standalone: Unauthenticated. Looks up a persistent API token (`POST /api/user/auth-token`) by its full value and answers `{ok: 1, _id, token: {full: true, token, description}}`, where `_id` is the token's entry id, `token.token` the value sent and `description` absent when none. Session tokens and unknown tokens answer HTTP 200 `{error: "token not found"}`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthQueryToken {
+    /// The API token to inspect.
+    pub token: String,
+}
+
+impl Endpoint for AuthQueryToken {
+    type Response = types::AuthQueryTokenResponse;
+    const METHOD: Method = Method::GET;
+    const PATH: &'static str = "api/auth/query-token";
+    const AUTH: Auth = Auth::None;
+    const FORMAT: Format = Format::Envelope;
+
+    fn query(&self, query: &mut Query<'_>) {
+        query.pair("token", &self.token);
+    }
 }
 
 /// `POST /api/auth/signin`: Sign in with password.
@@ -1109,6 +1132,45 @@ impl Endpoint for PlatformSteamNews {
     const FORMAT: Format = Format::Envelope;
 }
 
+/// `GET /api/user/auth-token`: List API auth tokens.
+///
+/// Lists the signed-in account's API auth tokens for the official account page (`/account/auth-tokens`). The client reads `tokens` and renders it.
+///
+/// Standalone: Lists the caller's persistent API tokens, oldest first. Each entry holds `_id`, `token` (the first 8 characters of the token), `full` (always `true`) and `description` (`null` when none). Entries never carry `noRatelimitUntil`: `OpenScreeps` does not rate-limit API tokens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserAuthTokenList;
+
+impl Endpoint for UserAuthTokenList {
+    type Response = types::UserAuthTokenListResponse;
+    const METHOD: Method = Method::GET;
+    const PATH: &'static str = "api/user/auth-token";
+    const AUTH: Auth = Auth::Required;
+    const FORMAT: Format = Format::Envelope;
+}
+
+/// `POST /api/user/auth-token`: Generate an API auth token.
+///
+/// Generates a persistent API auth token for the signed-in account. The official form posts its whole model: `type` (`full` by default), per-endpoint permissions in `endpoints`, websocket permissions in `websockets` and a `memorySegments` string. The client shows the returned `token` once ("it will not be shown again") and reloads the token list.
+///
+/// Standalone: `type` absent or `full` creates a full-access token; `endpoints`, `websockets` and `memorySegments` are then ignored, as the official form posts them with every request. An optional `description` must be a string of at most 100 characters (`invalid params` otherwise). The reply's `token` is a random UUID, shown only this once: the server stores a SHA-256 hash of it and its first 8 characters. The token never expires and is never rotated: responses to requests that it authenticates carry no `X-Token`, and the socket's `auth ok` returns it unchanged. It is accepted wherever session tokens are: the `X-Token` header, `Authorization: Bearer`, the `token` query parameter and the socket `auth` command. An account holds at most 100 tokens (`too many tokens`). Deleting the account removes its tokens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UserAuthTokenCreate<'a> {
+    /// The JSON request body.
+    pub body: types::UserAuthTokenCreateRequest<'a>,
+}
+
+impl Endpoint for UserAuthTokenCreate<'_> {
+    type Response = types::UserAuthTokenCreateResponse;
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = "api/user/auth-token";
+    const AUTH: Auth = Auth::Required;
+    const FORMAT: Format = Format::Envelope;
+
+    fn body(&self) -> Result<Option<Vec<u8>>, serde_json::Error> {
+        serde_json::to_vec(&self.body).map(Some)
+    }
+}
+
 /// `POST /api/user/badge`: Set the account badge.
 ///
 /// Validates and stores the player's badge: colors `#rrggbb`, `param` -100..100, `type` 1-24 or exactly the caller's assigned custom badge paths; `flip` is coerced to boolean. Any violation yields `invalid params`.
@@ -1302,6 +1364,29 @@ impl Endpoint for UserDecorationsThemes {
     const PATH: &'static str = "api/user/decorations/themes";
     const AUTH: Auth = Auth::Required;
     const FORMAT: Format = Format::Envelope;
+}
+
+/// `POST /api/user/delete-auth-token`: Revoke an API auth token.
+///
+/// Revokes one of the signed-in account's API auth tokens; the official account page reloads the token list on success.
+///
+/// Standalone: `tokenId` is the `_id` of one of the caller's tokens from `GET /api/user/auth-token`; an unknown id or a token of another account answers `{error: "token not found"}`. The deletion takes effect at once: later requests with the token answer HTTP 401, and socket sessions authenticated with it are closed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UserAuthTokenDelete<'a> {
+    /// The JSON request body.
+    pub body: types::UserAuthTokenDeleteRequest<'a>,
+}
+
+impl Endpoint for UserAuthTokenDelete<'_> {
+    type Response = types::Ok;
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = "api/user/delete-auth-token";
+    const AUTH: Auth = Auth::Required;
+    const FORMAT: Format = Format::Envelope;
+
+    fn body(&self) -> Result<Option<Vec<u8>>, serde_json::Error> {
+        serde_json::to_vec(&self.body).map(Some)
+    }
 }
 
 /// `POST /api/user/delete-branch`: Delete a branch.
@@ -1627,7 +1712,7 @@ impl Endpoint for UserMoneyHistoryDetails {
 ///
 /// Returns only the username of the token owner. Usable with restricted auth tokens (node-screeps-api uses it with `GET /api/user/find` when the token is not full-access).
 ///
-/// Standalone: Returns the username of the session token owner (standalone session tokens are always full-access).
+/// Standalone: Returns the username of the token owner (`OpenScreeps` session tokens and API tokens are always full-access).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UserName;
 
@@ -1696,7 +1781,7 @@ impl Endpoint for UserOverview {
 ///
 /// Changes the signed-in account's password. The official account page posts the current password as \``oldPassword`\` and the new one as \`password\`, then re-reads \`GET /api/auth/me\` and returns to the account page. The official client only submits passwords that consist of letters, digits and \`!@#$%^&\*(),./\\[\]{}'";=+\|_-?~\`:\<\>\` characters and contain at least one digit and one non-digit.
 ///
-/// Standalone: Standalone servers sign players in with username or e-mail plus password (\`POST /api/auth/signin\`); this operation changes that local password. `OpenScreeps` revokes the account's tokens and authenticated socket sessions whenever a password changes, so the client must sign in again afterwards.
+/// Standalone: Standalone servers sign players in with username or e-mail plus password (\`POST /api/auth/signin\`); this operation changes that local password. `OpenScreeps` revokes the account's session tokens and closes its authenticated socket sessions whenever a password changes, so the client must sign in again afterwards. Persistent API tokens (\`POST /api/user/auth-token\`) stay valid until they are deleted.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UserPasswordSet<'a> {
     /// The JSON request body.

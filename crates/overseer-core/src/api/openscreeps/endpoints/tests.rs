@@ -46,6 +46,14 @@ fn auth_me() {
 }
 
 #[test]
+fn auth_query_token() {
+    let endpoint = super::AuthQueryToken {
+        token: "a b/é".to_owned(),
+    };
+    check(&endpoint, "/api/auth/query-token", &["token=a+b%2F%C3%A9"]);
+}
+
+#[test]
 fn auth_signin() {
     let endpoint = super::AuthSignin {
         body: serde_json::from_str(r#"{"email":"x","password":"x"}"#).unwrap(),
@@ -489,6 +497,19 @@ fn platform_steam_news() {
 }
 
 #[test]
+fn user_auth_token_list() {
+    check(&super::UserAuthTokenList, "/api/user/auth-token", &[]);
+}
+
+#[test]
+fn user_auth_token_create() {
+    let endpoint = super::UserAuthTokenCreate {
+        body: serde_json::from_str(r"{}").unwrap(),
+    };
+    check(&endpoint, "/api/user/auth-token", &[]);
+}
+
+#[test]
 fn user_badge_set() {
     let endpoint = super::UserBadgeSet {
         body: serde_json::from_str(
@@ -568,6 +589,14 @@ fn user_decorations_themes() {
         "/api/user/decorations/themes",
         &[],
     );
+}
+
+#[test]
+fn user_auth_token_delete() {
+    let endpoint = super::UserAuthTokenDelete {
+        body: serde_json::from_str(r#"{"tokenId":"x"}"#).unwrap(),
+    };
+    check(&endpoint, "/api/user/delete-auth-token", &[]);
 }
 
 #[test]

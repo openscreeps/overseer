@@ -40,7 +40,7 @@
       "get": {
         "operationId": "authMe",
         "summary": "Get the authenticated account",
-        "description": "Returns the private profile of the account owning the token: id, username, e-mail (and an unconfirmed `emailDirty`), CPU, badge, GCL/power progress, credit balance (`money`), notification preferences, linked Steam/GitHub data, shard CPU limits (`cpuShard`, `cpuShardUpdatedTime`), account resources and power-creep experimentation state. Only fields present in storage are serialized. The official web client calls it after storing a token and keeps the result as the signed-in account; node-screeps-api resolves restricted tokens through `GET /api/user/name` + `GET /api/user/find` instead.\n\nStandalone: Returns the private-server projection only (`_id`, `email`, `emailDirty`, `username`, `cpu`, `badge`, `password`, `lastRespawnDate`, `notifyPrefs`, `gcl`, `lastChargeTime`, `blocked`, `customBadge`, `power`, `money`, `steam`, `powerExperimentations`, `powerExperimentationTime`); never `cpuShard`, `cpuShardUpdatedTime`, `resources`, SSO links or legacy fields. `steam` is an empty object when no Steam account is linked. Token may be sent as `X-Token`, `Authorization: Bearer`, or `?token=`; each authenticated call issues a fresh token in the `X-Token` response header (default lifetime 60 s).",
+        "description": "Returns the private profile of the account owning the token: id, username, e-mail (and an unconfirmed `emailDirty`), CPU, badge, GCL/power progress, credit balance (`money`), notification preferences, linked Steam/GitHub data, shard CPU limits (`cpuShard`, `cpuShardUpdatedTime`), account resources and power-creep experimentation state. Only fields present in storage are serialized. The official web client calls it after storing a token and keeps the result as the signed-in account; node-screeps-api resolves restricted tokens through `GET /api/user/name` + `GET /api/user/find` instead.\n\nStandalone: Returns the private-server projection only (`_id`, `email`, `emailDirty`, `username`, `cpu`, `badge`, `password`, `lastRespawnDate`, `notifyPrefs`, `gcl`, `lastChargeTime`, `blocked`, `customBadge`, `power`, `money`, `steam`, `powerExperimentations`, `powerExperimentationTime`); never `cpuShard`, `cpuShardUpdatedTime`, `resources`, SSO links or legacy fields. `steam` is an empty object when no Steam account is linked. Token may be sent as `X-Token`, `Authorization: Bearer`, or `?token=`; each call authenticated with a session token issues a fresh session token in the `X-Token` response header (default lifetime 60 s). Persistent API tokens (`POST /api/user/auth-token`) are never replaced.",
         "tags": [
           "Auth"
         ],
@@ -121,6 +121,65 @@
           "overriddenComponents": [
             "#/components/parameters/ServerPassword",
             "#/components/schemas/AuthSteamAccount"
+          ]
+        }
+      }
+    },
+    "/api/auth/query-token": {
+      "get": {
+        "operationId": "authQueryToken",
+        "summary": "Inspect an API token",
+        "description": "Returns the permissions of a screeps.com account auth token: whether it has full access, or the REST endpoints and WebSocket channel groups it is restricted to, plus its description. node-screeps-api calls it to decide between `GET /api/auth/me` and the restricted `GET /api/user/name` lookup. Unrecognized tokens produce an HTTP error.\n\nStandalone: Unauthenticated. Looks up a persistent API token (`POST /api/user/auth-token`) by its full value and answers `{ok: 1, _id, token: {full: true, token, description}}`, where `_id` is the token's entry id, `token.token` the value sent and `description` absent when none. Session tokens and unknown tokens answer HTTP 200 `{error: \"token not found\"}`.",
+        "tags": [
+          "Auth"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "description": "The API token to inspect.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/ServerPassword"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success, or a logical error in the HTTP 200 `{error}` envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AuthQueryTokenResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        },
+        "x-sources": [
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsHttpClient.ts#L456-L467",
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/auth.ts#L76-L84",
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/http/auth.ts#L86-L104",
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/src/ScreepsHttpClient.ts#L2185-L2203"
+        ],
+        "x-profile": {
+          "status": "required",
+          "overriddenComponents": [
+            "#/components/parameters/ServerPassword"
           ]
         }
       }
@@ -4332,6 +4391,204 @@
         }
       }
     },
+    "/api/user/auth-token": {
+      "get": {
+        "operationId": "userAuthTokenList",
+        "summary": "List API auth tokens",
+        "description": "Lists the signed-in account's API auth tokens for the official account page (`/account/auth-tokens`). The client reads `tokens` and renders it.\n\nStandalone: Lists the caller's persistent API tokens, oldest first. Each entry holds `_id`, `token` (the first 8 characters of the token), `full` (always `true`) and `description` (`null` when none). Entries never carry `noRatelimitUntil`: OpenScreeps does not rate-limit API tokens.",
+        "tags": [
+          "User"
+        ],
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LegacyUsername"
+          },
+          {
+            "$ref": "#/components/parameters/ServerPassword"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success, or a logical error in the HTTP 200 `{error}` envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/UserAuthTokenListResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "X-Token": {
+                "description": "Rotated session token when issued by the server; store it for subsequent authenticated requests.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "x-sources": [
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C264481",
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/guides/servers.md#L19-L21"
+        ],
+        "x-unverified": "Only a full-access token was observed; the fields restricted tokens carry for their allowed endpoints, websockets and memory segments are not evidenced.",
+        "x-profile": {
+          "status": "required",
+          "overriddenComponents": [
+            "#/components/parameters/ServerPassword"
+          ]
+        }
+      },
+      "post": {
+        "operationId": "userAuthTokenCreate",
+        "summary": "Generate an API auth token",
+        "description": "Generates a persistent API auth token for the signed-in account. The official form posts its whole model: `type` (`full` by default), per-endpoint permissions in `endpoints`, websocket permissions in `websockets` and a `memorySegments` string. The client shows the returned `token` once (\"it will not be shown again\") and reloads the token list.\n\nStandalone: `type` absent or `full` creates a full-access token; `endpoints`, `websockets` and `memorySegments` are then ignored, as the official form posts them with every request. An optional `description` must be a string of at most 100 characters (`invalid params` otherwise). The reply's `token` is a random UUID, shown only this once: the server stores a SHA-256 hash of it and its first 8 characters. The token never expires and is never rotated: responses to requests that it authenticates carry no `X-Token`, and the socket's `auth ok` returns it unchanged. It is accepted wherever session tokens are: the `X-Token` header, `Authorization: Bearer`, the `token` query parameter and the socket `auth` command. An account holds at most 100 tokens (`too many tokens`). Deleting the account removes its tokens.",
+        "tags": [
+          "User"
+        ],
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LegacyUsername"
+          },
+          {
+            "$ref": "#/components/parameters/ServerPassword"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "description": "Token type; the form default is `full`."
+                  },
+                  "endpoints": {
+                    "type": "object",
+                    "description": "Endpoint permissions keyed `METHOD /api/path`; the form offers `GET /api/user/name`, `GET /api/user/money-history`, `GET /api/market/my-orders`, `GET /api/user/memory`, `GET /api/user/memory-segment` and `POST /api/user/memory-segment` (all `false` by default).",
+                    "additionalProperties": {
+                      "type": "boolean"
+                    }
+                  },
+                  "websockets": {
+                    "type": "object",
+                    "description": "Websocket permissions (form defaults `console: false`, `rooms: false`).",
+                    "properties": {
+                      "console": {
+                        "type": "boolean"
+                      },
+                      "rooms": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": true
+                  },
+                  "memorySegments": {
+                    "type": "string",
+                    "description": "Memory segment selection entered as text (empty by default)."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success, or a logical error in the HTTP 200 `{error}` envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/UserAuthTokenCreateResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "X-Token": {
+                "description": "Rotated session token when issued by the server; store it for subsequent authenticated requests.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "x-sources": [
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C271268",
+          "https://github.com/screepers/node-screeps-api/blob/0f861874ff119b7ba37d0d1a4beb90f096209f4e/guides/servers.md#L19-L21"
+        ],
+        "x-unverified": "Token `type` values other than `full`, the `memorySegments` syntax and how restricted permissions are enforced are defined by the page template/server and not evidenced.",
+        "x-profile": {
+          "status": "adapted",
+          "reason": "OpenScreeps creates full-access tokens only: a `type` other than `full` answers `{error: \"restricted tokens are not supported\"}` and creates no token. The official contract does not establish how screeps.com enforces restricted endpoints, websockets and Memory segments, and a full-access token would grant more than the request asks for.",
+          "overriddenComponents": [
+            "#/components/parameters/ServerPassword"
+          ]
+        }
+      }
+    },
     "/api/user/badge": {
       "post": {
         "operationId": "userBadgeSet",
@@ -5145,6 +5402,104 @@
         "x-profile": {
           "status": "adapted",
           "reason": "No hosted pixel/decoration economy on a standalone server: the theme list is always empty.",
+          "overriddenComponents": [
+            "#/components/parameters/ServerPassword"
+          ]
+        }
+      }
+    },
+    "/api/user/delete-auth-token": {
+      "post": {
+        "operationId": "userAuthTokenDelete",
+        "summary": "Revoke an API auth token",
+        "description": "Revokes one of the signed-in account's API auth tokens; the official account page reloads the token list on success.\n\nStandalone: `tokenId` is the `_id` of one of the caller's tokens from `GET /api/user/auth-token`; an unknown id or a token of another account answers `{error: \"token not found\"}`. The deletion takes effect at once: later requests with the token answer HTTP 401, and socket sessions authenticated with it are closed.",
+        "tags": [
+          "User"
+        ],
+        "security": [
+          {
+            "Token": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LegacyUsername"
+          },
+          {
+            "$ref": "#/components/parameters/ServerPassword"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tokenId": {
+                    "type": "string",
+                    "description": "Identifier of the token entry (from the template-bound token list)."
+                  }
+                },
+                "additionalProperties": true,
+                "required": [
+                  "tokenId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success, or a logical error in the HTTP 200 `{error}` envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Ok"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "X-Token": {
+                "description": "Rotated session token when issued by the server; store it for subsequent authenticated requests.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "X-RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "x-sources": [
+          "https://screeps.com/a/build.min.js?bust=1787842760865#L1C271645"
+        ],
+        "x-unverified": "The `tokenId` value (which `tokens` entry field it comes from) and error strings are not evidenced.",
+        "x-profile": {
+          "status": "required",
           "overriddenComponents": [
             "#/components/parameters/ServerPassword"
           ]
@@ -6477,7 +6832,7 @@
       "get": {
         "operationId": "userName",
         "summary": "Get the caller's username",
-        "description": "Returns only the username of the token owner. Usable with restricted auth tokens (node-screeps-api uses it with `GET /api/user/find` when the token is not full-access).\n\nStandalone: Returns the username of the session token owner (standalone session tokens are always full-access).",
+        "description": "Returns only the username of the token owner. Usable with restricted auth tokens (node-screeps-api uses it with `GET /api/user/find` when the token is not full-access).\n\nStandalone: Returns the username of the token owner (OpenScreeps session tokens and API tokens are always full-access).",
         "tags": [
           "User"
         ],
@@ -6757,7 +7112,7 @@
       "post": {
         "operationId": "userPasswordSet",
         "summary": "Change the account password",
-        "description": "Changes the signed-in account's password. The official account page posts the current password as `oldPassword` and the new one as `password`, then re-reads `GET /api/auth/me` and returns to the account page. The official client only submits passwords that consist of letters, digits and `!@#$%^&*(),./\\[]{}'\";=+|_-?~`:<>` characters and contain at least one digit and one non-digit.\n\nStandalone: Standalone servers sign players in with username or e-mail plus password (`POST /api/auth/signin`); this operation changes that local password. OpenScreeps revokes the account's tokens and authenticated socket sessions whenever a password changes, so the client must sign in again afterwards.",
+        "description": "Changes the signed-in account's password. The official account page posts the current password as `oldPassword` and the new one as `password`, then re-reads `GET /api/auth/me` and returns to the account page. The official client only submits passwords that consist of letters, digits and `!@#$%^&*(),./\\[]{}'\";=+|_-?~`:<>` characters and contain at least one digit and one non-digit.\n\nStandalone: Standalone servers sign players in with username or e-mail plus password (`POST /api/auth/signin`); this operation changes that local password. OpenScreeps revokes the account's session tokens and closes its authenticated socket sessions whenever a password changes, so the client must sign in again afterwards. Persistent API tokens (`POST /api/user/auth-token`) stay valid until they are deleted.",
         "tags": [
           "User"
         ],
@@ -8040,6 +8395,61 @@
           "powerExperimentations"
         ],
         "description": "Private profile of the authenticated account. Fields absent from storage are omitted."
+      },
+      "AuthQueryTokenResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "integer",
+            "const": 1,
+            "description": "Success marker; every JSON success body carries `ok: 1`."
+          },
+          "_id": {
+            "type": "string"
+          },
+          "token": {
+            "$ref": "#/components/schemas/AuthQueryTokenResult"
+          }
+        },
+        "required": [
+          "ok",
+          "_id",
+          "token"
+        ]
+      },
+      "AuthQueryTokenResult": {
+        "type": "object",
+        "properties": {
+          "full": {
+            "type": "boolean",
+            "description": "True if the token may call every endpoint; otherwise `endpoints`/`websockets` list the permitted ones."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permitted REST endpoints, e.g. `GET /api/user/name`."
+          },
+          "websockets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permitted WebSocket channel groups, e.g. `WebSockets (console)`."
+          },
+          "token": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "description": "Name supplied when the token was generated."
+          }
+        },
+        "required": [
+          "full",
+          "token"
+        ]
       },
       "AuthSigninRequest": {
         "type": "object",
@@ -18615,6 +19025,79 @@
           "shard3"
         ]
       },
+      "UserAuthTokenCreateResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "integer",
+            "const": 1
+          },
+          "token": {
+            "type": "string",
+            "description": "The generated token, shown once."
+          }
+        },
+        "required": [
+          "ok",
+          "token"
+        ],
+        "additionalProperties": true
+      },
+      "UserAuthTokenListEntry": {
+        "type": "object",
+        "description": "One API token of the account.",
+        "properties": {
+          "_id": {
+            "type": "string",
+            "description": "Token id, passed as `id` to `POST /api/user/delete-auth-token`."
+          },
+          "token": {
+            "type": "string",
+            "description": "The token."
+          },
+          "full": {
+            "type": "boolean",
+            "description": "Whether the token grants full access; restricted tokens list their allowed endpoints and websockets."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Description given at creation; `null` when none."
+          },
+          "noRatelimitUntil": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Real time in Unix milliseconds until which the token is exempt from rate limits."
+          }
+        },
+        "required": [
+          "_id",
+          "token",
+          "full"
+        ],
+        "additionalProperties": true
+      },
+      "UserAuthTokenListResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "integer",
+            "const": 1
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserAuthTokenListEntry"
+            }
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": true
+      },
       "UserBadge": {
         "type": "object",
         "description": "Player badge (`users.badge`) used to render the player icon.",
@@ -20500,8 +20983,8 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Token",
-        "description": "Session token issued by the standalone server (for example by `authSignin` or `authSteamTicket`). Successful authenticated responses may rotate it in the X-Token response header; store the latest value. Never send tokens to untrusted hosts or follow authenticated cross-host redirects.",
-        "x-profile-reason": "Standalone servers issue their own session tokens instead of screeps.com account tokens."
+        "description": "Session token issued by the standalone server (for example by `authSignin` or `authSteamTicket`), or a persistent API token from `userAuthTokenCreate`. Successful responses to requests authenticated with a session token may rotate it in the X-Token response header; store the latest value. API tokens never expire and are never rotated. Never send tokens to untrusted hosts or follow authenticated cross-host redirects.",
+        "x-profile-reason": "Standalone servers issue their own short-lived session tokens and persistent API tokens instead of screeps.com account tokens."
       }
     }
   },

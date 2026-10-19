@@ -71,7 +71,6 @@ async fn a_discovered_session_reports_its_subsystems_and_connection() {
     // Absent subsystems fail at once.
     let requested = server.requests().len();
     let account = overseer.account();
-    assert_unsupported(account.auth_tokens().await, Subsystem::ApiTokens);
     assert_unsupported(
         account.rate_limit_exemption().await,
         Subsystem::RateLimitLift,

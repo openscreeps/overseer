@@ -1,15 +1,19 @@
 //! Live tests: the account handle (profile, world status, start room, statistics, CPU and
-//! resources, badge, notification preferences) and the account edits of the profile page
-//! (e-mail and password).
+//! resources, badge, notification preferences), the account edits of the profile page
+//! (e-mail and password) and persistent API tokens.
 
+use std::time::Duration;
+
+use overseer::core::Token;
 use overseer::core::api::ApiError;
 use overseer::model::account::{
-    StartRoom, UserBadgeColor, UserBadgeInput, UserBadgeInputParam, UserBadgeInputType,
-    UserBadgeType, UserNotifyPrefs, UserRoomStatName, UserWorldStatus,
+    AuthTokenRequest, StartRoom, UserBadgeColor, UserBadgeInput, UserBadgeInputParam,
+    UserBadgeInputType, UserBadgeType, UserNotifyPrefs, UserRoomStatName, UserWorldStatus,
 };
+use overseer::model::platform::Subsystem;
 use overseer::model::socket::UserCpuCpu;
 use overseer::{Auth, Error, Overseer, ServerProfile, StatInterval, net};
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 use crate::support::{self, PATIENCE};
 
@@ -363,4 +367,110 @@ async fn wrong_current_password_is_refused() {
         .me()
         .await
         .expect("the session and the server are still up");
+}
+
+/// A session authenticated with `token` alone.
+async fn connect_with_token(token: Token) -> Result<Overseer, Error> {
+    Overseer::connect(ServerProfile {
+        url: support::url(),
+        auth: Auth::Token(token),
+        server_password: None,
+        default_shard: None,
+        server_kind: None,
+        plugins: None,
+    })
+    .await
+}
+
+/// Longer than the session-token lifetime of private servers (60 s by default).
+const SESSION_EXPIRY: Duration = Duration::from_secs(65);
+
+/// A persistent API token ([`Subsystem::ApiTokens`]): it signs in a second session, the server
+/// never replaces it, it outlives an expired session token, it is listed by its first 8
+/// characters, and its deletion revokes it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live private server: cargo xtask e2e"]
+async fn api_token_round_trip() {
+    let account = support::register().await;
+    let overseer = account.connect().await;
+    if !overseer.world().supports(Subsystem::ApiTokens) {
+        eprintln!("skipped: the server has no API tokens");
+        return;
+    }
+    let token = overseer
+        .account()
+        .create_auth_token(AuthTokenRequest {
+            kind: Some("full".to_owned()),
+            ..AuthTokenRequest::default()
+        })
+        .await
+        .expect("an API token is created");
+    // The session token of the password sign-in, kept alive only while its session runs.
+    let session_token = overseer
+        .tokens()
+        .borrow()
+        .clone()
+        .expect("the sign-in holds a session token");
+    assert_ne!(session_token, token);
+    overseer.shutdown().await;
+
+    let second = connect_with_token(token.clone())
+        .await
+        .expect("the API token signs in a second session");
+    let me = second.account().me().await.expect("the profile");
+    assert_eq!(me.username.as_deref(), Some(account.username.as_str()));
+    support::subscribed(&second).await;
+
+    sleep(SESSION_EXPIRY).await;
+    let expired = connect_with_token(session_token)
+        .await
+        .expect_err("the session token expired on the server");
+    assert!(is_unauthorized(&expired), "unexpected error: {expired:?}");
+    second
+        .account()
+        .me()
+        .await
+        .expect("the API token still authenticates after the session expiry");
+    assert_eq!(
+        second.tokens().borrow().as_ref(),
+        Some(&token),
+        "the server never replaced the API token"
+    );
+
+    let prefix = token
+        .as_str()
+        .get(..8)
+        .expect("a token of at least 8 characters");
+    let entries = second
+        .account()
+        .auth_tokens()
+        .await
+        .expect("the token list");
+    let entry = entries
+        .iter()
+        .find(|entry| entry.token.get(..8) == Some(prefix))
+        .expect("the token is listed by its first 8 characters");
+    assert!(entry.full, "a full-access token");
+    assert_ne!(entry.token, token.as_str(), "the list hides the token");
+    second
+        .account()
+        .delete_auth_token(&entry.id)
+        .await
+        .expect("the token is deleted");
+    let entries = second
+        .account()
+        .auth_tokens()
+        .await
+        .expect_err("the deleted token no longer authenticates");
+    assert!(is_unauthorized(&entries), "unexpected error: {entries:?}");
+    second.shutdown().await;
+    let refused = connect_with_token(token)
+        .await
+        .expect_err("a deleted token is refused");
+    assert!(is_unauthorized(&refused), "unexpected error: {refused:?}");
+    eprintln!(
+        "API token: created, signed in a second session, kept after {}s (session token \
+         expired), listed by its first 8 characters, deleted and refused",
+        SESSION_EXPIRY.as_secs()
+    );
 }

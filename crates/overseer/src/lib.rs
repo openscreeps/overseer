@@ -63,11 +63,12 @@
 //! session keeps it valid: whenever no new token arrived for 25 seconds it sends
 //! `GET /api/auth/me`, whose reply carries the next token ([`Overseer::tokens`] reports it like
 //! any other). Every authenticated request of the app postpones it. Tokens the server never
-//! replaces (screeps.com API tokens) and anonymous sessions cause no extra requests. A failed
-//! refresh does not end the session: a rejected token is reported as [`Notice::AuthFailed`]
-//! (refreshing then waits for a new token), other failures are tried again 25 seconds later
-//! and connection problems show in [`Overseer::status`]. After the session ends, a stored
-//! session token stays valid for about a minute.
+//! replaces (the API tokens of screeps.com, `OpenScreeps` and screepsmod-auth) and anonymous
+//! sessions cause no extra requests. A failed refresh does not end the session: a rejected
+//! token is reported as [`Notice::AuthFailed`] (refreshing then waits for a new token), other
+//! failures are tried again 25 seconds later and connection problems show in
+//! [`Overseer::status`]. After the session ends, a stored session token stays valid for about a
+//! minute.
 //!
 //! # Native and web
 //!

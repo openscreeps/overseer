@@ -31,7 +31,7 @@ Servers do not all have the same features. Overseer names each feature that can 
 |---|---|---|---|
 | `PasswordSignIn` | yes | yes | with screepsmod-auth |
 | `PasswordAccounts` (registration, password changes) | on the website | yes | with screepsmod-auth |
-| `ApiTokens` | yes | no | with screepsmod-auth |
+| `ApiTokens` (persistent tokens, never replaced) | yes | yes (full access only) | with screepsmod-auth |
 | `RateLimitLift` | yes (web page) | no | with screepsmod-auth (one request) |
 | `UsernameLookup` | yes | yes | with screepsmod-auth |
 | `AccountWebsite` | yes | no | no |
