@@ -40,6 +40,10 @@ pub use crate::api::official::types::UserWorldStatus;
 /// types (codegen re-exports the official ones from the others).
 pub use crate::api::official::types::{UserOverviewPoint, UserRoomStatName, UserRoomStatValues};
 
+/// The time after a respawn ([`Profile::last_respawn`]) in which the server refuses to place
+/// the first spawn (`POST /api/game/place-spawn`): 3 minutes, in milliseconds.
+pub const RESPAWN_COOLDOWN_MS: f64 = 3.0 * 60.0 * 1000.0;
+
 /// The signed-in user's private profile (`GET /api/auth/me`).
 ///
 /// The server sends only the fields that it stores for the account. When the reply can omit
@@ -273,6 +277,17 @@ pub struct StartRoom {
     pub room: String,
 }
 
+/// Splits the room name `name` at its first `/` into the shard and the room: `shard3/W1N1`
+/// gives `(Some("shard3"), "W1N1")`, and `W1N1` gives `(None, "W1N1")`. This function does
+/// not validate the parts.
+#[must_use]
+pub fn split_shard(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('/') {
+        Some((shard, room)) => (Some(shard), room),
+        None => (None, name),
+    }
+}
+
 /// `From` the start-room reply every contract shares: its first room, `shard/room` when the
 /// server names the shard (screeps.com asked without one), else a bare room without a shard
 /// (screeps.com asked for a shard, which the caller knows, and single-world servers).
@@ -282,12 +297,15 @@ impl From<official::UserWorldStartRoomResponse> for Option<StartRoom> {
             .room
             .into_iter()
             .next()
-            .map(|room| match room.split_once('/') {
-                Some((shard, room)) => StartRoom {
+            .map(|name| match split_shard(&name) {
+                (Some(shard), room) => StartRoom {
                     shard: Some(shard.to_owned()),
                     room: room.to_owned(),
                 },
-                None => StartRoom { shard: None, room },
+                (None, _) => StartRoom {
+                    shard: None,
+                    room: name,
+                },
             })
     }
 }

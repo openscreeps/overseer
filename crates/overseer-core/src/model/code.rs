@@ -37,6 +37,17 @@ impl CodeTarget {
             Self::Simulation => "$activeSim",
         }
     }
+
+    /// Whether the branch document `branch` marks the branch as active in this target. A
+    /// document without the mark (`false` or absent) is not active.
+    #[must_use]
+    pub fn is_active(self, branch: &UserCodeBranch) -> bool {
+        let marked = match self {
+            Self::World => branch.active_world,
+            Self::Simulation => branch.active_sim,
+        };
+        marked == Some(true)
+    }
 }
 
 /// The names of the branches active in the world and in the simulator.
@@ -64,14 +75,17 @@ impl FromIterator<UserCodeBranch> for ActiveBranches {
     fn from_iter<I: IntoIterator<Item = UserCodeBranch>>(branches: I) -> Self {
         let mut active = Self::default();
         for branch in branches {
-            match (branch.active_world, branch.active_sim) {
-                (Some(true), Some(true)) => {
+            match (
+                CodeTarget::World.is_active(&branch),
+                CodeTarget::Simulation.is_active(&branch),
+            ) {
+                (true, true) => {
                     active.world = Some(branch.branch.clone());
                     active.simulation = Some(branch.branch);
                 }
-                (Some(true), _) => active.world = Some(branch.branch),
-                (_, Some(true)) => active.simulation = Some(branch.branch),
-                _ => {}
+                (true, false) => active.world = Some(branch.branch),
+                (false, true) => active.simulation = Some(branch.branch),
+                (false, false) => {}
             }
         }
         active

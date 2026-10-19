@@ -4,6 +4,7 @@ use super::{
     AllocationError, CHANGE_COOLDOWN_MS, CpuAllocation, ShardCpu, cpu_limit, shard_cpu,
     shard_order, usable,
 };
+use crate::model::account::{Profile, UserNotifyPrefs};
 use crate::model::world::ShardInfo;
 
 /// One hour, in milliseconds.
@@ -27,6 +28,31 @@ fn a_shard_lets_the_code_use_at_most_its_cap() {
         shard_order(&["shard1".to_owned(), "shard0".to_owned()], &assigned),
         ["shard1", "shard0", "a"]
     );
+}
+
+#[test]
+fn the_assigned_cpu_of_an_unnamed_shard_or_an_unreported_account_is_zero() {
+    let mut me = Profile {
+        id: "u1".to_owned(),
+        username: Some("me".to_owned()),
+        email: None,
+        email_dirty: None,
+        has_password: None,
+        badge: None,
+        money: 0.0,
+        cpu: Some(60.0),
+        cpu_shards: BTreeMap::from([("shard3".to_owned(), 40.0)]),
+        cpu_shards_updated: None,
+        last_respawn: None,
+        gcl: None,
+        power: None,
+        notify_prefs: UserNotifyPrefs::default(),
+    };
+    assert!((me.assigned_cpu(Some("shard3")) - 40.0).abs() < 1e-9);
+    assert!(me.assigned_cpu(Some("shard0")).abs() < 1e-9);
+    assert!((me.assigned_cpu(None) - 60.0).abs() < 1e-9);
+    me.cpu = None;
+    assert!(me.assigned_cpu(None).abs() < 1e-9);
 }
 
 #[test]

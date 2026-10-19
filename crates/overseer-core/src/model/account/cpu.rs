@@ -28,6 +28,26 @@ pub fn usable(assigned: f64, cap: Option<f64>) -> f64 {
     cap.map_or(assigned, |cap| assigned.min(cap))
 }
 
+/// The CPU that the allocation `allocation` (CPU by shard) assigns to `shard`: 0 when the
+/// allocation does not name the shard.
+#[must_use]
+pub fn assigned_to(allocation: &BTreeMap<String, f64>, shard: &str) -> f64 {
+    allocation.get(shard).copied().unwrap_or(0.0)
+}
+
+impl Profile {
+    /// The CPU that the account assigns to `shard` ([`assigned_to`] of
+    /// [`Self::cpu_shards`]). Without a shard, the account's CPU ([`Self::cpu`]); 0 when the
+    /// server does not report it. Shard caps do not apply (compare [`cpu_limit`]).
+    #[must_use]
+    pub fn assigned_cpu(&self, shard: Option<&str>) -> f64 {
+        match shard {
+            Some(shard) => assigned_to(&self.cpu_shards, shard),
+            None => self.cpu.unwrap_or(0.0),
+        }
+    }
+}
+
 /// The CPU of one shard of an allocation, with the cap and the average tick of the shard.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShardCpu {
@@ -76,7 +96,7 @@ pub fn shard_cpu(
         .map(|name| {
             let entry = info.iter().find(|shard| shard.name == name);
             ShardCpu {
-                assigned: assigned.get(&name).copied().unwrap_or(0.0),
+                assigned: assigned_to(assigned, &name),
                 cap: entry.and_then(|shard| shard.cpu_limit),
                 average_tick: entry.and_then(|shard| shard.tick),
                 name,
