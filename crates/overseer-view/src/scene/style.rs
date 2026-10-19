@@ -8,9 +8,7 @@
 //! ([`resource_color`], `PART_COLORS` in `objects.wgsl`).
 
 use overseer::model::users::Npc;
-use overseer::model::world::{
-    GameRoomObject, GameRoomObjectStore, GameRoomObjectStoreCapacityResource,
-};
+use overseer::model::world::{GameRoomObject, GameRoomObjectStore, store_amounts, store_capacity};
 
 use crate::mesh::Shape;
 
@@ -319,7 +317,8 @@ impl Gauges {
                 gauges.level = u8::try_from(creep.level.min(25)).unwrap_or(0);
             }
             O::Spawn(spawn) => {
-                gauges.store = store(&spawn.store, capacity(&spawn.store_capacity_resource));
+                let capacity = store_capacity(&spawn.store_capacity_resource).unwrap_or(0);
+                gauges.store = store(&spawn.store, capacity);
                 gauges.hits = hits(spawn.hits, spawn.hits_max);
                 if let Some(spawning) = &spawn.spawning {
                     gauges.flags |= flag::SPAWNING;
@@ -334,18 +333,18 @@ impl Gauges {
                 }
             }
             O::Extension(extension) => {
-                gauges.store = store(
-                    &extension.store,
-                    capacity(&extension.store_capacity_resource),
-                );
+                let capacity = store_capacity(&extension.store_capacity_resource).unwrap_or(0);
+                gauges.store = store(&extension.store, capacity);
                 gauges.hits = hits(extension.hits, extension.hits_max);
             }
             O::Tower(tower) => {
-                gauges.store = store(&tower.store, capacity(&tower.store_capacity_resource));
+                let capacity = store_capacity(&tower.store_capacity_resource).unwrap_or(0);
+                gauges.store = store(&tower.store, capacity);
                 gauges.hits = hits(tower.hits, tower.hits_max);
             }
             O::Link(link) => {
-                gauges.store = store(&link.store, capacity(&link.store_capacity_resource));
+                let capacity = store_capacity(&link.store_capacity_resource).unwrap_or(0);
+                gauges.store = store(&link.store, capacity);
                 gauges.hits = hits(link.hits, link.hits_max);
             }
             O::Storage(storage) => {
@@ -369,17 +368,20 @@ impl Gauges {
                 gauges.store = lab_mineral(&lab.store).or_else(|| {
                     let capacity = lab
                         .store_capacity
-                        .unwrap_or_else(|| capacity(&lab.store_capacity_resource));
+                        .or_else(|| store_capacity(&lab.store_capacity_resource))
+                        .unwrap_or(0);
                     store(&lab.store, capacity)
                 });
                 gauges.hits = hits(lab.hits, lab.hits_max);
             }
             O::PowerSpawn(spawn) => {
-                gauges.store = store(&spawn.store, capacity(&spawn.store_capacity_resource));
+                let capacity = store_capacity(&spawn.store_capacity_resource).unwrap_or(0);
+                gauges.store = store(&spawn.store, capacity);
                 gauges.hits = hits(spawn.hits, spawn.hits_max);
             }
             O::Nuker(nuker) => {
-                gauges.store = store(&nuker.store, capacity(&nuker.store_capacity_resource));
+                let capacity = store_capacity(&nuker.store_capacity_resource).unwrap_or(0);
+                gauges.store = store(&nuker.store, capacity);
                 gauges.hits = hits(nuker.hits, nuker.hits_max);
             }
             O::Observer(observer) => gauges.hits = hits(observer.hits, observer.hits_max),
@@ -427,9 +429,8 @@ impl Gauges {
                 }
             }
             O::Resource(resource) => {
-                let kind = object.kind();
-                let amount = resource.other.get(kind).copied().unwrap_or(0);
-                gauges.store = Some((1.0, resource_color(kind)));
+                let amount = resource.amount();
+                gauges.store = Some((1.0, resource_color(object.kind())));
                 // From a speck to most of a tile: 0.22 at 1, 0.6 at 10 000 or more.
                 #[expect(clippy::cast_precision_loss, reason = "amounts far below 2^24")]
                 let scale = ((amount.max(1) as f32).log10() / 4.0).clamp(0.0, 1.0);
@@ -468,24 +469,11 @@ fn ratio(part: u64, whole: u64) -> f32 {
     (part as f32 / whole as f32).clamp(0.0, 1.0)
 }
 
-/// Total capacity of a per-resource capacity map.
-fn capacity(capacity: &GameRoomObjectStoreCapacityResource) -> u64 {
-    capacity.values().flatten().sum()
-}
-
-/// The resources of a store that it holds some of, with their amounts.
-fn amounts(store: &GameRoomObjectStore) -> impl Iterator<Item = (&String, u64)> {
-    store
-        .iter()
-        .filter_map(|(kind, amount)| Some((kind, u64::try_from((*amount)?).ok()?)))
-        .filter(|(_, amount)| *amount > 0)
-}
-
 /// How full a store of `capacity` is (`capacity` 0: full when anything is in it) and the
 /// colour of its largest resource; `None` when nothing is stored.
 fn store(store: &GameRoomObjectStore, capacity: u64) -> Option<(f32, u32)> {
     let (total, largest) =
-        amounts(store).fold((0_u64, None::<(&String, u64)>), |(total, largest), item| {
+        store_amounts(store).fold((0_u64, None::<(&str, u64)>), |(total, largest), item| {
             let largest = match largest {
                 Some(current) if current.1 >= item.1 => Some(current),
                 _ => Some(item),
@@ -507,7 +495,7 @@ const LAB_MINERAL_CAPACITY: u64 = 3000;
 /// How full a lab is of the one mineral or compound it holds (not energy), and its colour;
 /// `None` when it holds none.
 fn lab_mineral(store: &GameRoomObjectStore) -> Option<(f32, u32)> {
-    amounts(store)
+    store_amounts(store)
         .filter(|(kind, _)| *kind != "energy")
         .max_by_key(|(_, amount)| *amount)
         .map(|(kind, amount)| {

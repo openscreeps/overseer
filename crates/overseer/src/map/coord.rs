@@ -40,6 +40,29 @@ impl RoomCoord {
             })
         })
     }
+
+    /// The distance to `other` in rooms: the larger of the two axis distances, so that a
+    /// diagonal step counts as one room.
+    #[must_use]
+    pub const fn distance(self, other: Self) -> u32 {
+        let (dx, dy) = (self.x.abs_diff(other.x), self.y.abs_diff(other.y));
+        if dx > dy { dx } else { dy }
+    }
+
+    /// Whether the room can have a controller in a standard world. A highway room (a number of
+    /// its name ends in 0) has no controller. The 3×3 rooms at the centre of a sector (both
+    /// numbers end in 4 to 6) have no controller: they hold Source Keepers or the sector centre.
+    #[must_use]
+    pub const fn may_have_controller(self) -> bool {
+        let (x, y) = (name_number(self.x) % 10, name_number(self.y) % 10);
+        let centre = 4 <= x && x <= 6 && 4 <= y && y <= 6;
+        x != 0 && y != 0 && !centre
+    }
+}
+
+/// The number in a room name of the coordinate `value` (`W0` is -1, `E0` is 0).
+pub(crate) const fn name_number(value: i32) -> i32 {
+    if value < 0 { -value - 1 } else { value }
 }
 
 impl FromStr for RoomCoord {
@@ -125,5 +148,27 @@ mod tests {
             ]
         );
         assert_eq!(center.around(0).count(), 1);
+    }
+
+    #[test]
+    fn distances_count_a_diagonal_step_as_one_room() {
+        let room = |name: &str| name.parse::<RoomCoord>().unwrap();
+        assert_eq!(room("W0N0").distance(room("E0N0")), 1);
+        assert_eq!(room("W0N0").distance(room("E1S1")), 2);
+        assert_eq!(room("W8N3").distance(room("W8N3")), 0);
+    }
+
+    #[test]
+    fn highways_and_sector_centres_have_no_controller() {
+        for name in ["W1N1", "W3N7", "E9S9", "W14N13", "E4S3"] {
+            let room: RoomCoord = name.parse().unwrap();
+            assert!(room.may_have_controller(), "{name}");
+        }
+        for name in [
+            "W0N0", "W0N1", "E10S5", "W15S5", "W14N16", "E5S5", "W4N6", "E6S4",
+        ] {
+            let room: RoomCoord = name.parse().unwrap();
+            assert!(!room.may_have_controller(), "{name}");
+        }
     }
 }

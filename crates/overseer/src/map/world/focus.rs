@@ -185,22 +185,10 @@ pub(super) fn distance(room: RoomCoord, centre: RoomCoord) -> i64 {
 
 /// The smallest rectangle holding `rooms`; `None` when there are none.
 fn bounding(rooms: &[RoomCoord]) -> Option<RoomRect> {
-    let (first, rest) = rooms.split_first()?;
-    Some(
-        rest.iter()
-            .fold(RoomRect::new(*first, *first), |rect, room| {
-                RoomRect::new(
-                    RoomCoord {
-                        x: rect.min.x.min(room.x),
-                        y: rect.min.y.min(room.y),
-                    },
-                    RoomCoord {
-                        x: rect.max.x.max(room.x),
-                        y: rect.max.y.max(room.y),
-                    },
-                )
-            }),
-    )
+    rooms
+        .iter()
+        .map(|room| RoomRect::new(*room, *room))
+        .reduce(|rect, room| rect.union(&room))
 }
 
 /// `rect` grown by `rooms` on each side.

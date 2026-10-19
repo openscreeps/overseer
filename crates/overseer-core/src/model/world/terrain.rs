@@ -77,6 +77,20 @@ pub enum TerrainError {
     Missing,
 }
 
+/// Why the terrain does not let a structure stand on a tile ([`Terrain::check_structure_spot`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SpotError {
+    /// The tile is on the room edge or outside the room.
+    #[error("on or beyond the room edge")]
+    Edge,
+    /// The tile is a wall.
+    #[error("a wall")]
+    Wall,
+    /// The tile is next to an exit.
+    #[error("next to an exit")]
+    Exit,
+}
+
 impl Terrain {
     /// Bytes of the packed form ([`Self::packed`]).
     pub const PACKED_LEN: usize = TILES / PER_BYTE;
@@ -198,6 +212,34 @@ impl Terrain {
             },
         )
     }
+
+    /// Checks that the terrain lets a structure stand on the tile `(x, y)`, as the game checks a
+    /// new construction site and the first spawn (`POST /api/game/place-spawn`). The tile must be
+    /// inside the room edge (1 to 48). It must not be a wall. It must not be next to an exit: an
+    /// edge tile that is not a wall. Roads, containers and extractors have other rules. This
+    /// check does not look at the objects on the tile.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`SpotError`] of the first rule that the tile breaks.
+    pub fn check_structure_spot(&self, x: u8, y: u8) -> Result<(), SpotError> {
+        const LAST: u8 = 49;
+        if x == 0 || y == 0 || x >= LAST || y >= LAST {
+            return Err(SpotError::Edge);
+        }
+        if self.get(x, y) == Some(Tile::Wall) {
+            return Err(SpotError::Wall);
+        }
+        for ny in y - 1..=y + 1 {
+            for nx in x - 1..=x + 1 {
+                let edge = nx == 0 || ny == 0 || nx == LAST || ny == LAST;
+                if edge && self.get(nx, ny) != Some(Tile::Wall) {
+                    return Err(SpotError::Exit);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The 2500-digit form of a [`Terrain`], written by `Display` (see [`Terrain::encoded`]).
@@ -261,7 +303,7 @@ terrain_from!(official, community);
 
 #[cfg(test)]
 mod tests {
-    use super::{Terrain, TerrainError, Tile};
+    use super::{SpotError, Terrain, TerrainError, Tile};
     use crate::api::official::types::GameRoomTerrainResponse;
 
     fn encoded(tiles: &[(usize, u8)]) -> String {
@@ -424,5 +466,28 @@ mod tests {
             Terrain::try_from(outside),
             Err(TerrainError::Outside { x: 50, y: 0 })
         );
+    }
+
+    #[test]
+    fn structures_stand_inside_the_edge_off_walls_and_away_from_exits() {
+        // Walls on the whole edge but one exit tile at (10, 0); a wall at (30, 25) and a swamp
+        // at (31, 25).
+        let mut tiles: Vec<(usize, u8)> = (0..50)
+            .flat_map(|at| [at, 49 * 50 + at, at * 50, at * 50 + 49])
+            .filter(|&index| index != 10)
+            .map(|index| (index, b'1'))
+            .collect();
+        tiles.extend([(25 * 50 + 30, b'3'), (25 * 50 + 31, b'2')]);
+        let terrain = Terrain::decode(&encoded(&tiles)).unwrap();
+
+        assert_eq!(terrain.check_structure_spot(25, 25), Ok(()));
+        assert_eq!(terrain.check_structure_spot(31, 25), Ok(()));
+        assert_eq!(terrain.check_structure_spot(20, 1), Ok(()));
+        assert_eq!(terrain.check_structure_spot(0, 25), Err(SpotError::Edge));
+        assert_eq!(terrain.check_structure_spot(25, 49), Err(SpotError::Edge));
+        assert_eq!(terrain.check_structure_spot(25, 255), Err(SpotError::Edge));
+        assert_eq!(terrain.check_structure_spot(30, 25), Err(SpotError::Wall));
+        assert_eq!(terrain.check_structure_spot(11, 1), Err(SpotError::Exit));
+        assert_eq!(terrain.check_structure_spot(9, 1), Err(SpotError::Exit));
     }
 }

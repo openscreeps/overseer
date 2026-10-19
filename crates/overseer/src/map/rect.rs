@@ -94,6 +94,29 @@ impl RoomRect {
         (!rect.is_empty()).then_some(rect)
     }
 
+    /// The smallest rectangle that holds the rooms of the two rectangles. When one rectangle
+    /// is empty, the result is the other rectangle. When the two are empty, the result is
+    /// `other`.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return *other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
+        Self {
+            min: RoomCoord {
+                x: self.min.x.min(other.min.x),
+                y: self.min.y.min(other.min.y),
+            },
+            max: RoomCoord {
+                x: self.max.x.max(other.max.x),
+                y: self.max.y.max(other.max.y),
+            },
+        }
+    }
+
     /// The rooms row by row from the north-west corner.
     pub fn iter(&self) -> impl Iterator<Item = RoomCoord> + use<> {
         let (min, max) = (self.min, self.max);
@@ -248,5 +271,18 @@ mod tests {
         };
         assert!(empty.is_empty());
         assert_eq!((empty.len(), empty.iter().count()), (0, 0));
+    }
+
+    #[test]
+    fn a_union_ignores_an_empty_rectangle() {
+        let rect = RoomRect::new(room("W1N1"), room("W0N0"));
+        let other = RoomRect::new(room("E2S2"), room("E2S2"));
+        assert_eq!(names(rect.union(&other)), ("W1N1".into(), "E2S2".into()));
+        let empty = RoomRect {
+            min: room("E9S9"),
+            max: room("W9N9"),
+        };
+        assert_eq!(rect.union(&empty), rect);
+        assert_eq!(empty.union(&rect), rect);
     }
 }

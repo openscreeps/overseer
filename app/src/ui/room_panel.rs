@@ -20,7 +20,7 @@ use overseer::map::{
     DetailState, Interest, Portal, PortalDestination, RoomCoord, RoomRect, RoomStat, RoomStatus,
     WorldEvent,
 };
-use overseer::model::world::GameRoomObject;
+use overseer::model::world::{GameRoomObject, store_amount};
 use overseer_view::{Scope, Viewer};
 
 use crate::feed::{Feed, Reach, Subscription};
@@ -356,14 +356,8 @@ fn spawn_energy(object: &GameRoomObject) -> Option<(u64, u64)> {
         }
         _ => return None,
     };
-    let energy = store
-        .get("energy")
-        .copied()
-        .flatten()
-        .and_then(|energy| u64::try_from(energy).ok())
-        .unwrap_or_default();
     Some((
-        energy,
+        store_amount(store, "energy"),
         capacity
             .get("energy")
             .copied()
@@ -408,13 +402,11 @@ pub fn facts(objects: &[GameRoomObject], context: &Context<'_>) -> Facts {
                 sources.push((source.x, source.energy, source.energy_capacity));
             }
             GameRoomObject::Mineral(mineral) => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "mineral amounts are small non-negative whole numbers"
-                )]
-                let amount = mineral.mineral_amount.max(0.0).round() as u64;
-                facts.mineral = Some((mineral.mineral_type.clone(), amount, mineral.density));
+                facts.mineral = Some((
+                    mineral.mineral_type.clone(),
+                    mineral.amount(),
+                    mineral.density,
+                ));
             }
             _ => {}
         }

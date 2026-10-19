@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use overseer::map::Portal;
-use overseer::model::world::{GameRoomObject, GameRoomObjectStore};
+use overseer::model::world::{
+    GameRoomObject, GameRoomObjectStore, store_amount, store_amounts, store_capacity,
+};
 
 use super::{
     Context, Field, Inspected, Part, Tone, Value, dropped, kind_key, kind_label, number, ticks,
@@ -61,12 +63,8 @@ impl Fields<'_> {
     }
 
     fn store(&mut self, store: &GameRoomObjectStore, capacity: Option<u64>) {
-        let mut resources: Vec<(String, u64)> = store
-            .iter()
-            .filter_map(|(resource, amount)| {
-                let amount = u64::try_from((*amount)?).ok()?;
-                (amount > 0).then(|| (resource.clone(), amount))
-            })
+        let mut resources: Vec<(String, u64)> = store_amounts(store)
+            .map(|(resource, amount)| (resource.to_owned(), amount))
             .collect();
         resources.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let used = resources.iter().map(|(_, amount)| amount).sum();
@@ -85,12 +83,7 @@ impl Fields<'_> {
 
     /// The energy of a structure that only holds energy, as a meter.
     fn energy(&mut self, store: &GameRoomObjectStore, capacity: &BTreeMap<String, Option<u64>>) {
-        let energy = store
-            .get("energy")
-            .copied()
-            .flatten()
-            .and_then(|energy| u64::try_from(energy).ok())
-            .unwrap_or_default();
+        let energy = store_amount(store, "energy");
         let max = capacity
             .get("energy")
             .copied()
@@ -98,12 +91,6 @@ impl Fields<'_> {
             .unwrap_or_default();
         self.meter("Energy", energy, max, Tone::Energy);
     }
-}
-
-/// The total of a per-resource capacity.
-fn total_capacity(capacity: &BTreeMap<String, Option<u64>>) -> Option<u64> {
-    let total: u64 = capacity.values().flatten().sum();
-    (total > 0).then_some(total)
 }
 
 /// The inspector's view of `object`.
@@ -251,13 +238,7 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
         }
         GameRoomObject::Mineral(mineral) => {
             fields.text("Type", mineral.mineral_type.clone());
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "mineral amounts are small non-negative whole numbers"
-            )]
-            let amount = mineral.mineral_amount.max(0.0).round() as u64;
-            fields.text("Amount", number(amount));
+            fields.text("Amount", number(mineral.amount()));
             fields.text("Density", mineral.density.to_string());
             fields.until("Regenerates", mineral.next_regeneration_time);
         }
@@ -324,7 +305,7 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
         }
         GameRoomObject::PowerSpawn(spawn) => {
             fields.hits(Some(spawn.hits), Some(spawn.hits_max));
-            fields.store(&spawn.store, total_capacity(&spawn.store_capacity_resource));
+            fields.store(&spawn.store, store_capacity(&spawn.store_capacity_resource));
         }
         GameRoomObject::Extractor(extractor) => {
             fields.hits(extractor.hits, extractor.hits_max);
@@ -335,7 +316,7 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
             fields.store(
                 &lab.store,
                 lab.store_capacity
-                    .or_else(|| total_capacity(&lab.store_capacity_resource)),
+                    .or_else(|| store_capacity(&lab.store_capacity_resource)),
             );
             fields.cooldown(lab.cooldown);
         }
@@ -351,7 +332,7 @@ pub fn inspect(object: &GameRoomObject, context: &Context<'_>) -> Inspected {
         }
         GameRoomObject::Nuker(nuker) => {
             fields.hits(Some(nuker.hits), Some(nuker.hits_max));
-            fields.store(&nuker.store, total_capacity(&nuker.store_capacity_resource));
+            fields.store(&nuker.store, store_capacity(&nuker.store_capacity_resource));
             fields.until("Cooldown", Some(nuker.cooldown_time));
         }
         GameRoomObject::Factory(factory) => {

@@ -367,18 +367,21 @@ pub fn merge(interests: &[(Reach, &Interest)]) -> Interest {
             .map(|(_, interest)| *interest)
     };
     let rect = |pick: fn(&Interest) -> Option<RoomRect>| {
-        world().filter_map(pick).reduce(union).or_else(|| {
-            interests
-                .iter()
-                .filter_map(|(reach, interest)| match reach {
-                    Reach::Room(room) => Some(pick(interest).unwrap_or(RoomRect {
-                        min: *room,
-                        max: *room,
-                    })),
-                    Reach::World => None,
-                })
-                .reduce(union)
-        })
+        world()
+            .filter_map(pick)
+            .reduce(|a, b| a.union(&b))
+            .or_else(|| {
+                interests
+                    .iter()
+                    .filter_map(|(reach, interest)| match reach {
+                        Reach::Room(room) => Some(pick(interest).unwrap_or(RoomRect {
+                            min: *room,
+                            max: *room,
+                        })),
+                        Reach::World => None,
+                    })
+                    .reduce(|a, b| a.union(&b))
+            })
     };
     let mut merged = Interest {
         stats: rect(|interest| interest.stats),
@@ -409,20 +412,6 @@ pub fn merge(interests: &[(Reach, &Interest)]) -> Interest {
         detail.extend(&mut merged.detail, &interest.detail);
     }
     merged
-}
-
-/// The smallest rectangle holding `a` and `b`.
-fn union(a: RoomRect, b: RoomRect) -> RoomRect {
-    RoomRect {
-        min: RoomCoord {
-            x: a.min.x.min(b.min.x),
-            y: a.min.y.min(b.min.y),
-        },
-        max: RoomCoord {
-            x: a.max.x.max(b.max.x),
-            y: a.max.y.max(b.max.y),
-        },
-    }
 }
 
 /// The rooms already in a list: [`Interest::terrain`] may list every room of a shard.

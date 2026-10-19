@@ -3,6 +3,7 @@
 use overseer_net::model::world::{GameRoomObject, GameRoomObjectPortal};
 
 use super::RoomCoord;
+use super::coord::name_number;
 
 /// Where a [`Portal`] leads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -92,11 +93,6 @@ impl Portal {
 pub const fn may_have_portals(room: RoomCoord) -> bool {
     let (x, y) = (name_number(room.x) % 10, name_number(room.y) % 10);
     (x == 5 && y == 5) || x == 0 || y == 0
-}
-
-/// The number in a room name of the coordinate `value` (`W0` is -1, `E0` is 0).
-const fn name_number(value: i32) -> i32 {
-    if value < 0 { -value - 1 } else { value }
 }
 
 /// The portals among `objects`, in a stable order whatever order the server sent them in:
