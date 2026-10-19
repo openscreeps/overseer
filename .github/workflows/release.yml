@@ -1,0 +1,118 @@
+name: Release
+
+# This workflow publishes a GitHub release of the CLI (crates/overseer-cli) from the archives
+# that CI built. It does not build. The sequence is:
+#
+# 1. A `cli-v*` tag push starts ci.yml.
+# 2. The `build` job of ci.yml makes one archive for each target and uploads it as a workflow
+#    artifact.
+# 3. When all jobs of that CI run pass, this workflow downloads the archives.
+# 4. This workflow attaches the archives to a release for the tag.
+#
+# `mise use github:openscreeps/overseer` installs from this release. See "Install" in
+# crates/overseer-cli/README.md.
+#
+# To cut a CLI release:
+#
+# 1. Change `version` in crates/overseer-cli/Cargo.toml.
+# 2. Run `cargo check -p overseer-cli` to update Cargo.lock.
+# 3. Commit the change.
+# 4. Push a tag with the name `cli-v<version>`, for example `cli-v0.3.0`.
+#
+# CI does not build a tag that does not match the version in crates/overseer-cli/Cargo.toml.
+# A tag with a pre-release suffix (`cli-v0.3.0-rc1`) becomes a GitHub pre-release. mise does
+# not select a pre-release for `latest`. Plain `v*` tags are for the desktop app; this
+# workflow ignores them.
+#
+# This workflow creates the release as a draft, uploads the assets, and then publishes the
+# release. Thus a release with only some assets is never visible. If this workflow fails after
+# CI passed, run it again from the Actions tab. It uses the draft again and replaces the
+# assets (`--clobber`).
+#
+# GitHub starts a `workflow_run` workflow only from the copy on the default branch. Thus a
+# change to this file has an effect only after the merge. To test the builds without a tag,
+# start CI by hand (`gh workflow run ci.yml --ref <branch>`). On a manual run, the `build` job
+# keeps the archives as artifacts.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write # create the release and upload the assets
+  actions: read # download the artifacts of the CI run
+
+jobs:
+  release:
+    name: publish CLI release
+    # CI runs on all pushes, also on a branch with a name that starts with `cli-v`. For such a
+    # branch, the tag check below fails, or the archive check fails because `build` did not
+    # run. Pull requests, manual runs and other pushes do not release.
+    if: >
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && startsWith(github.event.workflow_run.head_branch, 'cli-v')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Confirm that the tag points at the built commit
+        run: |
+          if ! git tag --points-at HEAD | grep -qx "$TAG"; then
+            echo "::error::tag $TAG does not point at $(git rev-parse HEAD); refusing to release CI run ${{ github.event.workflow_run.id }}"
+            exit 1
+          fi
+
+      - name: Download the archives from the CI run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          pattern: overseer-cli-v*
+          merge-multiple: true
+          path: dist
+
+      - name: Check the archive set
+        # The build matrix of ci.yml has 5 targets. Each target gives one archive and its
+        # .sha256 file. If an archive is missing, a build job did not run or its upload failed.
+        # Do not publish a release with missing archives.
+        run: |
+          ls -l dist
+          archives=$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          if [ "$archives" -ne 5 ]; then
+            echo "::error::expected 5 archives from CI run ${{ github.event.workflow_run.id }}, found $archives"
+            exit 1
+          fi
+
+      - name: Create the draft release
+        # If the release exists, use it again. Thus a second run of this workflow is safe.
+        # The release notes start at the last `cli-v*` tag before this tag, not at a desktop
+        # release.
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; reusing it"
+            exit 0
+          fi
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          notes_start=()
+          if previous="$(git describe --tags --abbrev=0 --match 'cli-v*' "${TAG}^" 2>/dev/null)"; then
+            notes_start=(--notes-start-tag "$previous")
+          fi
+          gh release create "$TAG" --draft --verify-tag \
+            --title "$TAG" --generate-notes "${notes_start[@]}" "${prerelease[@]}"
+
+      - name: Upload the assets
+        run: gh release upload "$TAG" dist/* --clobber
+
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false

@@ -67,6 +67,32 @@ Follow the Cargo package layout:
 - Put each workspace crate in `crates/<crate-name>/`, with the exceptions that exist (`app/`,
   `web/demo/`, `xtask/`).
 
+## CLI safety (`crates/overseer-cli`)
+
+The CLI changes live Screeps accounts. These rules protect the accounts.
+
+- Put the rules of the game and the world geometry in `overseer-core` or `overseer`, for
+  example the terrain spot of a structure, room coordinates and cooldowns. Keep only the policy
+  of the CLI in `crates/overseer-cli`: its configuration, its protocols with the bot and its
+  safety checks, which are stricter than the server.
+- A code change does not authorize a live operation. Do not upload, activate a branch, allocate
+  CPU, reset (`user/respawn`) or place a spawn on a live server without explicit permission.
+- Test mutations only against disposable worlds, for example the world of `cargo xtask e2e`.
+  Do not reuse a live server or a persistent Compose volume.
+- Keep `poll` read-only without the execution gate (`--execute`).
+- Keep the heartbeat freshness, the zero-foothold evidence, the confirmation window, the cooldowns
+  and the final revalidation before each reset and each placement.
+- Fail closed on missing or malformed safety evidence.
+- Never make an API failure into an empty account, an eligible room or permission to reset.
+- Use `Error::outcome()` to find the certainty of a mutation. Do not use the HTTP status or the
+  message of the server.
+- After an unknown placement outcome, lock out the profile. After an unknown reset outcome, start
+  the local cooldown.
+- Limit the run time and the output of the selector process. Give the selector its arguments
+  directly, without a shell. Revalidate its answer.
+- Never log or commit credentials. Do not copy credential values into fixtures or documentation.
+- Keep the explicit `--env-file` loading, the environment precedence and the redacted errors.
+
 ## Checks
 
 Make sure that all these checks pass before you report a change as complete:

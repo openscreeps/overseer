@@ -56,13 +56,14 @@ To skip the discovery, force the contract with `ClientBuilder::server_kind` and 
 
 | Path | Contents |
 |---|---|
-| `crates/overseer-core` | Sans-I/O core: the generated HTTP and socket types and endpoints of each contract, the domain types (`model`) with the game's rules (levels, NPCs, the fields of a new account, the CPU allocation to the shards and the 12-hour cooldown, the 2 MiB Memory capacity, Memory paths, queued Memory changes and the segment limits, the tick duration measured from game ticks), the socket session and the room state |
+| `crates/overseer-core` | Sans-I/O core: the generated HTTP and socket types and endpoints of each contract, the domain types (`model`) with the game's rules (levels, NPCs, the fields of a new account, the CPU allocation to the shards and the 12-hour cooldown, the 3-minute respawn cooldown, the terrain spots where a structure can stand, the 2 MiB Memory capacity, Memory paths, queued Memory changes and the segment limits, the tick duration measured from game ticks), the socket session and the room state |
 | `crates/overseer-net` | Async client on `overseer-core`: HTTP, socket, rate limits and the request budget (`Client::wait_for_budget`), discovery and the area traits of `api` |
 | `crates/overseer` | Application layer: the session, the account (one session-wide profile published after every read and change: `Account::profile_watch`; the usage of the code shared by every consumer: `Account::usage`), the exemption from rate limits (`Overseer::rate_limits`: checked on a schedule, given to the request budget and followed by every world map), live rooms, the console (and the session-cached names of the user's game for completion), code, Memory (session-shared path snapshots and writes observed until they apply), the map (and the session-shared tick speed of a shard: `Map::tick_speed`), player badges (one session-wide cache and pace for every viewer), the market and the other features of the official client, and a server without an account (`Guest`: discovery, registration) |
 | `crates/overseer-view` | World and room viewer: renders rooms with wgpu (WebGPU, else WebGL2) |
 | `crates/overseer-proxy` | Same-origin proxy for servers that send no CORS headers |
+| `crates/overseer-cli` | The `overseer` command: uploads built code to branches through profiles and keeps a spawn in the world |
 | `app` | The Overseer app: a Leptos UI for browsers |
-| `app/src-tauri` | The desktop shell of the app (Tauri 2) |
+| `app/src-tauri` | The desktop shell of the app (Tauri 2). Its executable is `overseer-ui` |
 | `web/demo` | A small browser demo of `overseer` |
 | `xtask` | Repository automation (`cargo xtask …`) |
 | `reference` | The API contracts that the code is generated from |
@@ -88,6 +89,12 @@ if overseer.world().supports(Subsystem::RoomHistory) {
 ```
 
 Run `cargo doc --workspace --no-deps --open` for the API documentation.
+
+## Command-line tool
+
+The `overseer` command uploads a build directory to the branches of Screeps servers. It also
+keeps a spawn of the account in the world. For the installation, the configuration and the
+safety rules, see [`crates/overseer-cli/README.md`](crates/overseer-cli/README.md).
 
 ## Build and run
 
@@ -155,3 +162,11 @@ The tests tagged `@transport` (sign-in, session, socket) also run with the app s
 for every test. A test that fails is not retried: find its cause. The tests tagged `@alone`
 measure how fast the page responds: they run after all other tests, with the machine to
 themselves (Playwright project `alone`).
+
+## License
+
+Overseer is licensed under the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, each contribution that you intentionally submit for
+inclusion in Overseer is dual-licensed as above, without additional terms or conditions.

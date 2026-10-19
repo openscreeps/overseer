@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 overseer-core = { path = "crates/overseer-core" }
@@ -62,6 +63,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false }
 # xtask: `cargo xtask e2e` stops its disposable server on Ctrl-C and SIGTERM.
 ctrlc = { version = "3.5", features = ["termination"] }
+# overseer-cli: the configuration file and its `--env-file` secrets.
+dotenvy = "0.15"
+toml = { version = "1", default-features = false }
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -2 }

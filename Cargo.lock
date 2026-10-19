@@ -1284,6 +1284,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3575,6 +3581,7 @@ name = "overseer-app-tauri"
 version = "0.1.0"
 dependencies = [
  "keyring",
+ "overseer-core",
  "overseer-proxy",
  "serde",
  "tauri",
@@ -3583,6 +3590,20 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "overseer-cli"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "dotenvy",
+ "overseer",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -3631,6 +3652,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "overseer-core",
  "overseer-net",
  "reqwest",
  "reqwest-websocket",

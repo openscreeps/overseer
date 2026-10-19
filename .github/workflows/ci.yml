@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Every push runs CI, also a tag push. A `cli-v*` tag push also runs the `build` job.
   push:
   pull_request:
+  # A manual run also builds the CLI archives (see `build`). Use it to make sure that all
+  # targets build before you push a tag.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -69,3 +73,129 @@ jobs:
             !target/e2e/*/dist/
             !target/e2e/*/overseer-proxy
           if-no-files-found: ignore
+
+  # The CLI tests on Windows and macOS. The `check` job tests the full workspace on Linux. The
+  # CLI starts a selector subprocess and reads files, and these operations change with the OS.
+  cli:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain pinned by rust-toolchain.toml.
+      - run: rustup toolchain install
+      # Saved also when the tests fail, so that the next run does not build everything again.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo test --locked -p overseer-cli
+
+  # The release archives of the CLI (crates/overseer-cli). This job runs on a `cli-v*` tag push
+  # and on a manual run. It does not run for a branch push or a pull request.
+  #
+  # Each target builds on a runner of its own architecture. Each target uploads one archive as
+  # a workflow artifact. When all jobs of the run pass, release.yml makes the GitHub release
+  # from these artifacts. Thus a tag that fails a check does not release.
+  #
+  # The asset names contain the Rust target triple, and mise selects the asset by it. Do not
+  # rename the assets.
+  #
+  # This job signs release material, so its actions are pinned by commit. The comment after
+  # each commit gives the release. The job does not use rust-cache: each release builds from
+  # an empty target directory.
+  build:
+    name: build (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/cli-v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write # sign the build provenance attestations
+      attestations: write # store the attestations that mise and `gh attestation` verify
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Linux builds run on Ubuntu 22.04. Thus the binaries link against glibc 2.35 and
+        # run on all distributions with that glibc or a newer one. The macOS runners are pinned
+        # to one release, so that a change of macos-latest does not change the archives.
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Installs the toolchain pinned by rust-toolchain.toml, then the target of this build.
+      - run: rustup toolchain install && rustup target add ${{ matrix.target }}
+
+      # The CLI has its own version, not the workspace version.
+      - name: Check that the tag matches the CLI version
+        if: startsWith(github.ref, 'refs/tags/cli-v')
+        shell: bash
+        run: |
+          crate_version="$(sed -n '/^\[package\]/,/^\[/p' crates/overseer-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          if [ "$GITHUB_REF_NAME" != "cli-v${crate_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match [package].version = ${crate_version} in crates/overseer-cli/Cargo.toml"
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release --locked -p overseer-cli --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        # The archive has one top-level directory, with the binary, the README of the CLI and the
+        # two license files.
+        # mise removes this directory when it extracts the archive. Then the binary is at the
+        # root of the install, and mise puts the root on PATH.
+        run: |
+          version="$(sed -n '/^\[package\]/,/^\[/p' crates/overseer-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          name="overseer-cli-v${version}-${TARGET}"
+          exe=""
+          if [ "$RUNNER_OS" = "Windows" ]; then exe=".exe"; fi
+
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/overseer${exe}" "dist/${name}/"
+          cp crates/overseer-cli/README.md "dist/${name}/README.md"
+          cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="${name}.zip"
+            7z a -tzip "${archive}" "${name}" >/dev/null
+          else
+            archive="${name}.tar.gz"
+            tar czf "${archive}" "${name}"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+          fi
+          rm -r "${name}"
+
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "archive=dist/${archive}" >> "$GITHUB_OUTPUT"
+
+      # Signed SLSA provenance for the archive, recorded against this repository. By default,
+      # mise checks it through the GitHub attestations API when it installs from a release.
+      # `gh attestation verify <archive> --repo openscreeps/overseer` does the same check by
+      # hand. Only tag builds get an attestation: a manual run is not release material.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/cli-v')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
+      # One artifact for each target, with the name of the archive. release.yml downloads the
+      # artifacts that match `overseer-cli-v*`.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/*
+          if-no-files-found: error

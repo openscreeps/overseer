@@ -1,0 +1,32 @@
+[package]
+name = "overseer-cli"
+description = "The `overseer` command: uploads built Screeps code to branches through named profiles, and keeps a spawn of the account in the world"
+# The CLI has releases of its own (tags `cli-v<version>`), so it does not use the workspace version.
+version = "0.3.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "overseer"
+path = "src/main.rs"
+# Named like the `overseer` library, whose docs would otherwise be overwritten.
+doc = false
+
+[dependencies]
+# The command line, with defaults from environment variables.
+clap = { workspace = true, features = ["derive", "env"] }
+# `--env-file`: the dotenv format that other tools write, with quotes, escapes and substitutions.
+dotenvy.workspace = true
+overseer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The session workers run while the CLI waits for its selector process.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# The configuration file.
+toml = { workspace = true, features = ["parse", "serde", "std"] }
+
+[lints]
+workspace = true
