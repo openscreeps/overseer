@@ -1,7 +1,7 @@
 //! The `secret_*` commands: tokens and server passwords in the OS credential store, through
-//! [`Storage`] of the app identifier. The app itself uses the service `overseer`; builds with
-//! another identifier (verification runs) never touch its credentials
-//! ([`overseer_storage::native::service`]).
+//! [`Storage`](overseer_storage::native::Storage) of the app identifier. The app itself uses the
+//! service `overseer`; builds with another identifier (verification runs) never touch its
+//! credentials ([`overseer_storage::native::service`]).
 #![expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
