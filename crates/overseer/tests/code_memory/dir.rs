@@ -1,4 +1,4 @@
-//! Code directories: which files are modules, stale deletion and round trips.
+//! Code directories: which files are modules, source maps, stale deletion and round trips.
 
 use std::fs;
 
@@ -9,13 +9,15 @@ use overseer::{Error, Modules};
 use crate::{TempDir, WASM};
 
 #[tokio::test]
-async fn read_dir_reads_js_text_and_wasm_bytes_only() {
+async fn read_dir_reads_js_text_source_maps_and_wasm_bytes_only() {
     let dir = TempDir::new("read");
     dir.put("main.js", "module.exports.loop = () => {};");
     dir.put("lib.util.js", "// ü");
     dir.put("engine.wasm", WASM);
     dir.put("README.md", "notes");
-    dir.put("main.js.map", "{}");
+    dir.put("main.js.map", "\n{\"version\":3}");
+    dir.put("lib.util.js.map", "module.exports = {};");
+    dir.put("main.js.LICENSE.txt", "ignored: not a module suffix");
     dir.put(
         "LOUD.JS",
         "ignored: the extension is matched case-sensitively",
@@ -31,23 +33,39 @@ async fn read_dir_reads_js_text_and_wasm_bytes_only() {
         [
             ("engine", ModuleKind::Wasm),
             ("lib.util", ModuleKind::Js),
-            ("main", ModuleKind::Js)
+            ("lib.util.js.map", ModuleKind::Js),
+            ("main", ModuleKind::Js),
+            ("main.js.map", ModuleKind::Js)
         ]
     );
     assert_eq!(modules.js("main"), Some("module.exports.loop = () => {};"));
     assert_eq!(modules.js("lib.util"), Some("// ü"));
     assert_eq!(modules.wasm("engine").unwrap().as_deref(), Some(&WASM[..]));
+    // A JSON source map becomes a module that exports it; a source map module stays as it is.
+    assert_eq!(
+        modules.js("main.js.map"),
+        Some("module.exports = \n{\"version\":3};")
+    );
+    assert_eq!(modules.js("lib.util.js.map"), Some("module.exports = {};"));
 }
 
 #[tokio::test]
-async fn read_dir_rejects_a_module_in_both_kinds_and_non_utf8_sources() {
-    let dir = TempDir::new("both");
-    dir.put("main.js", "");
-    dir.put("main.wasm", WASM);
-    assert!(matches!(
-        read_dir(dir.path()).await,
-        Err(Error::InvalidInput(_))
-    ));
+async fn read_dir_rejects_two_files_of_one_module_and_non_utf8_sources() {
+    for (name, first, second) in [
+        ("both", "main.js", "main.wasm"),
+        ("map", "main.js.map", "main.js.map.js"),
+    ] {
+        let dir = TempDir::new(name);
+        dir.put(first, "");
+        dir.put(second, WASM);
+        let error = read_dir(dir.path()).await.unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, Error::InvalidInput(_)), "{error:?}");
+        assert!(
+            message.contains(first) && message.contains(second),
+            "{message}"
+        );
+    }
 
     let dir = TempDir::new("latin1");
     dir.put("main.js", [0xff, 0xfe]);
@@ -72,7 +90,8 @@ async fn write_dir_deletes_stale_modules_and_keeps_other_files() {
     dir.put("engine.js", "deleted: the module is now WebAssembly");
     dir.put("notes.txt", "kept");
     dir.put(".eslintrc.js", "kept: not a module file");
-    dir.put("main.js.map", "kept");
+    dir.put("main.js.map", "deleted: the branch has no source map");
+    dir.put("main.js.LICENSE.txt", "kept: not a module file");
     fs::create_dir(dir.path().join("lib.js")).unwrap();
     let mut modules = Modules::new();
     modules.insert_js("main", "new main");
@@ -87,7 +106,7 @@ async fn write_dir_deletes_stale_modules_and_keeps_other_files() {
             "engine.wasm",
             "lib.js/",
             "main.js",
-            "main.js.map",
+            "main.js.LICENSE.txt",
             "notes.txt"
         ]
     );
@@ -111,6 +130,9 @@ async fn written_directories_read_back_the_same_modules() {
     modules.insert_js("main", "require('util');\n");
     modules.insert_js("util", "");
     modules.insert_js("ünïcode", "'✓'");
+    modules.insert_js("main.js.map", "module.exports = {\"version\":3};");
+    // `read_dir` would wrap this text in a `.js.map` file, so it goes to `raw.js.map.js`.
+    modules.insert_js("raw.js.map", "{}");
     modules.insert_wasm("engine", &WASM);
     modules.insert_wasm("empty", &[]);
 

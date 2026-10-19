@@ -2,11 +2,13 @@
 //!
 //! A branch is a named set of [`Modules`]; one branch runs in the world and one in the
 //! simulator ([`CodeTarget`]). Code directories use the official desktop client's layout (one
-//! `<module>.js` or `<module>.wasm` file per module): [`read_dir`] and [`write_dir`] convert
-//! between a directory and [`Modules`], [`Code::pull_dir`] and [`Code::push_dir`] sync a
-//! directory with a branch. Directory sync is native-only: browsers (`wasm32-unknown-unknown`)
-//! have no file system, so a web app reads and writes [`Modules`] itself (file pickers,
-//! downloads, browser storage). The values are those of [`overseer_net::model::code`].
+//! `<module>.js` or `<module>.wasm` file per module) and can also hold the source maps of a build
+//! (`<module>.js.map`). [`read_dir`] and [`write_dir`] convert between a directory and
+//! [`Modules`], [`module_of`] gives the module of a file name, and [`Code::pull_dir`] and
+//! [`Code::push_dir`] sync a directory with a branch. Directory sync is native-only: browsers
+//! (`wasm32-unknown-unknown`) have no file system, so a web app reads and writes [`Modules`]
+//! itself (file pickers, downloads, browser storage). The values are those of
+//! [`overseer_net::model::code`].
 
 #[cfg(not(target_arch = "wasm32"))]
 mod dir;
@@ -18,7 +20,7 @@ use overseer_net::api::CodeApi as _;
 use overseer_net::core::socket::{Channel, Payload};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use dir::{read_dir, write_dir};
+pub use dir::{module_of, read_dir, write_dir};
 pub use overseer_net::model::code::{
     ActiveBranchChange, ActiveBranches, CodeChange, CodeTarget, InvalidWasm, ModuleKind, Modules,
     UserCodeBranch, UserCodeHash,
