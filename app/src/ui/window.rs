@@ -5,8 +5,8 @@
 use leptos::prelude::*;
 use overseer::Overseer;
 use overseer::map::RoomCoord;
+use overseer_storage::profiles::Server;
 
-use crate::profiles::Server;
 use crate::route::{Shard, WindowView};
 use crate::state::AppState;
 use crate::ui::account::Account;

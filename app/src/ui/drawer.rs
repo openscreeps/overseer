@@ -21,11 +21,11 @@ mod resize;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::map::PortalDestination;
+use overseer_storage::profiles::Server;
 use web_sys::KeyboardEvent;
 
 use self::resize::{DrawerSize, Resizer, SheetHandle};
 use crate::portals::GoTo;
-use crate::profiles::Server;
 use crate::route::{Route, Shard, WindowView};
 use crate::saved::DrawerTab;
 use crate::state::AppState;

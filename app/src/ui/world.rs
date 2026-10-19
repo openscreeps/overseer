@@ -29,11 +29,11 @@ use leptos::prelude::*;
 use overseer::Overseer;
 use overseer::map::{DetailState, RoomCoord, RoomRect, WorldEvent, WorldKnowledge, WorldProgress};
 use overseer::model::account::StartRoom;
+use overseer_storage::profiles::Server;
 use overseer_view::{Lod, Scope, ViewMode, Viewer};
 use web_sys::KeyboardEvent;
 
 use crate::feed::{Feed, Reach};
-use crate::profiles::Server;
 use crate::route::{Route, Shard, parse_room};
 use crate::saved::{BOUNDS_MAX_AGE_MS, Bounds};
 use crate::session;

@@ -15,6 +15,7 @@ overseer-net = { path = "crates/overseer-net" }
 overseer = { path = "crates/overseer" }
 overseer-view = { path = "crates/overseer-view" }
 overseer-proxy = { path = "crates/overseer-proxy" }
+overseer-storage = { path = "crates/overseer-storage" }
 async-tungstenite = { version = "0.32", features = ["tokio-runtime"] }
 base64 = "0.23"
 bytemuck = { version = "1.25", features = ["derive"] }
@@ -43,7 +44,6 @@ console_error_panic_hook = "0.1"
 # Class sets of the app's Tailwind styling, composed at compile time (`concatcp!`).
 const_format = "0.2"
 js-sys = "0.3"
-keyring = "3.6"
 leptos = { version = "0.8", features = ["csr"] }
 tauri = { version = "2.12", features = [] }
 tauri-build = { version = "2.5", features = [] }
@@ -51,6 +51,10 @@ tauri-plugin-opener = "2.7"
 tauri-plugin-window-state = "2.5"
 # Room renderer: WebGPU and WebGL2 in browsers, no native backend (see overseer-view).
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
+# overseer-storage: the configuration directory (the one of Tauri's `app_config_dir`, which
+# `dirs` 7 resolves too) and secrets in the OS credential store.
+dirs = "7"
+keyring = "3.6"
 # overseer-proxy: HTTP server, static files, logs and the binary's command line.
 clap = "4.6"
 http-body-util = "0.1"

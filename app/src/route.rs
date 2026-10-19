@@ -11,7 +11,7 @@
 //! | `#/<server>/@profile` | [`Route::Profile`]: the signed-in account |
 //! | `#/<server>/@user/<name>` | [`Route::User`]: a player's public profile |
 //!
-//! `<server>` is the stable slug of a saved server ([`crate::profiles::Profiles::slug`]),
+//! `<server>` is the stable slug of a saved server ([`crate::profiles::Slugs::slug`]),
 //! `<shard>` a shard name or `-` on single-world servers ([`Shard::Single`]), `<room>` a world
 //! room name (any case; written upper-case; `console` is none), `<name>` a player name,
 //! percent-encoded. `@` starts the server's own pages, so it never begins a shard name.

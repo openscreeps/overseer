@@ -8,21 +8,19 @@
 //! | A rate-limit lift page, such as screeps.com's reset page ([`Platform::open_reset_page`]) | system browser; the app rechecks when its window regains focus | popup that keeps this page as its opener; the app resumes on the page's success message |
 //! | Popped-out rooms | a native window per route (`open_window`, size and position remembered) | `window.open` popup per route |
 //!
-//! Saved profiles ([`crate::profiles`]) and state ([`crate::saved`]) are in `localStorage`
-//! on both, the terrain cache ([`crate::terrain_cache`]) in `IndexedDB`.
+//! Saved profiles ([`overseer_storage::web`]) and state ([`crate::saved`]) are in
+//! `localStorage` on both, the terrain cache ([`crate::terrain_cache`]) in `IndexedDB`.
 
 use js_sys::{Function, Object, Promise, Reflect};
 use overseer::core::ServerUrl;
+use overseer_storage::profiles::Profiles;
+use overseer_storage::web;
 use url::Url;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use crate::connect::{ConnectTarget, PageProxy, connect_target};
-use crate::profiles::{self, Profiles};
 use crate::saved::{self, Saved};
-
-/// `localStorage` prefix of secrets in browsers.
-const SECRET_PREFIX: &str = "overseer.secret.";
 
 /// The platform the page runs on.
 #[derive(Clone, Debug)]
@@ -81,12 +79,7 @@ impl Platform {
                 .await?
                 .as_string())
         } else {
-            Ok(local_storage().and_then(|storage| {
-                storage
-                    .get_item(&format!("{SECRET_PREFIX}{key}"))
-                    .ok()
-                    .flatten()
-            }))
+            Ok(web::secret(key))
         }
     }
 
@@ -100,10 +93,7 @@ impl Platform {
             invoke("secret_set", &object(&[("key", key), ("value", value)])).await?;
             Ok(())
         } else {
-            local_storage()
-                .ok_or_else(|| "localStorage is unavailable".to_owned())?
-                .set_item(&format!("{SECRET_PREFIX}{key}"), value)
-                .map_err(|error| js_message(&error))
+            web::set_secret(key, value).map_err(|error| error.to_string())
         }
     }
 
@@ -117,10 +107,7 @@ impl Platform {
             invoke("secret_delete", &object(&[("key", key)])).await?;
             Ok(())
         } else {
-            local_storage()
-                .ok_or_else(|| "localStorage is unavailable".to_owned())?
-                .remove_item(&format!("{SECRET_PREFIX}{key}"))
-                .map_err(|error| js_message(&error))
+            web::delete_secret(key).map_err(|error| error.to_string())
         }
     }
 
@@ -222,9 +209,7 @@ impl Platform {
 
 /// The saved profiles.
 pub fn load_profiles() -> Profiles {
-    let json =
-        local_storage().and_then(|storage| storage.get_item(profiles::STORAGE_KEY).ok().flatten());
-    Profiles::parse(json.as_deref())
+    web::load_profiles()
 }
 
 /// The saved state.
@@ -292,10 +277,7 @@ pub fn replace_hash(hash: &str) {
 ///
 /// Returns a message when `localStorage` is unavailable or full.
 pub fn save_profiles(profiles: &Profiles) -> Result<(), String> {
-    local_storage()
-        .ok_or_else(|| "localStorage is unavailable".to_owned())?
-        .set_item(profiles::STORAGE_KEY, &profiles.to_json())
-        .map_err(|error| js_message(&error))
+    web::save_profiles(profiles).map_err(|error| error.to_string())
 }
 
 /// The page's `localStorage`.

@@ -18,6 +18,8 @@ futures-util.workspace = true
 leptos.workspace = true
 overseer.workspace = true
 overseer-view.workspace = true
+# The saved servers, and their `localStorage` in browsers (`web`).
+overseer-storage = { workspace = true, features = ["web"] }
 serde.workspace = true
 serde_json.workspace = true
 # `broadcast::error::RecvError` of the notices, `mpsc` of the world feed.

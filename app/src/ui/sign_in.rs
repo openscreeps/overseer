@@ -12,9 +12,9 @@ use overseer::core::Token;
 use overseer::model::platform::{ServerKind, Subsystem, Subsystems};
 use overseer::net::Api;
 use overseer::net::api::{AccountWebsite, PasswordSignIn as _};
+use overseer_storage::profiles::{Server, server_password_key};
 
 use crate::platform::Platform;
-use crate::profiles::{Server, server_password_key};
 use crate::rate_limits::page_host;
 use crate::route::Route;
 use crate::session::{self, Failure};
@@ -485,7 +485,8 @@ fn SignInForm(server: Server, methods: Methods, server_password: Option<String>)
 struct Attempt {
     /// Server base URL.
     url: String,
-    /// The contract to force ([`ServerKind::forced`](crate::profiles::ServerKind::forced)).
+    /// The contract to force
+    /// ([`ServerKind::forced`](overseer_storage::profiles::ServerKind::forced)).
     server_kind: Option<ServerKind>,
     /// Credentials or token.
     auth: Auth,

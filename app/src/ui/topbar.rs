@@ -12,11 +12,12 @@ use leptos::html::{Button, Div};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::ConnectionStatus;
+use overseer_storage::profiles::Profiles;
 use overseer_view::ViewMode;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, KeyboardEvent};
 
-use crate::profiles::Profiles;
+use crate::profiles::Slugs as _;
 use crate::route::{Route, Shard, parse_room};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
@@ -814,9 +815,9 @@ mod tests {
     use leptos::prelude::*;
     use leptos::reactive::effect::ImmediateEffect;
     use leptos::reactive::owner::Owner;
+    use overseer_storage::profiles::{Profiles, SavedUser, Server, ServerKind};
 
     use super::signed_in_account;
-    use crate::profiles::{Profiles, SavedUser, Server, ServerKind};
 
     const URL: &str = "http://127.0.0.1:21025/";
 

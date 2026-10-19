@@ -5,9 +5,9 @@ use std::fmt;
 use overseer::core::api::{INCORRECT_SERVER_PASSWORD, Refusal};
 use overseer::model::platform::ServerKind;
 use overseer::{Auth, Guest, Overseer, ServerProfile};
+use overseer_storage::profiles::server_password_key;
 
 use crate::platform::Platform;
-use crate::profiles::server_password_key;
 
 /// Why connecting or a request failed, as the UI treats it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +74,7 @@ pub fn describe(error: &dyn std::error::Error) -> String {
 
 /// Connects to the server with base URL `server` as `auth`, sending `server_password` or else
 /// the stored one, and forcing the contract `server_kind` unless `None`
-/// ([`ServerKind::forced`](crate::profiles::ServerKind::forced)).
+/// ([`ServerKind::forced`](overseer_storage::profiles::ServerKind::forced)).
 ///
 /// # Errors
 ///

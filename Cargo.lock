@@ -3566,6 +3566,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "overseer",
+ "overseer-storage",
  "overseer-view",
  "serde",
  "serde_json",
@@ -3580,9 +3581,9 @@ dependencies = [
 name = "overseer-app-tauri"
 version = "0.1.0"
 dependencies = [
- "keyring",
  "overseer-core",
  "overseer-proxy",
+ "overseer-storage",
  "serde",
  "tauri",
  "tauri-build",
@@ -3666,6 +3667,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "overseer-storage"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "js-sys",
+ "keyring",
+ "overseer-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

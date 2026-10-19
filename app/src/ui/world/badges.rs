@@ -8,11 +8,11 @@
 use leptos::prelude::*;
 use overseer::Overseer;
 use overseer::map::{DetailState, RoomRect, WorldEvent};
+use overseer_storage::profiles::Server;
 use overseer_view::Viewer;
 
 use super::MapState;
 use crate::badges::{BADGE_SIZE, Badges, room_wants, wanted};
-use crate::profiles::Server;
 use crate::ui::surface::Surface;
 
 /// Opens the badge loader of `server` (`overseer` connected to it) into `map.badges` for the

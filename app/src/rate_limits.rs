@@ -45,9 +45,9 @@ pub struct Actions {
 /// Whether lifting the rate limits (and the lifted state) applies to a session on a server
 /// that `lifts` them ([`Subsystem::RateLimitLift`](overseer::model::platform::Subsystem)),
 /// signed in with an API token or not
-/// ([`SavedUser::api_token`](crate::profiles::SavedUser::api_token); `None`, recorded before
-/// the app tracked it, keeps it since lifting reports a token it does not know): lifting
-/// applies to API tokens only.
+/// ([`SavedUser::api_token`](overseer_storage::profiles::SavedUser::api_token); `None`,
+/// recorded before the app tracked it, keeps it since lifting reports a token it does not
+/// know): lifting applies to API tokens only.
 pub const fn lift_applies(lifts: bool, api_token: Option<bool>) -> bool {
     lifts && !matches!(api_token, Some(false))
 }

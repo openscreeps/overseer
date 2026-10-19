@@ -18,21 +18,14 @@ tauri-build.workspace = true
 [dependencies]
 overseer-core.workspace = true
 overseer-proxy.workspace = true
+# Secrets in the OS credential store (the `secret_*` commands).
+overseer-storage.workspace = true
 serde.workspace = true
 tauri.workspace = true
 tauri-plugin-opener.workspace = true
 tauri-plugin-window-state.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 url.workspace = true
-
-# Secrets in the OS store: Windows Credential Manager, macOS Keychain, the Secret Service on
-# Linux.
-[target.'cfg(windows)'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native"] }
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
 
 [lints]
 workspace = true

@@ -3,9 +3,9 @@
 use leptos::html::Dialog;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use overseer_storage::profiles::{SEASON_URL, Server, ServerKind, server_password_key, token_key};
 
 use crate::platform::Platform;
-use crate::profiles::{SEASON_URL, Server, ServerKind, server_password_key};
 use crate::state::AppState;
 use crate::ui::icon::{Icon, IconKind};
 use crate::ui::style::{self, concatcp};
@@ -108,9 +108,7 @@ fn ServerItem(server: Server) -> impl IntoView {
             if live {
                 state.sign_out().await;
             }
-            let _ = platform
-                .secret_delete(&crate::profiles::token_key(&url))
-                .await;
+            let _ = platform.secret_delete(&token_key(&url)).await;
             let _ = platform.secret_delete(&server_password_key(&url)).await;
             // The cache is bounded anyway; a failure leaves rooms to be evicted later.
             #[cfg(target_arch = "wasm32")]

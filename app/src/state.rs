@@ -13,10 +13,11 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use overseer::{Auth, ConnectionStatus, Notice, Overseer};
+use overseer_storage::profiles::{Profiles, SavedUser, Server, token_key};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::platform::{self, Platform};
-use crate::profiles::{Profiles, SavedUser, Server, token_key};
+use crate::profiles::Slugs as _;
 use crate::route::Route;
 use crate::saved::Saved;
 use crate::session::{self, Failure};

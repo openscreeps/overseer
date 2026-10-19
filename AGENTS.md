@@ -34,7 +34,7 @@ The workspace denies all Clippy `pedantic` lints. `Cargo.toml` sets this in `[wo
 
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-app --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-storage -p overseer-app --target wasm32-unknown-unknown -- -D warnings
 ```
 
 ## File size: 1000 lines
@@ -103,7 +103,7 @@ cargo xtask codegen --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo check -p overseer-core --target wasm32-unknown-unknown
-cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-app --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-storage -p overseer-app --target wasm32-unknown-unknown -- -D warnings
 ```
 
 `mise run ci` runs the same checks.

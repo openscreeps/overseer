@@ -27,7 +27,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo check -p overseer-core --target wasm32-unknown-unknown
-      - run: cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-app --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo clippy -p overseer-net -p overseer -p overseer-web-demo -p overseer-view -p overseer-storage -p overseer-app --target wasm32-unknown-unknown -- -D warnings
       - run: cargo doc --workspace --no-deps
 
   # Live feature tests and Playwright UI tests against a disposable world in Docker
